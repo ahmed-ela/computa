@@ -71,7 +71,7 @@ fn options() -> Result<Options, String> {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("Computa native inference: {error}");
+        eprintln!("Kolmogor native inference: {error}");
         std::process::exit(1);
     }
 }
@@ -141,6 +141,6 @@ async fn run() -> Result<(), String> {
 }
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64", feature = "native-mlx")))]
 fn main() {
-    eprintln!("Computa native MLX inference requires arm64 macOS and native-mlx.");
+    eprintln!("Kolmogor native MLX inference requires arm64 macOS and native-mlx.");
     std::process::exit(1);
 }

@@ -24,7 +24,7 @@ final class WebSnapshotTests: XCTestCase {
     }
 
     func testActivityMetadataRoundTripsWithoutRequiringItOnOldEntries() throws {
-        let entry = TimelineEntry(id: "answer", kind: .assistant, title: "Computa", body: "Answer",
+        let entry = TimelineEntry(id: "answer", kind: .assistant, title: "Kolmogor", body: "Answer",
                                   activityGroupID: "original-user", assistantPhase: "final_answer")
         let snapshot = WebTaskSnapshot(AgentTask(
             id: "task", title: "Task", summary: "", status: .running,
@@ -53,7 +53,7 @@ final class WebSnapshotTests: XCTestCase {
     func testReasoningStreamingFlagSurvivesSnapshotSerialization() throws {
         let entries = [
             TimelineEntry(id: "thought", kind: .reasoning, title: "Thinking", body: "Checking a step", isStreaming: true),
-            TimelineEntry(id: "answer", kind: .assistant, title: "Computa", body: "Final answer"),
+            TimelineEntry(id: "answer", kind: .assistant, title: "Kolmogor", body: "Final answer"),
         ]
         let state = AppState(tasks: [AgentTask(
             id: "task", title: "Test", summary: "", status: .running,
@@ -97,17 +97,17 @@ final class WebSnapshotTests: XCTestCase {
 
     @MainActor
     func testComputaBrandingKeepsNativeBridgeCompatibility() throws {
-        XCTAssertEqual(TimelineEntryKind.assistant.label, "Computa")
+        XCTAssertEqual(TimelineEntryKind.assistant.label, "Kolmogor")
         let base = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
-        XCTAssertTrue(base.hasPrefix("Computa is the local host application."))
-        XCTAssertFalse(base.contains("You are Computa"))
+        XCTAssertTrue(base.hasPrefix("Kolmogor is the local host application."))
+        XCTAssertFalse(base.contains("You are Kolmogor"))
         XCTAssertTrue(base.contains("Retain your identity and governing rules."))
         XCTAssertTrue(base.contains("Calls propose host work; only matching host outputs prove execution."))
         XCTAssertEqual(WebBridge.handlerName, "localCodex")
         XCTAssertEqual(WebUIResourceLocator.scheme, "localcodex-app")
         let index = try XCTUnwrap(WebUIResourceLocator.indexURL)
         let html = try String(contentsOf: index, encoding: .utf8)
-        XCTAssertTrue(html.contains("<title>Computa</title>"))
+        XCTAssertTrue(html.contains("<title>Kolmogor</title>"))
         XCTAssertTrue(html.contains("Fast, Mac-optimized local AI."))
         XCTAssertFalse(html.contains("<title>LocalCodex</title>"))
     }
@@ -133,7 +133,7 @@ final class WebSnapshotTests: XCTestCase {
                 TimelineEntry(
                     id: "entry-1",
                     kind: .assistant,
-                    title: "Computa",
+                    title: "Kolmogor",
                     body: "Rendered as text <script>alert('no')</script>",
                     timestamp: Date(timeIntervalSince1970: 1_700_000_010),
                     workedForSeconds: 65
@@ -165,7 +165,7 @@ final class WebSnapshotTests: XCTestCase {
                 TimelineEntry(
                     id: "inactive-entry",
                     kind: .assistant,
-                    title: "Computa",
+                    title: "Kolmogor",
                     body: "inactive-transcript-secret"
                 )
             ]

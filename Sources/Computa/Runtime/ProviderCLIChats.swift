@@ -1,6 +1,6 @@
 import Foundation
 
-/// ACP session identifiers belong to the agent. The transcript and the task ID belong to Computa.
+/// ACP session identifiers belong to the agent. The transcript and the task ID belong to Kolmogor.
 actor ProviderCLIChats {
     struct Record: Codable {
         var task: AgentTask
@@ -71,7 +71,7 @@ actor ProviderCLIChats {
             if row.task.status == .running || row.task.status == .waiting {
                 row.task.status = .failed
                 row.task.entries.append(.init(kind: .system, title: "CLI session interrupted",
-                    body: "Computa closed before the CLI confirmed this turn."))
+                    body: "Kolmogor closed before the CLI confirmed this turn."))
                 try save(row)
             } else { records[row.task.id] = row }
         }
@@ -96,14 +96,14 @@ actor ProviderCLIChats {
     private func connection(_ provider: ProviderCLI, directory: URL, handler: @escaping AgentCLIConnection.MessageHandler) throws -> AgentCLIConnection {
         guard let executable = ProviderCLI.locate(provider.executable, directories: searchDirectories) else {
             let required = provider == .claude ? "Claude Code and its @agentclientprotocol/claude-agent-acp adapter" : provider.name
-            throw AgentCLIError.installationRequired("Install " + required + " in Terminal, then return to Computa.")
+            throw AgentCLIError.installationRequired("Install " + required + " in Terminal, then return to Kolmogor.")
         }
         var environment = AgentRuntimeIsolation.environment(inheriting: ProcessInfo.processInfo.environment,
             userHomePath: FileManager.default.homeDirectoryForCurrentUser.path, codexHomePath: root.path)
         environment.removeValue(forKey: "CODEX_HOME")
         environment["PATH"] = searchDirectories.joined(separator: ":")
         if provider == .claude {
-            guard let claude = ProviderCLI.locate("claude", directories: searchDirectories) else { throw AgentCLIError.installationRequired("Install Claude Code, run claude auth login in Terminal, then return to Computa.") }
+            guard let claude = ProviderCLI.locate("claude", directories: searchDirectories) else { throw AgentCLIError.installationRequired("Install Claude Code, run claude auth login in Terminal, then return to Kolmogor.") }
             // Claude Code uses the macOS short user name to locate its Keychain login.
             environment["USER"] = NSUserName()
             environment["CLAUDE_CODE_EXECUTABLE"] = claude.path
@@ -165,7 +165,7 @@ actor ProviderCLIChats {
             if provider == .opencode, let controller = browserController {
                 let capabilities = initResult["agentCapabilities"] as? [String: Any]
                 guard (capabilities?["mcpCapabilities"] as? [String: Any])?["http"] as? Bool == true else {
-                    throw AgentCLIError.unavailable("Update OpenCode to a version with HTTP MCP support to use Computa’s browser.")
+                    throw AgentCLIError.unavailable("Update OpenCode to a version with HTTP MCP support to use Kolmogor’s browser.")
                 }
                 let scope = ComputerTaskScope(userPrompt: prompt)
                 let bridge = OpenCodeBrowserBridge { [weak self] tool, input in
@@ -242,7 +242,7 @@ actor ProviderCLIChats {
                   !current.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AgentCLIError.protocolError("The CLI ended the turn without a completed answer.")
             }
-            await finish(id, turn: turn, entry: .init(id: current.item, kind: .assistant, title: "Computa",
+            await finish(id, turn: turn, entry: .init(id: current.item, kind: .assistant, title: "Kolmogor",
                 body: current.answer, assistantPhase: "final_answer"), status: .completed)
         } catch {
             await finish(id, turn: turn, entry: .init(kind: .system, title: "CLI task failed",

@@ -71,7 +71,7 @@ final class AppStateReasoningStreamingTests: XCTestCase {
         state.apply(.reasoningMessageUpdated(taskID: "first", itemID: "thought", text: "Checking another step"))
         XCTAssertTrue(state.selectedTask?.entries.first { $0.id == "thought" }?.isStreaming == true)
         state.apply(.timelineEntryAppended(taskID: "first", entry: TimelineEntry(
-            id: "answer", kind: .assistant, title: "Computa", body: "Final public answer"
+            id: "answer", kind: .assistant, title: "Kolmogor", body: "Final public answer"
         )))
         XCTAssertFalse(state.selectedTask?.entries.first { $0.id == "thought" }?.isStreaming ?? true)
         XCTAssertTrue(state.selectedTask?.entries.allSatisfy { $0.workedForSeconds == nil } == true)
@@ -115,7 +115,7 @@ final class AppStateReasoningStreamingTests: XCTestCase {
             )))
             if hasAnswer {
                 state.apply(.timelineEntryAppended(taskID: "first", entry: TimelineEntry(
-                    id: "answer", kind: .assistant, title: "Computa", body: "Public answer"
+                    id: "answer", kind: .assistant, title: "Kolmogor", body: "Public answer"
                 )))
             }
             state.apply(.taskStatusChanged(taskID: "first", status: .completed))

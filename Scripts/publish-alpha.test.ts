@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { checksumEntries, installerSources, parsePublishOptions, publishAlpha, verifyInstallerPayload, type PublishContext } from "./publish-alpha";
 
 const tag = "v0.1.2-alpha.3", repo = "owner/computa", source = "a".repeat(40);
-const stem = "Computa-0.1.2-alpha.3-arm64-signed-test";
+const stem = "Kolmogor-0.1.2-alpha.3-arm64-signed-test";
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const stages: string[] = [];
 afterEach(async () => { for (const stage of stages.splice(0)) await rm(stage, { recursive: true, force: true }); });
@@ -220,12 +220,12 @@ async function installerFixture() {
     const bytes = Buffer.from(path.endsWith("uv.lock.json") ? '{"schemaVersion":1,"version":"fixture"}' : `tagged ${path}\n`);
     sources.set(path, bytes); await writeFile(join(mount, path), bytes);
   }
-  await chmod(join(mount, "Install Computa.command"), 0o755);
+  await chmod(join(mount, "Install Kolmogor.command"), 0o755);
   const manifest = { version: "0.1.2-alpha.3", channel: "signed-test", uvPin: { schemaVersion: 1, version: "fixture" },
     modelManifestSHA256: digest(sources.get("Installer/mlx-model.lock.json")!),
     requirementsSHA256: digest(sources.get("Installer/mlx-runtime-requirements.lock")!) };
   await writeFile(join(mount, "release-manifest.json"), JSON.stringify(manifest));
-  await writeFile(join(mount, "READ ME.txt"), "Computa 0.1.2-alpha.3\nChannel: signed-test. Not notarized\n");
+  await writeFile(join(mount, "READ ME.txt"), "Kolmogor 0.1.2-alpha.3\nChannel: signed-test. Not notarized\n");
   const refresh = async () => {
     const paths = [...sources.keys(), "READ ME.txt", "release-manifest.json"];
     await writeFile(join(mount, "SHA256SUMS"), (await Promise.all(paths.map(async path => `${digest(await readFile(join(mount, path)))}  ${path}\n`))).join(""));
@@ -239,7 +239,7 @@ test("complete installer payload matches checksums, tagged source, dependency pi
 
 test("missing, corrupted and rechecksummed changed installers are rejected", async () => {
   for (const failure of ["missing", "changed", "rechecksummed"]) {
-    const f = await installerFixture(), command = join(f.mount, "Install Computa.command");
+    const f = await installerFixture(), command = join(f.mount, "Install Kolmogor.command");
     if (failure === "missing") await rm(command); else await writeFile(command, "changed installer\n");
     if (failure === "rechecksummed") await f.refresh();
     await expect(verifyInstallerPayload(f.mount, f.manifest, f.sources)).rejects.toThrow();
@@ -251,7 +251,7 @@ test("installer metadata and guide mismatches are rejected despite valid inner c
     const f = await installerFixture();
     if (failure === "pin") f.manifest.requirementsSHA256 = "b".repeat(64);
     if (failure === "guide") { await writeFile(join(f.mount, "READ ME.txt"), "wrong version, notarized\n"); await f.refresh(); }
-    if (failure === "mode") await chmod(join(f.mount, "Install Computa.command"), 0o644);
+    if (failure === "mode") await chmod(join(f.mount, "Install Kolmogor.command"), 0o644);
     await expect(verifyInstallerPayload(f.mount, f.manifest, f.sources)).rejects.toThrow();
   }
 });

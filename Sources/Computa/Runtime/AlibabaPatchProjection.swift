@@ -34,7 +34,7 @@ enum AlibabaPatchProjection: Sendable, Equatable {
         Supply one JSON arguments object. operations is an array of operation objects, even for one file; never a JSON-encoded array or patch string.
         An update uses update (observed absolute path), hunks (array), and each hunk's lines (array of strings). Each lines element is one source line: ASCII space (keep), + (add), or - (remove), then exact source characters including indentation. Blank source lines are " ", "+", or "-". No element may contain decoded CR, LF or NUL.
         For add, supply add and unprefixed lines. Delete uses delete. Only update may use move_to. An optional anchor is exact observed context; empty means unnamed; later hunks need an anchor. end_of_file is true only to anchor the last hunk at EOF.
-        Computa emits native headers and @@ markers; do not add separate patch control records. Replace example paths/lines with observed source. Prior native custom calls remain original literal input in history, not examples of this function's JSON arguments.
+        Kolmogor emits native headers and @@ markers; do not add separate patch control records. Replace example paths/lines with observed source. Prior native custom calls remain original literal input in history, not examples of this function's JSON arguments.
         """
 
     static let updateExample = #"{"operations":[{"update":"/absolute/path/file.py","hunks":[{"lines":[" def f():","-    old()","+    new()"," "]}]}]}"#

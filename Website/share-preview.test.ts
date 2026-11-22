@@ -11,11 +11,11 @@ test('the static homepage advertises a public logo with matching image metadata'
   }).transform(html);
 
   expect(tags.get('og:type')).toBe('website');
-  expect(tags.get('og:title')).toBe('Computa');
+  expect(tags.get('og:title')).toBe('Kolmogor');
   expect(tags.get('og:description')).toBeTruthy();
-  expect(tags.get('og:url')).toBe('https://computa.wtf/');
+  expect(tags.get('og:url')).toBe('https://kolmogor.com/');
   const image = new URL(tags.get('og:image')!);
-  expect(image.origin).toBe('https://computa.wtf');
+  expect(image.origin).toBe('https://kolmogor.com');
   expect(tags.get('og:image:type')).toBe('image/png');
   expect(tags.get('og:image:alt')).toBeTruthy();
   expect(tags.get('twitter:card')).toBe('summary_large_image');

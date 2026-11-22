@@ -52,7 +52,7 @@ final class EmbeddedBrowserSession {
 
         var errorDescription: String? {
             switch self {
-            case .tabLimit(let limit): "This browser allows up to \(limit) tabs, including background model sessions. Close a browser tab before opening another; restart Computa if only retained model sessions remain."
+            case .tabLimit(let limit): "This browser allows up to \(limit) tabs, including background model sessions. Close a browser tab before opening another; restart Kolmogor if only retained model sessions remain."
             case .tabClosed: "That browser tab is no longer open."
             case .sessionClosed: "This browser session has ended."
             case .modelTabPrivate: "Model sessions run privately in the background. Open a regular browser tab to visit the website."

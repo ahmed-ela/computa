@@ -116,7 +116,7 @@ actor HeadlessMLXServer {
             case .timedOut: "The owned MLX server did not become ready within its startup deadline. No prompt was sent."
             case .exited: "The owned MLX server exited. Check the local Python environment and bundled server. No prompt was sent."
             case .stopped: "The owned MLX server is stopped."
-            case .unsupportedModel: "This saved model is not supported by Computa's headless MLX backend. Select Qwen 4B or 9B, or explicitly use an external local server. No model was switched and no prompt was sent."
+            case .unsupportedModel: "This saved model is not supported by Kolmogor's headless MLX backend. Select Qwen 4B or 9B, or explicitly use an external local server. No model was switched and no prompt was sent."
             case .busy: "The owned local model is busy with another turn, submission, or context operation. Wait for it to finish before switching models or sending another task. No model was switched and no prompt was sent."
             case .cleanup(let issues): "MLX server cleanup could not be verified: \(issues.joined(separator: "; "))"
             }

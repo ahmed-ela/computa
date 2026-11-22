@@ -599,7 +599,7 @@ final class ComputerV2ToolContractTests: XCTestCase {
         let instructions = CodexAppServerRuntime.Configuration.localQwen.baseInstructions
         XCTAssertTrue(instructions.contains("Native computer UI tasks bind each turn with computer_v2_open"))
         XCTAssertTrue(instructions.contains("CLI commands need no app binding"))
-        XCTAssertTrue(instructions.contains("Webpages use the offered browser_* tools in Computa's built-in browser"))
+        XCTAssertTrue(instructions.contains("Webpages use the offered browser_* tools in Kolmogor's built-in browser"))
         XCTAssertTrue(instructions.contains("Continue observations with their own tool's next_cursor"))
         XCTAssertFalse(instructions.contains("computer_v2_tabs"))
         XCTAssertFalse(instructions.contains("computer_v2_bind_tab"))

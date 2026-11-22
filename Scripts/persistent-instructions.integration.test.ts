@@ -23,7 +23,7 @@ async function runtimeResources() {
     if (!explicit.startsWith("/")) throw new Error("Resources must be absolute.");
     return explicit;
   }
-  for (const resources of [join(homedir(), "Applications/Computa.app/Contents/Resources"),
+  for (const resources of [join(homedir(), "Applications/Kolmogor.app/Contents/Resources"),
     join(root, "Sources/Computa/Resources")]) {
     try {
       await lstat(join(resources, "AgentRuntime/manifest.json"));

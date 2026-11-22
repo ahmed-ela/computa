@@ -1442,7 +1442,7 @@ final class WebModelServerTests: XCTestCase {
             ["type": "message", "role": role, "content": [["type": "input_text", "text": text]]]
         }
         let input = [message("developer", "Synthetic native developer prelude"), message("user", environment),
-            message("user", "Computa latency benchmark \(nonce). Reply with exactly HI. Do not use tools."
+            message("user", "Kolmogor latency benchmark \(nonce). Reply with exactly HI. Do not use tools."
                 + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy())]
         // The adversarial second reply is an inert protocol fixture. No command is
         // executed; it proves capture cannot bypass ordinary single-action selection.
@@ -4089,9 +4089,9 @@ final class WebModelServerTests: XCTestCase {
         let deepSeek = WebsiteModeChoice(deepSeekMode: .chat).requestID
         let cases = [
             (kimi, deepSeek, "Open Kimi from the model picker. Sign in on its setup tab, then choose Load models. Start a new task once your models appear."),
-            (deepSeek, kimi, "Sign in to DeepSeek in a regular tab in Computa's browser. With Computa idle, return to the DeepSeek chat home at chat.deepseek.com so Computa can verify your sign-in before you start a new task."),
+            (deepSeek, kimi, "Sign in to DeepSeek in a regular tab in Kolmogor's browser. With Kolmogor idle, return to the DeepSeek chat home at chat.deepseek.com so Kolmogor can verify your sign-in before you start a new task."),
         ]
-        let legacy = #"{"error":{"code":"sign_in_required","message":"Sign in to the selected AI website in Computa's built-in browser, then refresh website models before retrying.","param":null,"required_action":"sign_in","retryable":false,"type":"model_error"}}"#
+        let legacy = #"{"error":{"code":"sign_in_required","message":"Sign in to the selected AI website in Kolmogor's built-in browser, then refresh website models before retrying.","param":null,"required_action":"sign_in","retryable":false,"type":"model_error"}}"#
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("ComputaSignInHistory-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = WebsiteTurnFailureStore(directory: root)

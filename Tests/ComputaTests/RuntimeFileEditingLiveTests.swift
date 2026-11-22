@@ -562,7 +562,7 @@ private actor NativePatchInferenceFixture: WebModelTransport {
                 let commandName = try XCTUnwrap(request.offeredToolNames.first { $0 == "exec_command" || $0.hasSuffix(".exec_command") })
                 let marker = commandMarkers[commandTurnRange.lowerBound + progress - 1]
                 observations.issuedCommandMarkers.append(marker)
-                let command = commandsOnly ? "/usr/bin/printf '%s\\n' '\(marker)'" : "/usr/bin/python3 -c 'from lib.greetings import greet; from helpers import multiply; assert greet(\"Computa\") == \"Hello, Computa!\"; assert multiply(2, 3) == 6; print(\"\(marker)\")'"
+                let command = commandsOnly ? "/usr/bin/printf '%s\\n' '\(marker)'" : "/usr/bin/python3 -c 'from lib.greetings import greet; from helpers import multiply; assert greet(\"Kolmogor\") == \"Hello, Kolmogor!\"; assert multiply(2, 3) == 6; print(\"\(marker)\")'"
                 response = String(decoding: try JSONSerialization.data(withJSONObject: ["type": "tool_calls", "calls": [["name": commandName, "arguments": ["cmd": command, "workdir": projectPath, "yield_time_ms": 10000, "max_output_tokens": 1000]]]]), as: UTF8.self)
             } else {
                 var commandCallIDs = Set<String>()

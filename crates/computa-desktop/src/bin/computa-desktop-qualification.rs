@@ -25,7 +25,7 @@ fn main() {
             })
         })();
         if let Err(error) = result {
-            eprintln!("Computa runtime qualification failed: {error}");
+            eprintln!("Kolmogor runtime qualification failed: {error}");
             std::process::exit(1);
         }
     }

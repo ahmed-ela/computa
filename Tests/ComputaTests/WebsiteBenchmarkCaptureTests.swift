@@ -283,7 +283,7 @@ final class WebsiteBenchmarkCaptureTests: XCTestCase {
 
     private let benchmarkNonce = UUID(uuidString: "cccccccc-1111-4222-8333-dddddddddddd")!
     private var benchmarkText: String {
-        "Computa latency benchmark \(benchmarkNonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
+        "Kolmogor latency benchmark \(benchmarkNonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
     }
     private var benchmarkEnvironment: String {
         "<environment_context>\n<cwd>/tmp/computa-empty-fixture</cwd>\n<shell>zsh</shell>\n<current_date>2026-10-18</current_date>\n<timezone>America/New_York</timezone>\n<filesystem><workspace_roots><root>/tmp/computa-empty-fixture</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
@@ -378,7 +378,7 @@ private final class BenchmarkCaptureFixture: Sendable {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
     func request(nonce other: UUID? = nil) throws -> WebModelResponseCodec.Request {
-        let text = "Computa latency benchmark \((other ?? nonce).uuidString.lowercased()). Reply with exactly HI. Do not use tools."
+        let text = "Kolmogor latency benchmark \((other ?? nonce).uuidString.lowercased()). Reply with exactly HI. Do not use tools."
             + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy()
         return try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
             "model": WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID,

@@ -133,7 +133,7 @@ struct ComputaApp: App {
     var body: some Scene {
         WindowGroup {
             if launchMode == .testHost {
-                Text("Computa test host — application runtime disabled")
+                Text("Kolmogor test host — application runtime disabled")
                     .padding()
                     .frame(minWidth: 480, minHeight: 120)
             } else {
@@ -205,13 +205,13 @@ final class ComputaAppDelegate: NSObject, NSApplicationDelegate {
 
         watchdog = Task { @MainActor in
             do { try await Task.sleep(for: .seconds(10)) } catch { return }
-            NSLog("Computa cleanup deadline expired; normal termination is continuing.")
+            NSLog("Kolmogor cleanup deadline expired; normal termination is continuing.")
             finishTermination(sender)
         }
         Task { @MainActor in
             let report = await state?.shutdownRuntime()
             if let report, !report.succeeded {
-                NSLog("Computa shutdown incomplete: %@", report.issues.joined(separator: "; "))
+                NSLog("Kolmogor shutdown incomplete: %@", report.issues.joined(separator: "; "))
             }
             finishTermination(sender)
         }

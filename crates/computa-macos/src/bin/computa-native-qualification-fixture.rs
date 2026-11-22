@@ -108,7 +108,7 @@ fn main() {
             false,
         )
     };
-    window.setTitle(&NSString::from_str("Computa disposable AX qualification"));
+    window.setTitle(&NSString::from_str("Kolmogor disposable AX qualification"));
     // SAFETY: the Rust retained window owns its lifetime throughout app.run;
     // closing must not cause AppKit to release that separately retained owner.
     unsafe { window.setReleasedWhenClosed(false) };

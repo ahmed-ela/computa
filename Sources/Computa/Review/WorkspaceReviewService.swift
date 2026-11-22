@@ -641,7 +641,7 @@ private enum ReviewGit {
         for key in configuration.stdout.split(separator: 0) {
             let lower = key.map { (65...90).contains($0) ? $0 + 32 : $0 }
             if lower.starts(with: prefix), endings.contains(where: { lower.suffix($0.count).elementsEqual($0) }) {
-                throw FileReviewError.unavailable("Computa's file review cannot run this repository's configured Git clean or process filters. Use your configured Git client for this repository.")
+                throw FileReviewError.unavailable("Kolmogor's file review cannot run this repository's configured Git clean or process filters. Use your configured Git client for this repository.")
             }
         }
     }

@@ -8,49 +8,49 @@ const root = resolve(import.meta.dir, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
 const source = (path: string) => read(`Sources/Computa/${path}`);
 
-describe("Computa product identity", () => {
+describe("Kolmogor product identity", () => {
   test("the Swift package and Xcode project use the renamed product", () => {
     const packageFile = read("Package.swift");
-    expect(packageFile).toContain('name: "Computa"');
-    expect(packageFile).toContain('.executable(name: "Computa", targets: ["Computa"])');
+    expect(packageFile).toContain('name: "Kolmogor"');
+    expect(packageFile).toContain('.executable(name: "Kolmogor", targets: ["Computa"])');
     expect(packageFile).toContain('path: "Sources/Computa"');
     expect(packageFile).toContain('path: "Tests/ComputaTests"');
     expect(packageFile).not.toContain('name: "HeyDash"');
 
     const project = read("project.yml");
-    expect(project).toMatch(/^name: Computa\s*$/m);
-    expect(project).toMatch(/^\s+PRODUCT_NAME: Computa\s*$/m);
+    expect(project).toMatch(/^name: Kolmogor\s*$/m);
+    expect(project).toMatch(/^\s+PRODUCT_NAME: Kolmogor\s*$/m);
     expect(project).toContain("path: Sources/Computa");
-    expect(project).toContain("INFOPLIST_FILE: Config/Computa-Info.plist");
-    const generatedProject = read("Computa.xcodeproj/project.pbxproj");
-    expect(generatedProject).toContain("Computa.app");
-    expect(generatedProject).toContain("Config/Computa-Info.plist");
+    expect(project).toContain("INFOPLIST_FILE: Config/Kolmogor-Info.plist");
+    const generatedProject = read("Kolmogor.xcodeproj/project.pbxproj");
+    expect(generatedProject).toContain("Kolmogor.app");
+    expect(generatedProject).toContain("Config/Kolmogor-Info.plist");
     expect(generatedProject).toContain("ComputaTests.xctest");
     expect(generatedProject).not.toContain("Macrouse.app");
   });
 
-  test("the application entry point and owned instruction classes use Computa", () => {
+  test("the application entry point and owned instruction classes use Kolmogor", () => {
     const app = source("ComputaApp.swift");
     expect(app).toContain("struct ComputaApp: App");
     expect(app).toContain("enum ComputaLaunchMode");
     expect(app).toContain("ComputaAppDelegate.self");
     expect(source("Runtime/ComputaAgentInstructions.swift")).toContain("ComputaAgentInstructions");
     expect(source("Runtime/ComputaRuntimeArtifact.swift")).toContain("struct ComputaRuntimeArtifact");
-    expect(source("Runtime/ComputaAgentInstructions.swift")).toContain("Computa is the local host application.");
+    expect(source("Runtime/ComputaAgentInstructions.swift")).toContain("Kolmogor is the local host application.");
     expect(source("Runtime/CodexAppServerRuntime.swift"))
       .toContain("baseInstructions: ComputaAgentInstructions.defaultRuntimeBaseInstructions");
   });
 
   test("native and web display branding agrees", () => {
-    const info = read("Config/Computa-Info.plist");
-    expect(info).toMatch(/<key>CFBundleDisplayName<\/key>\s*<string>Computa<\/string>/);
-    expect(info).toContain("Computa captures your display");
-    expect(source("Web/WebViewHost.swift")).toContain('window.title = "Computa"');
-    expect(read("WebUI/index.html")).toContain("<title>Computa</title>");
+    const info = read("Config/Kolmogor-Info.plist");
+    expect(info).toMatch(/<key>CFBundleDisplayName<\/key>\s*<string>Kolmogor<\/string>/);
+    expect(info).toContain("Kolmogor captures your display");
+    expect(source("Web/WebViewHost.swift")).toContain('window.title = "Kolmogor"');
+    expect(read("WebUI/index.html")).toContain("<title>Kolmogor</title>");
     const bundledUI = source("Resources/WebUI/index.html");
-    expect(bundledUI).toContain("<title>Computa</title>");
+    expect(bundledUI).toContain("<title>Kolmogor</title>");
     expect(bundledUI).not.toContain("<title>Macrouse</title>");
-    expect(JSON.parse(read("WebUI/package.json")).name).toBe("computa-web-ui");
+    expect(JSON.parse(read("WebUI/package.json")).name).toBe("kolmogor-web-ui");
     expect(read("WebUI/src/App.tsx")).not.toContain("HeyDash");
     expect(read("WebUI/vite.config.ts")).toContain("../Sources/Computa/Resources/WebUI");
   });

@@ -569,7 +569,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let (fixture, view, _, _) = try await readyInstantPrepareFixture()
         defer { fixture.shutdown() }
         try await resetMatchedProbePage(view)
-        let payload = "Computa synthetic café 🌍\n" + String(repeating: "x", count: 11_000)
+        let payload = "Kolmogor synthetic café 🌍\n" + String(repeating: "x", count: 11_000)
         let config = try await installMatchedProbe(view, payload: payload)
         try await sendMatchedProbeFixture(view, body: String(payload.prefix(1_024)), answer: "json", codeCopy: false)
         let labelOnly = try await waitForMatchedProbeState(view) { $0["userSHA256"] is String }
@@ -607,7 +607,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         let rawJSON = try await evaluate(view, "return globalThis.__computaMatchedBenchmarkProbeV1.read();", world: Self.matchedProbeWorld)
         let json = try XCTUnwrap(rawJSON as? String)
         XCTAssertLessThan(json.utf8.count, 4_096)
-        XCTAssertFalse(json.contains("Computa synthetic"))
+        XCTAssertFalse(json.contains("Kolmogor synthetic"))
         XCTAssertFalse(json.contains("\"text\":\"HI\""))
     }
 
@@ -765,7 +765,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
             let nonce = UUID(), task = UUID(), thread = UUID(), turn = UUID()
             let nonceText = nonce.uuidString.lowercased()
             let policy = ComputaAgentInstructions.runtimeInteractionPolicy()
-            let user = "Computa latency benchmark \(nonceText). Reply with exactly HI. Do not use tools."
+            let user = "Kolmogor latency benchmark \(nonceText). Reply with exactly HI. Do not use tools."
                 + "\n" + policy
             let input: [[String: Any]] = [
                 ["type": "message", "role": "user", "content": [["type": "input_text", "text":
@@ -5666,9 +5666,9 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
         for gate in [failure, .signInRequired, .usageLimited(.claude)] {
             XCTAssertTrue(gate.blocksProviderUntilRefresh)
             if case .usageLimited = gate {
-                XCTAssertTrue(gate.localizedDescription.contains("After your account's limit resets, restart Computa, then start a fresh task"))
+                XCTAssertTrue(gate.localizedDescription.contains("After your account's limit resets, restart Kolmogor, then start a fresh task"))
             } else if case .humanVerificationRequired(.gemini) = gate {
-                XCTAssertTrue(gate.localizedDescription.contains("While Computa is idle, open or reload https://gemini.google.com/app"))
+                XCTAssertTrue(gate.localizedDescription.contains("While Kolmogor is idle, open or reload https://gemini.google.com/app"))
                 XCTAssertFalse(gate.localizedDescription.contains("refresh website models"))
             } else {
                 XCTAssertTrue(gate.localizedDescription.contains("refresh website models"))

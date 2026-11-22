@@ -33,17 +33,17 @@ pub struct RuntimeArtifact {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum ArtifactError {
-    #[error("Computa's dedicated Agent Runtime is missing or unreadable: {0}")]
+    #[error("Kolmogor's dedicated Agent Runtime is missing or unreadable: {0}")]
     Io(#[from] io::Error),
-    #[error("Computa's dedicated Agent Runtime manifest is invalid.")]
+    #[error("Kolmogor's dedicated Agent Runtime manifest is invalid.")]
     Manifest,
-    #[error("Computa's dedicated Agent Runtime rejected an unsafe file.")]
+    #[error("Kolmogor's dedicated Agent Runtime rejected an unsafe file.")]
     UnsafeFile,
-    #[error("Computa's dedicated Agent Runtime changed while being verified.")]
+    #[error("Kolmogor's dedicated Agent Runtime changed while being verified.")]
     Changed,
-    #[error("Computa's dedicated Agent Runtime checksum does not match its manifest.")]
+    #[error("Kolmogor's dedicated Agent Runtime checksum does not match its manifest.")]
     Checksum,
-    #[error("Computa's dedicated Agent Runtime requires a thin macOS arm64 executable.")]
+    #[error("Kolmogor's dedicated Agent Runtime requires a thin macOS arm64 executable.")]
     Architecture,
 }
 impl RuntimeArtifact {

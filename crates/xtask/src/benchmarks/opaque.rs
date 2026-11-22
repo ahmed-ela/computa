@@ -1042,7 +1042,7 @@ fn prepare_perception(options: &OpaqueRunOptions) -> Result<(PerceptionRunner, V
         instructions.starts_with("You are HeyDash.")
             || instructions.starts_with("You are Macndash.")
             || (matches!(observer, ObservationMode::RustBoundary { .. })
-                && instructions.starts_with("You are Computa.")),
+                && instructions.starts_with("You are Kolmogor.")),
         "original_instructions_required",
     )?;
     let provenance = json!({"baselineRolloutSHA256":hash(rollout),"manifestSHA256":hash(manifest_raw),"actualObservationSHA256":hash(actual_raw),"instructionsSHA256":hash(&instructions),"inheritedPolicySHA256":hash(inherited["content"].to_string()),"formatterSHA256":hash(include_bytes!("opaque.rs")),"nativeOCRSHA256":hash(include_bytes!("../../../computa-macos/src/benchmark_image.rs")),"runnerSHA256":hash(include_bytes!("opaque.rs")),"supportSHA256":hash(include_bytes!("opaque.rs")),"casesSHA256":hash(json!(cases).to_string()),"fixtureProtocol":"computa-rust-opaque-v1","legacyFixtureSourceSHA256":hash(LEGACY_OPAQUE_DATA),"observer":options.observation});

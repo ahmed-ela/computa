@@ -14,7 +14,7 @@ final class WorkspaceReviewServiceTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         service = WorkspaceReviewService()
         _ = try git(["init", "-q"])
-        _ = try git(["config", "user.name", "Computa review fixture"])
+        _ = try git(["config", "user.name", "Kolmogor review fixture"])
         _ = try git(["config", "user.email", "fixture@example.invalid"])
         try write("code.swift", "let number = 1\nlet name = \"original\"\n")
         _ = try git(["add", "."])
@@ -462,7 +462,7 @@ final class WorkspaceReviewServiceTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "Git diff still executes a clean filter")
         try FileManager.default.removeItem(at: marker)
         await assertContentFilterRejected { _ = try await self.load(.unstaged) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "Computa must reject before status or diff runs the helper")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), "Kolmogor must reject before status or diff runs the helper")
     }
 
     func testConfiguredProcessFilterIsRejectedBeforeItsHelperCanExecute() async throws {

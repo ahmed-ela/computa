@@ -298,7 +298,7 @@ final class RuntimeContextLiveTests: XCTestCase {
                 + "continuedReadOnlyToolCalls=\(audit.successfulStatusTools - precedingToolCount)\n"
                 + "retentionCanaryVerified=\(retained)\nprotocolTrace=\(root.path)/protocol.jsonl\n"
             let attachment = XCTAttachment(string: proof)
-            attachment.name = "Computa context compaction evidence"
+            attachment.name = "Kolmogor context compaction evidence"
             attachment.lifetime = .keepAlways
             add(attachment)
             print(proof)

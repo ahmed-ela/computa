@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-/// Bounded, single-request HTTP/1.1 framing shared by Computa's loopback services.
+/// Bounded, single-request HTTP/1.1 framing shared by Kolmogor's loopback services.
 enum LoopbackHTTP {
     enum Failure: Error { case invalidRequest, disconnected }
 

@@ -45,7 +45,7 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
     }
 
     func testInvalidChatGPTCookieSourceOffersOptionalManualRecoveryOnly() throws {
-        let expected = "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed. In a regular ChatGPT tab in Computa, try signing out and back in before starting a new task."
+        let expected = "Private ChatGPT browser profile preparation rejected the source cookie state. No prompt was replayed. In a regular ChatGPT tab in Kolmogor, try signing out and back in before starting a new task."
         let failure = ChatGPTInferenceCookieSeed.Failure.invalidSource
         let body = try WebModelServer.errorBody(for: failure)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])

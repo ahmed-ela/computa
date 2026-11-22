@@ -82,7 +82,7 @@ pub fn check_prerequisites(root: &Path, wasm_bindgen: &str, runner: &dyn Runner)
     crate::version::read(root)?;
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         return Err(distribution::invalid(
-            "Computa requires Apple Silicon macOS",
+            "Kolmogor requires Apple Silicon macOS",
         ));
     }
     if !version_at_least(
@@ -130,7 +130,7 @@ pub fn check_prerequisites(root: &Path, wasm_bindgen: &str, runner: &dyn Runner)
     for source in [
         "Cargo.lock",
         "rust-toolchain.toml",
-        "Config/Computa-Info.plist",
+        "Config/Kolmogor-Info.plist",
         "Runtime/codex-source.lock.json",
         "Runtime/patches/compaction-retention.patch",
         "Scripts/mlx-model.lock.json",
@@ -161,9 +161,9 @@ fn require_product_profile(debug_assertions: bool) -> io::Result<()> {
 fn render_info_plist(template: &str, version: &crate::version::AppVersion) -> io::Result<String> {
     let plist = template
         .replace("$(DEVELOPMENT_LANGUAGE)", "en")
-        .replace("$(EXECUTABLE_NAME)", "Computa")
+        .replace("$(EXECUTABLE_NAME)", "Kolmogor")
         .replace("$(PRODUCT_BUNDLE_IDENTIFIER)", distribution::BUNDLE_ID)
-        .replace("$(PRODUCT_NAME)", "Computa")
+        .replace("$(PRODUCT_NAME)", "Kolmogor")
         .replace("$(PRODUCT_BUNDLE_PACKAGE_TYPE)", "APPL")
         .replace("$(MARKETING_VERSION)", &version.marketing)
         .replace("$(CURRENT_PROJECT_VERSION)", &version.build)
@@ -210,13 +210,13 @@ pub fn build_app(
         .prefix("build-")
         .tempdir_in(&products)?
         .keep();
-    let app = stage.join("Computa.app");
+    let app = stage.join("Kolmogor.app");
     let contents = app.join("Contents");
     fs::create_dir_all(contents.join("MacOS"))?;
     fs::create_dir_all(contents.join("Resources"))?;
     fs::copy(
         root.join("target/release/computa-desktop"),
-        contents.join("MacOS/Computa"),
+        contents.join("MacOS/Kolmogor"),
     )?;
     for resource in ["WebUI", "AgentRuntime"] {
         crate::assets::copy_tree(
@@ -257,7 +257,7 @@ pub fn build_app(
         fs::write(contents.join("Resources").join(name), bytes)?;
     }
     let plist = render_info_plist(
-        &fs::read_to_string(root.join("Config/Computa-Info.plist"))?,
+        &fs::read_to_string(root.join("Config/Kolmogor-Info.plist"))?,
         &version,
     )?;
     fs::write(contents.join("Info.plist"), plist)?;
@@ -349,7 +349,7 @@ mod tests {
         )
         .unwrap();
         let rendered =
-            render_info_plist(include_str!("../../../Config/Computa-Info.plist"), &version)
+            render_info_plist(include_str!("../../../Config/Kolmogor-Info.plist"), &version)
                 .unwrap();
         assert!(
             rendered.contains("<key>CFBundleShortVersionString</key>\n\t<string>0.1.1</string>")

@@ -715,7 +715,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
             let current = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
             let fields = try XCTUnwrap(current["error"] as? [String: Any])
             XCTAssertEqual(fields["message"] as? String,
-                "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, restart Computa, then start a fresh task.")
+                "\(provider.displayName)'s website usage limit has been reached. After your account's limit resets, restart Kolmogor, then start a fresh task.")
             XCTAssertEqual(fields["code"] as? String, "website_usage_limit")
             XCTAssertEqual(fields["required_action"] as? String, "wait_for_quota_reset")
             XCTAssertEqual(fields["retryable"] as? Bool, false)
@@ -759,7 +759,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
             let fields = try XCTUnwrap(envelope["error"] as? [String: Any])
             let message = try XCTUnwrap(fields["message"] as? String)
             let mutations: [[String: Any]] = [["message": message + " "], ["message": message.replacingOccurrences(of: "Claude", with: "Gemini")],
-                ["message": "Restart Computa to reset quota."], ["retryable": true], ["retryable": 0],
+                ["message": "Restart Kolmogor to reset quota."], ["retryable": true], ["retryable": 0],
                 ["required_action": "retry_send"], ["type": "server_error"], ["code": "internal_error"],
                 ["param": "input"], ["pageText": "PRIVATE_PAGE_TEXT"]]
             for mutation in mutations {
@@ -1029,7 +1029,7 @@ final class WebsiteFailureHistoryTests: XCTestCase {
         let bytes = try WebModelServer.errorBody(for: failure)
         let expected = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
         XCTAssertEqual(WebModelServer.errorPresentation(for: failure).status, "500 Internal Server Error",
-            "Persistence fixes the durable Computa diagnosis without changing the bundled runtime mapping")
+            "Persistence fixes the durable Kolmogor diagnosis without changing the bundled runtime mapping")
         let task = UUID().uuidString, thread = UUID().uuidString, turnID = UUID().uuidString.lowercased()
         let earlier = UUID().uuidString.lowercased()
         let record = try XCTUnwrap(WebsiteTurnFailureStore.Record.make(taskID: task, threadID: thread,

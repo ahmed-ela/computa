@@ -33,7 +33,7 @@
   const rows = [];
   // A different, explicit native purpose enables this finite diagnostic.
   // It observes the site's existing decoder, never a response stream or a reply
-  // accepted by Computa. No module factory or protected parser is replaced.
+  // accepted by Kolmogor. No module factory or protected parser is replaced.
   const captureDecodedEvents = config.captureDecodedEvents === true;
   const decoder = { state: 'pending', completionCalls: 0, programObservations: 0,
     recoveredNullObservations: 0, lastProgram: null,

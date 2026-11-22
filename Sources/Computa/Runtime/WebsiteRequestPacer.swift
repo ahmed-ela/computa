@@ -1,7 +1,7 @@
 import Foundation
 
 /// Serializes website submissions under a local rolling-budget policy. This is not a
-/// quota receipt: requests made outside Computa can still exhaust an account.
+/// quota receipt: requests made outside Kolmogor can still exhaust an account.
 /// A permit spans the actual Send await; each reserved cost expires one interval
 /// after it returns, even on failure. Waiting never dispatches or replays a request.
 actor WebsiteRequestPacer {

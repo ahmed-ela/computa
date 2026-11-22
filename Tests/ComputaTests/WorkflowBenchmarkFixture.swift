@@ -58,7 +58,7 @@ struct WorkflowBenchmarkFixture: Sendable {
         print('INTERACTIVE_RESULT=' + answer, flush=True)
         """ + "\n")
         try git(["init", "--quiet", "--initial-branch=main"])
-        try git(["config", "user.name", "Computa Workflow Fixture"])
+        try git(["config", "user.name", "Kolmogor Workflow Fixture"])
         try git(["config", "user.email", "fixture@example.invalid"])
         try git(["config", "commit.gpgsign", "false"])
         try git(["config", "core.hooksPath", "/dev/null"])

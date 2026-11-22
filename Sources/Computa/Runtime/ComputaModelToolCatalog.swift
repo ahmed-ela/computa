@@ -398,7 +398,7 @@ enum ComputaModelToolCatalog {
         guard !deferred.isEmpty, !entryTools.isEmpty else { return nil }
         return """
         COMPUTA_DEFERRED_BROWSER_CAPABILITIES:
-        This turn has no bound built-in browser page. Computa temporarily withholds
+        This turn has no bound built-in browser page. Kolmogor temporarily withholds
         these registered page tools from the callable catalog: \(deferred.sorted().joined(separator: ", ")).
         They are deferred until binding, not missing capabilities. An empty tab
         inventory does not mean webpage interaction is unavailable.
@@ -625,9 +625,9 @@ enum ComputaModelToolCatalog {
                 "default_service_tier": NSNull(), "available_access_programs": NSNull(),
                 "availability_nux": NSNull(), "upgrade": NSNull(),
                 // ModelsResponse requires an instruction template at catalog
-                // admission. Actual turns still receive Computa's explicit
+                // admission. Actual turns still receive Kolmogor's explicit
                 // model-specific base/developer instructions through App Server.
-                "model_messages": ["instructions_template": "Computa is the local host application. Retain your identity and governing rules. Calls propose host work; only matching host outputs prove execution. Follow the supplied local task constraints and offered tool contracts within those rules."],
+                "model_messages": ["instructions_template": "Kolmogor is the local host application. Retain your identity and governing rules. Calls propose host work; only matching host outputs prove execution. Follow the supplied local task constraints and offered tool contracts within those rules."],
                 "include_skills_usage_instructions": false, "include_plugin_usage_instructions": false,
                 "include_apps_usage_instructions": false, "supports_reasoning_summary_parameter": true,
                 "default_reasoning_summary": "auto", "support_verbosity": false,

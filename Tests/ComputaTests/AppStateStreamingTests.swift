@@ -38,12 +38,12 @@ final class AppStateStreamingTests: XCTestCase {
         state.apply(.assistantMessageDelta(taskID: task.id, itemID: "reply", delta: "Partial text"))
         let draft = try XCTUnwrap(state.selectedTask?.entries.last)
         state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-            id: "reply", kind: .assistant, title: "Computa", body: "Full authoritative answer",
+            id: "reply", kind: .assistant, title: "Kolmogor", body: "Full authoritative answer",
             timestamp: draft.timestamp.addingTimeInterval(5)
         )))
         state.apply(.assistantMessageDelta(taskID: task.id, itemID: "reply", delta: " stale"))
         state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-            id: "reply", kind: .assistant, title: "Computa", body: "Duplicate final"
+            id: "reply", kind: .assistant, title: "Kolmogor", body: "Duplicate final"
         )))
 
         let replies = try XCTUnwrap(state.selectedTask?.entries.filter { $0.kind == .assistant })
@@ -59,11 +59,11 @@ final class AppStateStreamingTests: XCTestCase {
     @MainActor
     func testDiscardRemovesOnlyDraftsAndDoesNotAllowThemToReappear() {
         var task = makeTask(id: "first")
-        task.entries = [TimelineEntry(id: "history", kind: .assistant, title: "Computa", body: "Saved")]
+        task.entries = [TimelineEntry(id: "history", kind: .assistant, title: "Kolmogor", body: "Saved")]
         let state = AppState(tasks: [task], preferences: isolatedTestPreferences())
         state.apply(.assistantMessageDelta(taskID: task.id, itemID: "accepted", delta: "Accepted"))
         state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-            id: "accepted", kind: .assistant, title: "Computa", body: "Accepted"
+            id: "accepted", kind: .assistant, title: "Kolmogor", body: "Accepted"
         )))
         state.apply(.assistantMessageDelta(taskID: task.id, itemID: "discarded", delta: "Unverified"))
         state.apply(.assistantMessagesDiscarded(taskID: task.id))
@@ -72,7 +72,7 @@ final class AppStateStreamingTests: XCTestCase {
 
         state.apply(.assistantMessageDelta(taskID: task.id, itemID: "discarded", delta: " late"))
         state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-            id: "discarded", kind: .assistant, title: "Computa", body: "Late final"
+            id: "discarded", kind: .assistant, title: "Kolmogor", body: "Late final"
         )))
         // A managed retry may stream a new item while the same turn is active.
         state.apply(.assistantMessageDelta(taskID: task.id, itemID: "retry", delta: "New attempt"))
@@ -93,7 +93,7 @@ final class AppStateStreamingTests: XCTestCase {
         state.selectTask(second.id)
         XCTAssertEqual(WebUISnapshot(state: state).tasks.last?.entries.first?.body, "Second")
         state.apply(.timelineEntryAppended(taskID: second.id, entry: TimelineEntry(
-            id: "reply", kind: .assistant, title: "Computa", body: "Second final"
+            id: "reply", kind: .assistant, title: "Kolmogor", body: "Second final"
         )))
         XCTAssertEqual(state.selectedTask?.entries.count, 1)
         XCTAssertEqual(state.selectedTask?.entries.first?.body, "Second final")
@@ -111,7 +111,7 @@ final class AppStateStreamingTests: XCTestCase {
             XCTAssertTrue(submitted)
             state.apply(.taskStatusChanged(taskID: task.id, status: .running))
             state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-                id: "commentary", kind: .assistant, title: "Computa", body: "Looking into it"
+                id: "commentary", kind: .assistant, title: "Kolmogor", body: "Looking into it"
             )))
             state.apply(.assistantMessageDelta(taskID: task.id, itemID: "unfinished", delta: "Incomplete"))
             state.apply(.taskStatusChanged(taskID: task.id, status: terminalStatus))
@@ -148,7 +148,7 @@ final class AppStateStreamingTests: XCTestCase {
             state.apply(.taskStatusChanged(taskID: task.id, status: .running))
             state.apply(.assistantMessageDelta(taskID: task.id, itemID: "before-tool", delta: "\n\n"))
             state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-                id: "before-tool", kind: .assistant, title: "Computa", body: completedWhitespace
+                id: "before-tool", kind: .assistant, title: "Kolmogor", body: completedWhitespace
             )))
             state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
                 id: "status-tool", kind: .tool, title: "computer_v2_status", body: "Succeeded"
@@ -156,7 +156,7 @@ final class AppStateStreamingTests: XCTestCase {
             state.apply(.assistantMessageDelta(taskID: task.id, itemID: "final", delta: "\n\nSTREAM_"))
             state.apply(.assistantMessageDelta(taskID: task.id, itemID: "final", delta: "TOOL_OK"))
             state.apply(.timelineEntryAppended(taskID: task.id, entry: TimelineEntry(
-                id: "final", kind: .assistant, title: "Computa", body: "\n\nSTREAM_TOOL_OK"
+                id: "final", kind: .assistant, title: "Kolmogor", body: "\n\nSTREAM_TOOL_OK"
             )))
             state.apply(.taskStatusChanged(taskID: task.id, status: .completed))
 
@@ -212,7 +212,7 @@ final class AppStateStreamingTests: XCTestCase {
         state.apply(.assistantMessageDelta(taskID: task.id, itemID: "snapshot", delta: "Partial"))
         var restored = task
         restored.entries = [TimelineEntry(
-            id: "snapshot", kind: .assistant, title: "Computa", body: "Authoritative saved answer"
+            id: "snapshot", kind: .assistant, title: "Kolmogor", body: "Authoritative saved answer"
         )]
         state.apply(.tasksSnapshot([restored]))
         state.apply(.assistantMessageDelta(taskID: task.id, itemID: "snapshot", delta: "Late"))

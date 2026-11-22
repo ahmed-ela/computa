@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Computa</string>
+	<string>Kolmogor</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -25,7 +25,7 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>SUFeedURL</key>
-	<string>https://computa.wtf/appcast.xml</string>
+	<string>https://kolmogor.com/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>+jYSB7wEIsZg+FWvMrZxY0XM0GU//IyAgEP1chDf7cc=</string>
 	<key>SUVerifyUpdateBeforeExtraction</key>
@@ -35,6 +35,6 @@
 	<key>SUAutomaticallyUpdate</key>
 	<false/>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Computa captures your display for local computer-use requests after you grant Screen Recording access.</string>
+	<string>Kolmogor captures your display for local computer-use requests after you grant Screen Recording access.</string>
 </dict>
 </plist>

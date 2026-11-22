@@ -15,7 +15,7 @@ final class AppStateActivityMetadataTests: XCTestCase {
         state.apply(.assistantMessagePhaseUpdated(taskID: "first", itemID: "comment", phase: "commentary"))
         state.apply(.assistantMessageDelta(taskID: "first", itemID: "comment", delta: "Checking it"))
         state.apply(.timelineEntryAppended(taskID: "first", entry: TimelineEntry(
-            id: "comment", kind: .assistant, title: "Computa", body: "Checking it now"
+            id: "comment", kind: .assistant, title: "Kolmogor", body: "Checking it now"
         )))
         state.apply(.timelineEntryAppended(taskID: "first", entry: TimelineEntry(
             id: "tool", kind: .tool, title: "Inspect", body: "Success"
@@ -29,7 +29,7 @@ final class AppStateActivityMetadataTests: XCTestCase {
             id: "thought", kind: .reasoning, title: "Thought", body: "Completed plan"
         )))
         state.apply(.timelineEntryAppended(taskID: "first", entry: TimelineEntry(
-            id: "answer", kind: .assistant, title: "Computa", body: "The final answer"
+            id: "answer", kind: .assistant, title: "Kolmogor", body: "The final answer"
         )))
         state.apply(.taskStatusChanged(taskID: "first", status: .completed))
 
@@ -53,7 +53,7 @@ final class AppStateActivityMetadataTests: XCTestCase {
         state.apply(.assistantMessagePhaseUpdated(taskID: "first", itemID: "answer", phase: "final_answer"))
         XCTAssertEqual(WebUISnapshot(state: state).tasks.first?.entries.last?.assistantPhase, "final_answer")
         state.apply(.timelineEntryAppended(taskID: "first", entry: TimelineEntry(
-            id: "answer", kind: .assistant, title: "Computa", body: "Authoritative answer", assistantPhase: "commentary"
+            id: "answer", kind: .assistant, title: "Kolmogor", body: "Authoritative answer", assistantPhase: "commentary"
         )))
         state.apply(.assistantMessagePhaseUpdated(taskID: "first", itemID: "answer", phase: "final_answer"))
         XCTAssertEqual(state.selectedTask?.entries.last?.assistantPhase, "commentary", "Late metadata cannot relabel a finalized item.")
@@ -139,7 +139,7 @@ final class AppStateActivityMetadataTests: XCTestCase {
             id: "thought", kind: .reasoning, title: "Thought", body: "Thought done"
         )))
         state.apply(.timelineEntryAppended(taskID: "first", entry: TimelineEntry(
-            id: "answer", kind: .assistant, title: "Computa", body: "Final answer", assistantPhase: "final_answer"
+            id: "answer", kind: .assistant, title: "Kolmogor", body: "Final answer", assistantPhase: "final_answer"
         )))
         state.apply(.taskStatusChanged(taskID: "first", status: .completed))
         XCTAssertNil(state.activeActivityGroupID(for: "first"))

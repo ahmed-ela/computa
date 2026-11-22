@@ -10,42 +10,42 @@ final class EmbeddedBrowserIdentityTests: XCTestCase {
 
     func testCompatibilityIdentityRequiresAnExactEngineBuildMatch() {
         XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: safari, webKit: webKit, appVersion: "0.7.0"),
-                       "Version/26.5 Safari/605.1.15 Computa/0.7.0")
+                       "Version/26.5 Safari/605.1.15 Kolmogor/0.7.0")
         let older = EmbeddedBrowserIdentity.Product(identifier: "com.apple.Safari", version: "18.6.1", build: "20621.3.11.11.4")
         XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: older, webKit: webKit, appVersion: "0.7.0"),
-                       "Computa/0.7.0", "Do not claim a Safari version with a different engine")
+                       "Kolmogor/0.7.0", "Do not claim a Safari version with a different engine")
         let newer = EmbeddedBrowserIdentity.Product(identifier: "com.apple.Safari", version: "27.0", build: "22630.1.1")
-        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: newer, webKit: webKit, appVersion: "0.7.0"), "Computa/0.7.0")
+        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: newer, webKit: webKit, appVersion: "0.7.0"), "Kolmogor/0.7.0")
     }
 
     func testIdentityTracksCorroboratedSafariVersionsRatherThanAPinnedLatestVersion() {
         for version in ["17.6", "18.6.1", "26.5", "27.1"] {
             let installed = EmbeddedBrowserIdentity.Product(identifier: "com.apple.Safari", version: version, build: webKit.build)
             XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: installed, webKit: webKit, appVersion: "0.8.2"),
-                           "Version/\(version) Safari/605.1.15 Computa/0.8.2")
+                           "Version/\(version) Safari/605.1.15 Kolmogor/0.8.2")
         }
     }
 
     func testUnavailableOrDifferentProductsDoNotInventSafariSupport() {
-        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: nil, webKit: webKit, appVersion: "0.7.0"), "Computa/0.7.0")
-        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: safari, webKit: nil, appVersion: "0.7.0"), "Computa/0.7.0")
+        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: nil, webKit: webKit, appVersion: "0.7.0"), "Kolmogor/0.7.0")
+        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: safari, webKit: nil, appVersion: "0.7.0"), "Kolmogor/0.7.0")
         let otherSafari = EmbeddedBrowserIdentity.Product(identifier: "com.apple.SafariTechnologyPreview", version: safari.version, build: safari.build)
         let otherEngine = EmbeddedBrowserIdentity.Product(identifier: "example.WebKit", version: webKit.version, build: webKit.build)
-        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: otherSafari, webKit: webKit, appVersion: "0.7.0"), "Computa/0.7.0")
-        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: safari, webKit: otherEngine, appVersion: "0.7.0"), "Computa/0.7.0")
+        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: otherSafari, webKit: webKit, appVersion: "0.7.0"), "Kolmogor/0.7.0")
+        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: safari, webKit: otherEngine, appVersion: "0.7.0"), "Kolmogor/0.7.0")
     }
 
     func testMalformedMetadataCannotInjectUserAgentTokens() {
         for malformed in ["", "26..5", " 26.5", "26.5 ", "26.5\r\nSafari/99", "26.5 Safari/99", "٢٦.٥", ".26", "26.", String(repeating: "1", count: 49)] {
             let product = EmbeddedBrowserIdentity.Product(identifier: safari.identifier, version: malformed, build: safari.build)
-            XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: product, webKit: webKit, appVersion: "0.7.0"), "Computa/0.7.0")
+            XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: product, webKit: webKit, appVersion: "0.7.0"), "Kolmogor/0.7.0")
             let invalidBuild = EmbeddedBrowserIdentity.Product(identifier: safari.identifier, version: safari.version, build: malformed)
             let matchingInvalidBuild = EmbeddedBrowserIdentity.Product(identifier: webKit.identifier, version: webKit.version, build: malformed)
-            XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: invalidBuild, webKit: matchingInvalidBuild, appVersion: "0.7.0"), "Computa/0.7.0")
+            XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: invalidBuild, webKit: matchingInvalidBuild, appVersion: "0.7.0"), "Kolmogor/0.7.0")
             XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: safari, webKit: webKit, appVersion: malformed),
-                           "Version/26.5 Safari/605.1.15 Computa")
+                           "Version/26.5 Safari/605.1.15 Kolmogor")
         }
-        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: nil, webKit: nil, appVersion: nil), "Computa")
+        XCTAssertEqual(EmbeddedBrowserIdentity.applicationName(safari: nil, webKit: nil, appVersion: nil), "Kolmogor")
     }
 
     @MainActor

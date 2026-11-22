@@ -209,9 +209,9 @@ pub fn run_with_options(options: Options) -> io::Result<()> {
     let proxy = event_loop.create_proxy();
     let window = WindowBuilder::new()
         .with_title(if options.fixture {
-            "Computa Rust UI Qualification"
+            "Kolmogor Rust UI Qualification"
         } else {
-            "Computa"
+            "Kolmogor"
         })
         .with_inner_size(LogicalSize::new(1200., 800.))
         .with_min_inner_size(LogicalSize::new(800., 560.))
@@ -634,7 +634,7 @@ impl Host {
             }
             DesktopEvent::ShutdownDone(issues) => {
                 if !issues.is_empty() {
-                    eprintln!("Computa shutdown: {}", issues.join("; "));
+                    eprintln!("Kolmogor shutdown: {}", issues.join("; "));
                 }
                 self.shutdown_done = true;
             }

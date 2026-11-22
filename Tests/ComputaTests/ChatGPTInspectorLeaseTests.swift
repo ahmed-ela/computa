@@ -493,7 +493,7 @@ final class SyntheticBenchmarkNativeFocusTests: XCTestCase {
             attributes: [.posixPermissions: 0o700])
         captureRoots.append(root)
         let nonce = UUID(), generation = try XCTUnwrap(browser.documentGeneration(for: id))
-        let user = "Computa latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
+        let user = "Kolmogor latency benchmark \(nonce.uuidString.lowercased()). Reply with exactly HI. Do not use tools."
             + "\n" + ComputaAgentInstructions.runtimeInteractionPolicy()
         let request = try WebModelResponseCodec.prepareRequest(JSONSerialization.data(withJSONObject: [
             "model": WebsiteModelChoice(provider: "chatgpt", key: "chat/latest/instant", label: "Instant").modelID,

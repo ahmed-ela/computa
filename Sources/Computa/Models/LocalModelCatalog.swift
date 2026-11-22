@@ -27,31 +27,31 @@ enum LocalModelCatalog {
         LocalModelOption(
             id: chatGPTBrowserModelID,
             label: "ChatGPT / Website default · Built-in browser",
-            detail: "Uses signed-in ChatGPT's website default in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
+            detail: "Uses signed-in ChatGPT's website default in Kolmogor's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(
             id: geminiBrowserModelID,
             label: "Gemini / Website default · Built-in browser",
-            detail: "Uses signed-in Gemini's website default in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
+            detail: "Uses signed-in Gemini's website default in Kolmogor's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the temporary website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(
             id: claudeBrowserModelID,
             label: "Claude / Website default · Built-in browser",
-            detail: "Uses signed-in Claude's website default in Incognito in Computa's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the Incognito website session closes after each turn.",
+            detail: "Uses signed-in Claude's website default in Incognito in Kolmogor's built-in browser with text and Accessibility tools; screenshots are unavailable. Chat history is saved locally; the Incognito website session closes after each turn.",
             highMemory: false
         ),
         LocalModelOption(
             id: groqBrowserModelID,
             label: "Groq / Website default · Built-in browser",
-            detail: "Uses Groq in Computa's built-in browser. Sign in to discover available models. Website limits still apply.",
+            detail: "Uses Groq in Kolmogor's built-in browser. Sign in to discover available models. Website limits still apply.",
             highMemory: false
         ),
         LocalModelOption(
             id: grokBrowserModelID,
             label: "Grok / Choose a model · Built-in browser",
-            detail: "Sign in to discover Grok models. Each website inference uses a new Private Chat in Computa's built-in browser; local history remains in Computa.",
+            detail: "Sign in to discover Grok models. Each website inference uses a new Private Chat in Kolmogor's built-in browser; local history remains in Kolmogor.",
             highMemory: false, available: false, selectable: false
         ),
         LocalModelOption(
@@ -69,13 +69,13 @@ enum LocalModelCatalog {
         LocalModelOption(
             id: "lmstudio-community/Qwen3.5-9B-MLX-4bit",
             label: "Qwen3.5-9B · MLX 4-bit",
-            detail: "5.98 GB model files. Runs in Computa's headless MLX backend using existing local weights.",
+            detail: "5.98 GB model files. Runs in Kolmogor's headless MLX backend using existing local weights.",
             highMemory: false
         ),
         LocalModelOption(
             id: "lmstudio-community/Qwen3.5-4B-MLX-4bit",
             label: "Qwen3.5-4B · MLX 4-bit",
-            detail: "3.06 GB model files. Fast, lower-memory default. Runs in Computa's headless MLX backend using existing local weights.",
+            detail: "3.06 GB model files. Fast, lower-memory default. Runs in Kolmogor's headless MLX backend using existing local weights.",
             highMemory: false
         ),
     ] + ["kimi", "qwen"].filter { WebsiteModelCatalog.providers.contains($0) }.map { provider in
@@ -83,7 +83,7 @@ enum LocalModelCatalog {
         return LocalModelOption(
             id: "browser/" + provider,
             label: "\(label) / Website default · Built-in browser",
-            detail: "Sign in to discover \(label) models. Each website inference uses a new saved conversation and verifies its deletion afterward; local history remains in Computa.",
+            detail: "Sign in to discover \(label) models. Each website inference uses a new saved conversation and verifies its deletion afterward; local history remains in Kolmogor.",
             highMemory: false, available: false
         )
     }

@@ -14,7 +14,7 @@ enum LocalModelServerPreflight {
         var errorDescription: String? {
             switch self {
             case .unsupportedConfiguration:
-                "The local model endpoint could not be safely checked. Computa requires an unauthenticated loopback inference endpoint. Review its provider configuration, then retry; no prompt was sent."
+                "The local model endpoint could not be safely checked. Kolmogor requires an unauthenticated loopback inference endpoint. Review its provider configuration, then retry; no prompt was sent."
             case .timedOut:
                 "The local model readiness check did not finish within two seconds. Check the local inference server and selected model, then retry; no prompt was sent."
             case .unavailable:

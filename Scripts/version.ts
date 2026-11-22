@@ -166,7 +166,7 @@ if (import.meta.main) {
       if (!args.length || (args.length === 1 && ["show", "check"].includes(args[0]))) version = await checkVersion(root);
       else if (args.length === 2 && args[0] === "bump" && ["major", "minor", "patch", "build"].includes(args[1])) version = await bumpVersion(root, args[1] as Bump);
       else throw new Error(help);
-      console.log(`Computa ${version.version} (${version.build})`);
+      console.log(`Kolmogor ${version.version} (${version.build})`);
     }
   } catch (error) { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; }
 }

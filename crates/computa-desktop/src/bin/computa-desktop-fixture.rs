@@ -25,7 +25,7 @@ fn main() {
             })
         })();
         if let Err(error) = result {
-            eprintln!("Computa UI qualification failed: {error}");
+            eprintln!("Kolmogor UI qualification failed: {error}");
             std::process::exit(1);
         }
     }

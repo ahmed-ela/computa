@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "computa-public-website",
+      "name": "kolmogor-public-website",
       "dependencies": {
         "octane": "0.4.0",
       },

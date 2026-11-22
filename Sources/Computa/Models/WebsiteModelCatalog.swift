@@ -262,10 +262,10 @@ enum WebsiteModelCatalog {
                 : selectable && choice.isChatComposerChoice
                 ? "Uses the \(choice.label) mode offered in your ChatGPT composer. ChatGPT chooses the underlying model."
                 : selectable && choice.provider == "chatgpt"
-                ? "Uses the newest available GPT family in ChatGPT Chat with \(choice.chatGPTPower?.label ?? choice.label) power. Computa verifies the website's family and power before sending and accepting a response. Website limits still apply."
+                ? "Uses the newest available GPT family in ChatGPT Chat with \(choice.chatGPTPower?.label ?? choice.label) power. Kolmogor verifies the website's family and power before sending and accepting a response. Website limits still apply."
                 : selectable
-                ? "Selects \(choice.label) in signed-in \(providerLabel(choice.provider)). Computa verifies the website's selected model before sending and accepting a response. Website limits still apply."
-                : "Saved website choice: \(choice.label). It is absent from the latest observed menu. Refresh website models after signing in; Computa will not substitute another model.",
+                ? "Selects \(choice.label) in signed-in \(providerLabel(choice.provider)). Kolmogor verifies the website's selected model before sending and accepting a response. Website limits still apply."
+                : "Saved website choice: \(choice.label). It is absent from the latest observed menu. Refresh website models after signing in; Kolmogor will not substitute another model.",
             highMemory: false, available: selectable)
     }
 

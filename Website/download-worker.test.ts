@@ -1,22 +1,22 @@
 import { expect, test } from 'bun:test';
-import { newestMacDownload } from './download-worker.js';
+import worker, { newestMacDownload } from './download-worker.js';
 
-const base = 'https://github.com/ahmed-ela/computa/releases';
+const base = 'https://github.com/ahmed-ela/kolmogor/releases';
 function alpha(build: number, overrides = {}) {
   const version = '0.8.0-alpha.' + build;
   return { tag_name: 'v' + version, published_at: '2026-11-18', draft: false,
-    assets: [{ name: 'Computa-' + version + '-arm64-signed-test.dmg', state: 'uploaded', size: 123 }],
+    assets: [{ name: 'Kolmogor-' + version + '-arm64-signed-test.dmg', state: 'uploaded', size: 123 }],
     ...overrides };
 }
 test('selects the highest published build with a ready macOS package', () => {
   expect(newestMacDownload([alpha(590, { draft: true }), alpha(588, { published_at: null }),
     alpha(587, { assets: [] }), alpha(363), alpha(584), alpha(585, { tag_name: 'broken' })]))
-    .toBe(base + '/download/v0.8.0-alpha.584/Computa-0.8.0-alpha.584-arm64-signed-test.dmg');
+    .toBe(base + '/download/v0.8.0-alpha.584/Kolmogor-0.8.0-alpha.584-arm64-signed-test.dmg');
 });
 test('prefers a notarized package and falls back to public releases when none are ready', () => {
   const release = alpha(584);
-  release.assets.push({ ...release.assets[0], name: 'Computa-0.8.0-alpha.584-arm64.dmg' });
-  expect(newestMacDownload([alpha(600), release, alpha(601)])).toBe(base + '/download/v0.8.0-alpha.584/Computa-0.8.0-alpha.584-arm64.dmg');
+  release.assets.push({ ...release.assets[0], name: 'Kolmogor-0.8.0-alpha.584-arm64.dmg' });
+  expect(newestMacDownload([alpha(600), release, alpha(601)])).toBe(base + '/download/v0.8.0-alpha.584/Kolmogor-0.8.0-alpha.584-arm64.dmg');
   expect(newestMacDownload([])).toBe(base);
 });
 
@@ -32,4 +32,26 @@ test('the update feed only follows published alphas with both a notarized disk i
   const candidates = [missing, { ...withFeed(591), draft: true }, signedTest];
   expect(newestMacDownload(candidates, true)).toBe(null);
   expect(newestMacDownload([...candidates, withFeed(587), withFeed(586)], true)).toBe(base + '/download/v0.8.0-alpha.587/appcast.xml');
+});
+
+test('existing Computa clients follow the same signed release across the rename', () => {
+  const legacy = alpha(626);
+  legacy.assets[0].name = legacy.assets[0].name.replace('Kolmogor-', 'Computa-').replace('-signed-test', '');
+  legacy.assets.push({ name: 'appcast.xml', state: 'uploaded', size: 128 });
+  const renamed = alpha(627);
+  renamed.assets[0].name = renamed.assets[0].name.replace('-signed-test', '');
+  renamed.assets.push({ name: 'appcast.xml', state: 'uploaded', size: 128 });
+  expect(newestMacDownload([legacy])).toEndWith('/' + legacy.assets[0].name);
+  expect(newestMacDownload([legacy], true)).toEndWith('/' + legacy.tag_name + '/appcast.xml');
+  expect(newestMacDownload([renamed, legacy])).toEndWith('/' + renamed.assets[0].name);
+  expect(newestMacDownload([legacy, renamed], true)).toEndWith('/' + renamed.tag_name + '/appcast.xml');
+});
+
+test('only the old homepage redirects to the canonical host', async () => {
+  const assets = { ASSETS: { fetch: () => new Response('Kolmogor') } };
+  const response = await worker.fetch(new Request('https://computa.wtf/?ref=share'), assets);
+  expect(response.status).toBe(301);
+  expect(response.headers.get('location')).toBe('https://kolmogor.com/?ref=share');
+  const homepage = await worker.fetch(new Request('https://kolmogor.com/'), assets);
+  expect(await homepage.text()).toBe('Kolmogor');
 });

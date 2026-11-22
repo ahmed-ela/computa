@@ -13,7 +13,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 pub const RECEIPT_PATH: &str = "Contents/Resources/SourceBuild/receipt.json";
-const MAIN_PATH: &str = "Contents/MacOS/Computa";
+const MAIN_PATH: &str = "Contents/MacOS/Kolmogor";
 const OUTER_SEAL: &str = "Contents/_CodeSignature/CodeResources";
 const MAX_FILES: usize = 16_384;
 const MAX_RECEIPT: u64 = 8 * 1024 * 1024;
@@ -23,7 +23,7 @@ const SOURCE_FILES: &[&str] = &[
     "Cargo.lock",
     "rust-toolchain.toml",
     ".cargo/config.toml",
-    "Config/Computa-Info.plist",
+    "Config/Kolmogor-Info.plist",
     "WebUI/src/styles.css",
     "Runtime/codex-source.lock.json",
     "Runtime/patches/compaction-retention.patch",
@@ -1133,7 +1133,7 @@ mod tests {
             }
         }
         fn app(&self) -> PathBuf {
-            let app = self.root.parent().unwrap().join("Computa.app");
+            let app = self.root.parent().unwrap().join("Kolmogor.app");
             fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
             fs::write(
                 app.join(MAIN_PATH),

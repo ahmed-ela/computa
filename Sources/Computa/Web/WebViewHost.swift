@@ -185,7 +185,7 @@ private struct CodexWebView: NSViewRepresentable {
              place-items: center; color: #555; background: #f8f8f7; }
       main { text-align: center; max-width: 420px; }
     </style>
-    <main><h2>Computa UI is unavailable</h2>
+    <main><h2>Kolmogor UI is unavailable</h2>
     <p>The bundled Octane assets could not be found. Rebuild WebUI before packaging the app.</p></main>
     """
 }
@@ -232,7 +232,7 @@ private final class WindowConfiguredWebView: WKWebView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard let window else { return }
-        window.title = "Computa"
+        window.title = "Kolmogor"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)

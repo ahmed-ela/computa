@@ -545,7 +545,7 @@ fn prepare(options: &ServingProbeOptions) -> Result<(Runner, Vec<u8>)> {
     ensure(
         instructions.starts_with("You are HeyDash.")
             || instructions.starts_with("You are Macndash.")
-            || rust && instructions.starts_with("You are Computa."),
+            || rust && instructions.starts_with("You are Kolmogor."),
         "serving_original_production_instructions_required",
     )?;
     let policy = read_text(&options.policy)?;
@@ -927,7 +927,7 @@ pub async fn boundary_probe(options: &BoundaryProbeOptions) -> Result<Value> {
             && (instructions.starts_with("You are HeyDash.")
                 || instructions.starts_with("You are Macndash.")
                 || (matches!(observer, ObservationMode::RustBoundary { .. })
-                    && instructions.starts_with("You are Computa."))),
+                    && instructions.starts_with("You are Kolmogor."))),
         "frozen_production_request_required",
     )?;
     let policy = read_text(&options.policy)?;
