@@ -4,6 +4,10 @@ Chrome connection support and its implementation have been removed. Browser work
 uses the built-in browser. Earlier Chrome comparisons below are historical records,
 not remaining feature requirements or instructions to reconnect Chrome.
 
+## Reduce the Swift footprint
+
+- [ ] Inventory portable logic in the shipping Swift host. Pick one slice with a clear interface, move it to the Rust runtime or Octane UI according to its responsibility, and verify the same behavior through the installed app. Record release-mode Swift compile time before and after. See the [migration plan](docs/RUST-MIGRATION.md).
+
 ## Embedded browser: human pane first
 
 The initial browser delivery is the human-operated right pane: toggle/resize,

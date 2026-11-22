@@ -2,6 +2,10 @@
 
 The shipping Mac app has a Swift host, an Octane interface rendered in WebKit, and a bundled Rust agent runtime. Keep the [README](README.md) focused on what users can do and how to get started. Put contributor instructions here and detailed designs and qualification results in the relevant guide.
 
+## Keep Swift at the macOS boundary
+
+Use Swift only where Computa needs a native macOS interface, such as hosting a WebKit view, receiving an AppKit callback, or presenting a system dialog. Keep those adapters small. Build shared UI in Octane and put portable state transitions, provider logic, and tool orchestration in the Rust runtime. Keep permission enforcement on the trusted side of the bridge as logic moves. The table below describes the current shipping layout.
+
 ## Where to make a change
 
 | Area | Entry point |
