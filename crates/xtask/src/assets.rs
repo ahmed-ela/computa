@@ -84,17 +84,19 @@ pub fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
 pub fn website(root: &Path) -> io::Result<PathBuf> {
     let destination = root.join("target/website");
     fs::create_dir_all(&destination)?;
-    fs::copy(
-        root.join("Website/public/favicon.svg"),
-        destination.join("favicon.svg"),
-    )?;
+    for image in ["favicon-pastel.png", "computa-pastel.png"] {
+        fs::copy(
+            root.join("Website/public").join(image),
+            destination.join(image),
+        )?;
+    }
     fs::copy(
         root.join("Website/src/style.css"),
         destination.join("style.css"),
     )?;
     fs::write(
         destination.join("index.html"),
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><link rel=\"icon\" type=\"image/svg+xml\" href=\"/favicon.svg\"><link rel=\"stylesheet\" href=\"style.css\"><title>Computa</title></head><body><div id=\"root\"><img src=\"/favicon.svg\" alt=\"Computa\"></div></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><link rel=\"icon\" type=\"image/png\" href=\"/favicon-pastel.png\"><link rel=\"stylesheet\" href=\"style.css\"><title>Computa</title></head><body><div id=\"root\"><img src=\"/computa-pastel.png\" alt=\"Computa\"></div></body></html>",
     )?;
     Ok(destination)
 }
