@@ -138,6 +138,21 @@ extension AppState {
         return workspaceTabs.order.filter { $0.kind == .agent ? agents.contains($0.id) : browsers.contains($0.id) }
     }
 
+    enum TabDirection: Int { case previous = -1, next = 1 }
+
+    func selectAdjacentWorkspaceTab(_ direction: TabDirection) {
+        let tabs = openWorkspaceTabs
+        guard let first = tabs.first, let last = tabs.last else { return }
+        let current = primaryBrowserID.map(WorkspaceTabID.browser) ?? selectedTaskID.map(WorkspaceTabID.agent)
+        let target: WorkspaceTabID
+        if let current, let index = tabs.firstIndex(of: current) {
+            target = tabs[(index + direction.rawValue + tabs.count) % tabs.count]
+        } else {
+            target = direction == .next ? first : last
+        }
+        if target != current { selectWorkspaceTab(target) }
+    }
+
     func selectWorkspaceTab(_ tab: WorkspaceTabID) {
         guard !approvalGateBlocksInteraction, presentedSheet == nil else { return }
         switch tab.kind {

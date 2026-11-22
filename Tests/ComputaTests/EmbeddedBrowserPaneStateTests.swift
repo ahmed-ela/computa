@@ -25,6 +25,85 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testCycleWorkspaceTabsFollowsMixedOrderAndWraps() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let tasks = ["First", "Second", "History"].map {
+            AgentTask(title: $0, summary: "", status: .draft, workspace: "", model: "local")
+        }
+        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session)
+        let first = WorkspaceTabID.agent(tasks[0].id)
+        let second = WorkspaceTabID.agent(tasks[1].id)
+        func current() -> WorkspaceTabID? {
+            state.primaryBrowserID.map(WorkspaceTabID.browser) ?? state.selectedTaskID.map(WorkspaceTabID.agent)
+        }
+
+        state.selectTask(tasks[1].id)
+        let page = try session.createTab()
+        let browser = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: page)).workspaceID)
+        state.workspaceTabs.move(first, to: browser)
+        XCTAssertEqual(state.openWorkspaceTabs, [first, browser, second])
+        state.selectWorkspaceTab(first)
+        for expected in [browser, second, first] {
+            state.selectAdjacentWorkspaceTab(.next)
+            XCTAssertEqual(current(), expected)
+        }
+        for expected in [second, browser, first] {
+            state.selectAdjacentWorkspaceTab(.previous)
+            XCTAssertEqual(current(), expected)
+        }
+        state.presentedSheet = .settings
+        state.selectAdjacentWorkspaceTab(.next)
+        XCTAssertEqual(current(), first)
+        state.presentedSheet = nil
+
+        state.closeWorkspaceTab(browser)
+        state.isTaskSidebarCollapsed = true
+        state.selectAdjacentWorkspaceTab(.previous)
+        XCTAssertEqual(current(), second)
+        state.closeWorkspaceTab(first)
+        state.selectAdjacentWorkspaceTab(.next)
+        XCTAssertEqual(current(), second)
+        state.closeWorkspaceTab(second)
+        state.selectAdjacentWorkspaceTab(.previous)
+        XCTAssertNil(current())
+        XCTAssertTrue(state.openWorkspaceTabs.isEmpty)
+    }
+
+    @MainActor
+    func testCycleRevealsOffscreenTabAndPreservesComposerFocus() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let tasks = (1...30).map { AgentTask(title: "Agent \($0)", summary: "", status: .draft, workspace: "", model: "local") }
+        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session)
+        for task in tasks.dropFirst() { state.selectTask(task.id) }
+
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        await settleLayout(host)
+        let chat = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }
+            .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
+        let loaded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('[data-tab-kind]').length === 30")
+        XCTAssertTrue(loaded)
+        _ = try await chat.evaluateJavaScript("document.querySelector('.composer-shell textarea').focus(); true")
+        state.selectAdjacentWorkspaceTab(.previous)
+        let revealed = await waitForScriptBool(on: chat, script: """
+            (() => {
+                const list = document.querySelector('.task-list');
+                const row = list.querySelector('[aria-current="page"]');
+                return row?.getAttribute('aria-label') === 'Agent 1' && list.scrollTop > 0
+                    && row.getBoundingClientRect().bottom <= list.getBoundingClientRect().bottom + 1
+                    && document.activeElement === document.querySelector('.composer-shell textarea');
+            })()
+            """)
+        XCTAssertTrue(revealed)
+    }
+
+    @MainActor
     func testMixedSidebarFaviconSwitchingReorderAndHistory() async throws {
         let html = """
         <title>Cedar rail</title>
