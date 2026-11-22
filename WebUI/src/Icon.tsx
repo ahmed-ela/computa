@@ -13,7 +13,7 @@ import PanelLeft from '@octanejs/lucide/icons/panel-left';
 import PanelRight from '@octanejs/lucide/icons/panel-right';
 import Pause from '@octanejs/lucide/icons/pause';
 import Pencil from '@octanejs/lucide/icons/pencil';
-import Plus from '@octanejs/lucide/icons/plus';
+import SquarePen from '@octanejs/lucide/icons/square-pen';
 import Play from '@octanejs/lucide/icons/play';
 import Search from '@octanejs/lucide/icons/search';
 import Settings from '@octanejs/lucide/icons/settings';
@@ -38,7 +38,7 @@ const icons = {
   inspect: PanelRight,
   more: Ellipsis,
   pause: Pause,
-  plus: Plus,
+  compose: SquarePen,
   resume: Play,
   search: Search,
   send: ArrowUp,

@@ -40,7 +40,7 @@ struct WebWorkspaceView: View {
                         session: state.browserSession,
                         tabRowHeight: rowHeight,
                         usesSidebarTabs: browserPrimary,
-                        titlebarLeadingInset: browserPrimary && state.isTaskSidebarCollapsed && topInset > 0 ? 140 : 0,
+                        titlebarLeadingInset: browserPrimary && state.isTaskSidebarCollapsed && topInset > 0 ? 36 : 0,
                         titlebarTrailingInset: topInset > 0 ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
@@ -168,6 +168,7 @@ private struct CodexWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        webView.needsLayout = true
         context.coordinator.update(snapshot: snapshot)
     }
 
@@ -195,24 +196,48 @@ private struct CodexWebView: NSViewRepresentable {
 private final class WindowConfiguredWebView: WKWebView {
     private var titlebarControls: [NSTitlebarAccessoryViewController] = []
 
+    private weak var state: AppState?
+    private let compose = NSButton()
+
     func configureTitlebarControls(state: AppState) {
+        self.state = state
         titlebarControls = [
-            accessory(.left, SidebarTitlebarControls(state: state, search: { [weak self] in
-                guard let self else { return }
-                window?.makeFirstResponder(self)
-                sendSidebarEvent("kolmogor-search-chats")
-            }, newAgent: { [weak self] in
-                state.createTask()
-                self?.sendSidebarEvent("kolmogor-clear-chat-search")
-            })),
+            accessory(.left, SidebarTitlebarToggle(state: state)),
             accessory(.right, BrowserTitlebarToggle(state: state))
         ]
+        compose.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
+        compose.imagePosition = .imageOnly
+        compose.bezelStyle = .accessoryBarAction
+        compose.showsBorderOnlyWhileMouseInside = true
+        compose.setAccessibilityLabel("New chat")
+        compose.identifier = .init("chat-new")
+        compose.toolTip = "New chat (⇧⌘N)"
+        compose.target = self
+        compose.action = #selector(createChat)
+        compose.isHidden = true
+        addSubview(compose)
     }
 
-    private func sendSidebarEvent(_ event: String) {
+    override func layout() {
+        super.layout()
+        guard let window, let state else { return }
+        compose.isHidden = !window.styleMask.contains(.titled) || state.presentedSheet != nil
+            || (state.primaryBrowserID != nil && state.shouldPresentBrowserPane)
+        compose.isEnabled = !state.approvalGateBlocksInteraction
+        guard !compose.isHidden else { return }
+        let height = window.frame.height - window.contentLayoutRect.maxY
+        let top = (height > 0 ? height : 32) / 2 - 11
+        let trailing = state.shouldPresentBrowserPane ? 6 : BrowserTitlebarToggle.width + 4
+        compose.frame = NSRect(x: bounds.maxX - trailing - 28,
+                               y: isFlipped ? bounds.minY + top : bounds.maxY - top - 22,
+                               width: 28, height: 22)
+    }
+
+    @objc private func createChat() {
+        guard let state, !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
+        state.createTask()
         guard WebUIResourceLocator.contains(url) else { return }
-        callAsyncJavaScript("document.dispatchEvent(new Event(eventName))",
-                            arguments: ["eventName": event], in: nil, in: .page, completionHandler: nil)
+        evaluateJavaScript("document.dispatchEvent(new Event('kolmogor-clear-chat-search'))")
     }
 
     private func accessory(_ edge: NSLayoutConstraint.Attribute, _ content: some View) -> NSTitlebarAccessoryViewController {
@@ -225,7 +250,8 @@ private final class WindowConfiguredWebView: WKWebView {
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // The web sidebar paints the title bar, but AppKit owns window dragging there.
+        // Route only the compose control through the chat pane; the rest of the title bar stays draggable.
+        if !compose.isHidden, let superview, compose.frame.contains(convert(point, from: superview)) { return compose }
         if let window, let superview, superview.convert(point, to: nil).y >= window.contentLayoutRect.maxY {
             return nil
         }
@@ -258,48 +284,23 @@ private final class WindowConfiguredWebView: WKWebView {
     }
 }
 
-private struct SidebarTitlebarControls: View {
+private struct SidebarTitlebarToggle: View {
     @Bindable var state: AppState
-    let search: () -> Void
-    let newAgent: () -> Void
-    @State private var hoveringNewAgent = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            control("sidebar.left", state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar",
-                    id: "task-sidebar-toggle") { state.isTaskSidebarCollapsed.toggle() }
-            control("magnifyingglass", state.mixesBrowserTabsInSidebar ? "Search tabs" : "Search chats",
-                    id: "task-sidebar-search", action: search)
-            Button(action: newAgent) {
-                Text("New agent")
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 7)
-                    .frame(height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(hoveringNewAgent ? Color.primary.opacity(0.07) : .clear,
-                        in: RoundedRectangle(cornerRadius: 6))
-            .onHover { hoveringNewAgent = $0 }
-            .accessibilityIdentifier("task-sidebar-new-agent")
-            .help("New agent")
-        }
-        .fixedSize()
-        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
-    }
-
-    private func control(_ symbol: String, _ label: String, id: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
+        let label = state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar"
+        Button { state.isTaskSidebarCollapsed.toggle() } label: {
+            Image(systemName: "sidebar.left")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
                 .frame(width: 28, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
-        .accessibilityIdentifier(id)
+        .accessibilityIdentifier("task-sidebar-toggle")
         .accessibilityLabel(label)
         .help(label)
+        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
     }
 }
 

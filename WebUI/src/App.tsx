@@ -88,7 +88,7 @@ const toolNames: Record<string, string> = {
   computer_v2_keypress: 'Press keys', computer_v2_type: 'Type text',
 };
 
-function TaskToolbar({ task, rowHeight }: { task?: TaskSnapshot; rowHeight?: number }) {
+function TaskToolbar({ task, rowHeight, onNewChat }: { task?: TaskSnapshot; rowHeight?: number; onNewChat?: () => void }) {
   return (
     <header className="task-toolbar" style={rowHeight ? { height: `${rowHeight}px` } : undefined}>
       <div className="toolbar-title-block">
@@ -117,6 +117,9 @@ function TaskToolbar({ task, rowHeight }: { task?: TaskSnapshot; rowHeight?: num
           <Icon name="info" size={18} />
         </Button>
         */}
+        {onNewChat && <Button variant="ghost" size="icon-xs" aria-label="New chat" title="New chat (⇧⌘N)" onClick={onNewChat}>
+          <Icon name="compose" size={16} />
+        </Button>}
       </div>
     </header>
   );
@@ -900,7 +903,6 @@ export function App() {
   const nativeHost = Boolean(window.webkit?.messageHandlers?.localCodex);
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(nativeHost ? null : previewSnapshot);
   const [search, setSearch] = useState('');
-  const [searchOpen, setSearchOpen] = useState(false);
   const draftState = useConversationDrafts(snapshot?.promptReceipts);
   const focusSearchOnExpand = useRef(false);
   const currentSnapshot = useRef(snapshot);
@@ -938,11 +940,11 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (searchOpen && !snapshot?.isTaskSidebarCollapsed && focusSearchOnExpand.current) {
+    if (!snapshot?.isTaskSidebarCollapsed && focusSearchOnExpand.current) {
       focusSearchOnExpand.current = false;
       document.getElementById('task-search')?.focus();
     }
-  }, [snapshot?.isTaskSidebarCollapsed, searchOpen]);
+  }, [snapshot?.isTaskSidebarCollapsed]);
 
   function focusSearch() {
     const current = currentSnapshot.current;
@@ -950,23 +952,18 @@ export function App() {
     const field = document.getElementById('task-search');
     if (field && !current.isTaskSidebarCollapsed) { field.focus(); return; }
     focusSearchOnExpand.current = true;
-    setSearchOpen(true);
     if (current.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarCollapsed', collapsed: false });
   }
 
-  function dismissSearch() {
-    focusSearchOnExpand.current = false;
-    setSearchOpen(false);
+  function createChat() {
     setSearch('');
+    post({ action: 'createTask' });
   }
 
   useEffect(() => {
-    document.addEventListener('kolmogor-search-chats', focusSearch);
-    document.addEventListener('kolmogor-clear-chat-search', dismissSearch);
-    return () => {
-      document.removeEventListener('kolmogor-search-chats', focusSearch);
-      document.removeEventListener('kolmogor-clear-chat-search', dismissSearch);
-    };
+    const clearSearch = () => setSearch('');
+    document.addEventListener('kolmogor-clear-chat-search', clearSearch);
+    return () => document.removeEventListener('kolmogor-clear-chat-search', clearSearch);
   }, []);
 
   useEffect(() => {
@@ -976,7 +973,7 @@ export function App() {
         event.preventDefault();
         focusSearch();
       }
-      if (!nativeHost && event.key.toLowerCase() === 'n' && event.shiftKey) { event.preventDefault(); post({ action: 'createTask' }); }
+      if (!nativeHost && event.key.toLowerCase() === 'n' && event.shiftKey) { event.preventDefault(); createChat(); }
       if (!nativeHost && event.key === ',') { event.preventDefault(); post({ action: 'showSettings' }); }
     };
     document.addEventListener('keydown', handleKey);
@@ -1002,7 +999,7 @@ export function App() {
       data-sidebar-collapsed={snapshot.isTaskSidebarCollapsed ? 'true' : undefined}
       data-browser-pane={nativeHost && snapshot.isBrowserPresented && !snapshot.isSettingsPresented ? 'open' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
-      <WorkspaceSidebar post={post} snapshot={snapshot} search={search} setSearch={setSearch} searchOpen={searchOpen} focusSearch={focusSearch} dismissSearch={dismissSearch} nativeHost={nativeHost} />
+      <WorkspaceSidebar post={post} snapshot={snapshot} search={search} setSearch={setSearch} nativeHost={nativeHost} />
       {!nativeHost && snapshot.primaryBrowserID && <main className="preview-browser-content">
         <Icon name="browser" /><strong>{snapshot.workspaceBrowsers?.find(tab => tab.id === snapshot.primaryBrowserID)?.title}</strong>
         <span>Pages open in the desktop browser.</span></main>}
@@ -1013,7 +1010,7 @@ export function App() {
           onClick={() => post({ action: 'toggleBrowser' })}>
           <Icon name="browser" size={18} />
         </Button>}
-        <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} />
+        <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} onNewChat={snapshot.nativeSidebarControls ? undefined : createChat} />
         {snapshot.savedChatSelection ? (
           <div className="no-task-view" role={snapshot.savedChatSelection.error ? 'alert' : 'status'}>
             {snapshot.savedChatSelection.error ? <>
@@ -1027,7 +1024,6 @@ export function App() {
           <div className="no-task-view">
             <p>Choose a model for your next task.</p>
             <DefaultModelSelector snapshot={snapshot} />
-            <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={16} /> New agent</Button>
           </div>
         )}
       </main>
