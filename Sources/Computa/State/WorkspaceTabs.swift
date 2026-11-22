@@ -140,10 +140,14 @@ extension AppState {
 
     enum TabDirection: Int { case previous = -1, next = 1 }
 
+    var selectedWorkspaceTab: WorkspaceTabID? {
+        primaryBrowserID.map(WorkspaceTabID.browser) ?? selectedTaskID.map(WorkspaceTabID.agent)
+    }
+
     func selectAdjacentWorkspaceTab(_ direction: TabDirection) {
         let tabs = openWorkspaceTabs
         guard let first = tabs.first, let last = tabs.last else { return }
-        let current = primaryBrowserID.map(WorkspaceTabID.browser) ?? selectedTaskID.map(WorkspaceTabID.agent)
+        let current = selectedWorkspaceTab
         let target: WorkspaceTabID
         if let current, let index = tabs.firstIndex(of: current) {
             target = tabs[(index + direction.rawValue + tabs.count) % tabs.count]

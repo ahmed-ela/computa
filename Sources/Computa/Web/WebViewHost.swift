@@ -10,6 +10,7 @@ struct WebWorkspaceView: View {
         GeometryReader { geometry in
             workspace(topInset: geometry.safeAreaInsets.top)
         }
+        .focusedSceneValue(\.tabWorkspace, state)
     }
 
     private func workspace(topInset: CGFloat) -> some View {
