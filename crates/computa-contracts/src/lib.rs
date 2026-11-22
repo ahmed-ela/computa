@@ -4,6 +4,7 @@
 //! Untrusted wire data is validated before it becomes application state.
 
 pub mod appserver;
+pub mod browser_tools;
 pub mod grounding;
 pub mod models;
 pub mod responses;

@@ -104,6 +104,8 @@ def package(state, tag, job):
         shutil.rmtree(stage)
     stage.mkdir()
     prepare_runtime(state)
+    run("cargo", "test", "--locked", "--target-dir", state / "contracts-target",
+        "-p", "computa-contracts", "--bin", "browser-tool-catalog")
     run(sys.executable, "Scripts/merge-release-worker.test.py")
     run("bun", "test", "Scripts/version.test.ts", "Scripts/release-policy.test.ts", "Scripts/sign-release.test.ts",
         "Scripts/package-release.test.ts", "Scripts/sparkle-appcast.test.ts", "Scripts/publish-alpha.test.ts",

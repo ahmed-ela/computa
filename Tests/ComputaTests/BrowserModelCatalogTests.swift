@@ -1,7 +1,22 @@
+import CryptoKit
 import XCTest
 @testable import Computa
 
 final class BrowserModelCatalogTests: XCTestCase {
+    func testBundledBrowserToolCatalogOrderAndFrozenLegacyContracts() throws {
+        let tools = EmbeddedBrowserTools.definitions()
+        XCTAssertEqual(tools.compactMap { $0["name"] as? String }, [
+            "browser_tabs", "browser_open", "browser_bind", "browser_navigate", "browser_read",
+            "browser_continue", "browser_click", "browser_fill", "browser_wait", "browser_close",
+        ])
+        let legacy = ["read": EmbeddedBrowserTools.legacyReadDefinition,
+                      "wait": EmbeddedBrowserTools.legacyWaitDefinition]
+        let json = try JSONSerialization.data(withJSONObject: legacy, options: [.sortedKeys, .withoutEscapingSlashes])
+        // Captured from the original Swift builder. Saved chats can contain these exact contracts.
+        XCTAssertEqual(SHA256.hash(data: json).map { String(format: "%02x", $0) }.joined(),
+                       "e9fe95d6884b8e3bb01baa743a861a3de1d5e32ff72608105a0fdca181379096")
+    }
+
     func testStableGroqSchemaDiscoveryIsExplicitAndCannotBorrowForeignOrUnknownCatalogs() throws {
         let model = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B").modelID
         func wire(_ definition: [String: Any]) -> [String: Any] {

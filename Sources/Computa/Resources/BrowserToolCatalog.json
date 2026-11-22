@@ -1,0 +1,309 @@
+{
+  "legacyRead": {
+    "description": "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. A fresh read restarts page one: omit cursor or use null, with optional view/query. Only browser_read(cursor=next_cursor) advances. Prefer cursor alone; any repeated view/query must match its captured filters exactly. To change filters, omit cursor. Never use computer_v2_continue. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] cannot be clicked; enabled settable fields can still be filled using their fill_ref. Containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use overview/all with observed text to find form controls; links selects links only. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "Omit this field on the first page or a fresh read; null starts fresh and never resumes a previous cursor. Continue with the exact nonempty next_cursor from the latest page in the current turn. Prefer cursor alone: repeated view/query must match the captured filters exactly; changing them requires a fresh read. Each successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never send an empty or invented cursor. At most 2048 UTF-8 bytes.",
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "view": {
+          "enum": [
+            "overview",
+            "content",
+            "all",
+            "headings",
+            "links"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "browser_read",
+    "type": "function"
+  },
+  "legacyWait": {
+    "description": "Wait by DOM mutation and document events until visible semantic text contains text. When text is omitted, wait for readable text or controls outside the footer after document readiness; a title-only, empty or footer-only shell is not ready. Read-only and bounded; matched=false at deadline. This readiness is not proof that requested content exists. Does not refresh or replay actions.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string.",
+          "minLength": 1,
+          "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "browser_wait",
+    "type": "function"
+  },
+  "tools": [
+    {
+      "description": "List human tabs in Computa's built-in browser, including current logins, within an 8KB page. Omit cursor or use null for a fresh first page. Empty inventory means no matching user tabs were listed, not denied access; use browser_open for a named known service's official entrypoint. Continue with browser_tabs(cursor=next_cursor) alone; computer_v2_continue cannot consume this inventory cursor. Inference and app-control pages are excluded. Use an observed tab_id to bind; busy tabs belong to another task.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "Omit this field on the first page or a fresh inventory; null has the same fresh-inventory meaning and never resumes a previous cursor. Only copy an exact nonempty next_cursor returned by browser_tabs in the current turn to continue; never send an empty string or an invented cursor. At most 2048 UTF-8 bytes.",
+            "minLength": 1,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "browser_tabs",
+      "type": "function"
+    },
+    {
+      "description": "Create and bind one background task-owned tab in Computa's built-in browser, sharing its signed-in profile. A user-provided URL is not required for a user-named known service's official homepage or sign-in entrypoint. Preserve any supplied URL exactly; use observed controls for deeper pages. Only this created tab is cleaned up at turn end. Use available current_observation; otherwise browser_read. Completion is not the requested website outcome.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "browser_open",
+      "type": "function"
+    },
+    {
+      "description": "Bind the exact observed available human built-in tab without activating or navigating it. Existing user tabs are preserved at cleanup. Use available current_observation; otherwise browser_read.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tab_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "tab_id"
+        ],
+        "type": "object"
+      },
+      "name": "browser_bind",
+      "type": "function"
+    },
+    {
+      "description": "Navigate the currently bound built-in tab once. A timeout never replays navigation. Use available current_observation of the new document; otherwise browser_read. Never repeat completed navigation because observation failed.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "description": "Copy a supplied or observed URL exactly, preserving punctuation. Without a supplied URL, use a user-named known service's official homepage or sign-in entrypoint, then observed controls. Never invent deep links, account paths, message IDs or address variants.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "browser_navigate",
+      "type": "function"
+    },
+    {
+      "description": "Read the bound built-in tab. Use content for readable text and non-navigation listbox options, including messages/documents; overview for controls/headings and a bounded text sample; all for structural troubleshooting, not page progression. This is a fresh read with optional view/query and restarts page one. Use browser_continue(cursor=next_cursor) to advance the same capture; changing filters requires this fresh tool. Never use computer_v2_continue for browser pages. READ_SELECTION_EVIDENCE counts and query matches describe the local capture, never website search results or absence. Use browser_click for observed enabled links (including follow_link=true) and controls only when actions contains AXPress; browser_fill requires enabled=true and settable=true. actions=[] cannot be clicked; enabled settable fields can still be filled using their fill_ref. Containers do not inherit child actions. For popup-only links without AXPress, browser_navigate may use the complete exact observed href in the same tab; never reconstruct href_fragment/href_omitted. Use overview/all with observed text to find form controls; links selects links only. Only published click_ref/fill_ref values authorize input; choose the intended row without repeated unchanged reads. Same-capture cursor pages retain earlier refs within the 120-ref FIFO bound. Fresh reads retain prior refs only when the same native target is corroborated without renewing expiry; changed/absent targets expire. Input consumes all refs.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "description": "Local filter of captured fields, including search-box values; not website Search or result-count evidence. At most 2048 UTF-8 bytes. Omit this field for an unfiltered read; never send an empty string.",
+            "minLength": 1,
+            "type": "string"
+          },
+          "view": {
+            "enum": [
+              "overview",
+              "content",
+              "all",
+              "headings",
+              "links"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "browser_read",
+      "type": "function"
+    },
+    {
+      "description": "Continue the bound built-in browser page using only browser_continue(cursor=next_cursor). Copy the latest page's exact nonempty next_cursor in this turn; view/query are retained and cannot be changed here. A fresh browser_read changes filters and restarts page one. Successful continuation, fresh read or current_observation replaces older cursors; admitted input invalidates them. Never use inventory or computer_v2_continue cursors. A rejected cursor never starts a fresh read or input.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "Exact nonempty next_cursor from the latest browser page; at most 2048 UTF-8 bytes. Required; null never starts a fresh read.",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "cursor"
+        ],
+        "type": "object"
+      },
+      "name": "browser_continue",
+      "type": "function"
+    },
+    {
+      "description": "Press exactly one observed row with enabled=true and actions=[\"AXPress\"] using its current click_ref. Choose the intended row by its observed label and action. actions=[] is not pressable: never click a content container or substitute its parent/child. Find the actual control using browser_read(view=overview or all, query=observed text). An observed existing-account selector may be used within the authorized service/task and approvals; ask for help when credentials, MFA or account ambiguity actually require it, not because they might appear later. Semantic DOM activation, with stale-node and obstruction checks; not native global input. Returns dispatch plus a fresh current_observation when available; inspect it for the result and use only its new references. If dispatched input leaves the page unchanged, wait/read instead of clicking again. After stale errors use available current_observation; otherwise browser_read. Never repeat an input because its following observation failed. Never retry a timed-out mutation.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "click_ref": {
+            "description": "Copy the exact click_ref on the intended current published row. Never construct it or use a fill_ref/native reference. The host resolves and validates the same observed target; the token never searches for a target.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "click_ref"
+        ],
+        "type": "object"
+      },
+      "name": "browser_click",
+      "type": "function"
+    },
+    {
+      "description": "Replace one observed field with enabled=true and settable=true and dispatch input/change events; no Enter key or submit-control click is sent. Page handlers may react to these events. Use that field's current fill_ref, never a label or parent. Uses one current observed capability; password fields are unavailable. Returns a fresh current_observation when available: compare its field value with the complete requested value before submitting. A distinct observed enabled submit/Search control remains available if needed within the task's scope and approvals. Use only new references. If unavailable, browser_read; the fill was still dispatched and must not be repeated.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "fill_ref": {
+            "description": "Copy the exact fill_ref on the intended current published field. Never construct it or use a click_ref/native reference. Admitted input consumes all current references.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "description": "Copy the complete requested field value verbatim, including prefixes, spaces and punctuation. Do not infer a shorter identifier format. Transform only when the task explicitly requires it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fill_ref",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "browser_fill",
+      "type": "function"
+    },
+    {
+      "description": "Bounded event-driven wait. after_snapshot waits for a native document or URL change from the latest page, then navigation readiness; use it after dispatched input when navigation is pending. text waits for visible semantic text. With neither, wait for readable content after readiness; an already-ready page matches immediately. text and after_snapshot are exclusive. Timeout is unresolved, not denied access. No capture, new references, input replay or verified outcome from after_snapshot.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string.",
+                "minLength": 1,
+                "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
+                "type": "string"
+              },
+              "timeout_ms": {
+                "maximum": 10000,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "after_snapshot": {
+                "description": "Exact snapshot_id from the latest published page in this turn. Wait for native document identity or URL to change, then navigation readiness within one deadline. Not a DOM-change or task-success test. Cannot be combined with text.",
+                "maxLength": 36,
+                "minLength": 1,
+                "type": "string"
+              },
+              "timeout_ms": {
+                "maximum": 10000,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "after_snapshot"
+            ],
+            "type": "object"
+          }
+        ],
+        "properties": {
+          "after_snapshot": {
+            "description": "Exact snapshot_id from the latest published page in this turn. Wait for native document identity or URL to change, then navigation readiness within one deadline. Not a DOM-change or task-success test. Cannot be combined with text.",
+            "maxLength": 36,
+            "minLength": 1,
+            "type": "string"
+          },
+          "text": {
+            "description": "Nonblank visible text to wait for, at most 512 UTF-8 bytes. Omit text to wait for readable text or controls outside the footer after document readiness; never send an empty or whitespace-only string.",
+            "minLength": 1,
+            "pattern": "[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200B\\u2028\\u2029\\u202F\\u205F\\u3000]",
+            "type": "string"
+          },
+          "timeout_ms": {
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "browser_wait",
+      "type": "function"
+    },
+    {
+      "description": "Release the bound built-in tab. Closes only this task's created tab; a bound existing user tab stays open.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "browser_close",
+      "type": "function"
+    }
+  ]
+}
