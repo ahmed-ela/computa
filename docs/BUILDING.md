@@ -3,7 +3,7 @@
 ## Packaging status
 
 The Computa repository is
-[`ahmed-wlb/computa`](https://github.com/ahmed-wlb/computa), with product site
+[`ahmed-ela/computa`](https://github.com/ahmed-ela/computa), with product site
 [computa.wtf](https://computa.wtf). Source targets and paths use the new name.
 The Computa Release build, signed DMG, mounted-installer migration from
 the legacy app, and startup on the existing Mac passed. The checked pre-existing data
@@ -18,9 +18,6 @@ been verified.**
 This is a source-build workflow, not a notarized prebuilt distribution.
 See [the measured packaging validation](SOURCE-INSTALL-VALIDATION.md) for checks
 that passed and the remaining clean-machine qualification limits.
-
-The repository remains private. “From GitHub” means a clone by someone who has
-been granted repository access; it does not imply anonymous public access.
 
 ## Requirements
 
@@ -59,7 +56,7 @@ copied from another app.
 ## Checkout and setup
 
 ```sh
-git clone https://github.com/ahmed-wlb/computa.git
+git clone https://github.com/ahmed-ela/computa.git
 cd computa
 ./Scripts/setup.sh --check
 ./Scripts/setup.sh --download-model
@@ -82,9 +79,7 @@ chain before installation. It does not create an Apple account, enroll in a
 paid program, import credentials, or approve Keychain prompts. A self-signed
 certificate with an Apple-like name is not accepted as that trust anchor.
 
-Use GitHub CLI authentication or a Git credential helper for private access;
-never paste a token into this script or into a clone URL. Review the checked-out
-source before running it. This workflow deliberately does not use `curl | sh`.
+Review the checked-out source before running the setup script.
 
 `--download-model` is explicit consent to download the pinned Qwen 3.5 4B
 weights. Without it, setup prepares the Python environment but downloads no

@@ -17,6 +17,13 @@ external Chrome connection code and controls have been removed.
 Installed Qwen tasks, arbitrary public sites and sustained concurrent human use
 retain their [separate qualification gates](../TODO.md#embedded-browser-agent-control).
 
+## Using the browser pane
+
+Open **Browser** at the top right of the Computa window. Use **+** or **⌘T**
+to open a tab while the pane is visible. Enter a web address or search term
+and press **Return**. Each tab has its own history and reload control. Drag
+the divider to resize the pane. Hiding the pane keeps its tabs open.
+
 ## Composition
 
 - `EmbeddedBrowserSession` owns tabs, WebViews, independent website data,
