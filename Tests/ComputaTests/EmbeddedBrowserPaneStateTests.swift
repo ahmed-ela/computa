@@ -569,13 +569,16 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 })()
                 """)
             XCTAssertTrue(sidebarBehindLights)
+            let leading = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
+            let leadingEnd = leading.convert(leading.bounds, to: nil).maxX
             let titleAligned = await waitForScriptBool(on: chat, script: """
                 (() => {
                     const title = document.querySelector('.toolbar-title-block strong');
                     const row = title?.closest('header')?.getBoundingClientRect();
                     if (!row || title.textContent !== 'Review the layout') return false;
                     const text = title.getBoundingClientRect();
-                    return Math.abs(row.bottom - 1 - \(window.frame.height - window.contentLayoutRect.maxY)) <= 1
+                    return text.left >= \(leadingEnd)
+                        && Math.abs(row.bottom - 1 - \(window.frame.height - window.contentLayoutRect.maxY)) <= 1
                         && Math.abs((text.top + text.bottom) / 2 - \(window.frame.height - trafficLight.midY)) <= 2;
                 })()
                 """)
@@ -798,7 +801,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     private func sidebarControlPoint(_ index: Int, in window: NSWindow) throws -> NSPoint {
         let view = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
         let bounds = view.convert(view.bounds, to: nil)
-        return NSPoint(x: bounds.minX + bounds.width * (CGFloat(index) + 0.5) / 3, y: bounds.midY)
+        // The leading icons keep their original 28-point hit areas. The trailing text button fits its label.
+        let offset = index == 2 ? (56 + bounds.width) / 2 : CGFloat(index) * 28 + 14
+        return NSPoint(x: bounds.minX + offset, y: bounds.midY)
     }
 
     @MainActor

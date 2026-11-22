@@ -94,9 +94,9 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, searchOpen, focu
           <Icon name="sidebar" size={16} /></Button>
         <Button variant="ghost" size="icon-xs" aria-label={searchLabel} title={searchLabel} onClick={focusSearch}>
           <Icon name="search" size={15} /></Button>
-        <Button variant="ghost" size="icon-xs" aria-label="New agent" title="New agent"
+        <button type="button" className="titlebar-new-agent" aria-label="New agent" title="New agent"
           onClick={() => { dismissSearch(); post({ action: 'createTask' }); }}>
-          <Icon name="plus" size={16} /></Button>
+          New agent</button>
       </>}
     </div>
     {(snapshot.mixesBrowserTabsInSidebar || snapshot.pendingApprovalCount > 0) && <nav className="primary-nav" aria-label="Primary">

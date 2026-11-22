@@ -117,6 +117,7 @@ test('sidebar title bar puts Search and New agent beside Collapse and frees thei
   const preview = render(false);
   const row = preview.split('class="window-drag-strip"')[1].split('</div>')[0];
   expect(row.match(/aria-label="[^"]+"/g)).toEqual(['aria-label="Collapse chat sidebar"', 'aria-label="Search chats"', 'aria-label="New agent"']);
+  expect(row).toMatch(/class="titlebar-new-agent"[^>]*>New agent<\/button>/);
   expect(preview).not.toContain('class="primary-nav"');
   expect(preview).not.toContain('id="task-search"');
   const native = render(true, true);

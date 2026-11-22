@@ -100,9 +100,21 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .sidebar-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 10px; color: var(--text-tertiary); font-size: 11px; text-align: center; }
 .sidebar-empty strong { margin-top: 4px; color: var(--text-secondary); font-weight: 500; }
 
+.window-drag-strip .titlebar-new-agent {
+  flex: none; width: auto; padding-inline: 7px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--text); font-size: 12px; white-space: nowrap;
+}
+.window-drag-strip .titlebar-new-agent:hover { background: var(--surface-hover); }
+.app-shell[data-sidebar-collapsed]:not([data-native-sidebar-controls]) .window-drag-strip {
+  position: relative; z-index: 1; width: max-content;
+}
+.app-shell[data-sidebar-collapsed]:not([data-native-sidebar-controls]) .window-drag-strip button { flex-shrink: 0; }
+.app-shell[data-sidebar-collapsed]:not([data-native-sidebar-controls]) .sidebar { overflow: visible; }
+.app-shell[data-sidebar-collapsed]:not([data-native-sidebar-controls]) .task-toolbar { padding-left: 72px; }
+
 /* The compact rail leaves its title bar to the traffic lights and native sidebar controls. */
 .app-shell[data-sidebar-collapsed] .sidebar { width: 72px; flex-basis: 72px; }
-.app-shell[data-native-sidebar-controls][data-sidebar-collapsed] .task-toolbar { padding-left: 108px; }
+.app-shell[data-native-sidebar-controls][data-sidebar-collapsed] .task-toolbar { padding-left: 148px; }
 .agent-rail-button { color: var(--text-secondary); }
 .agent-rail-button .agent-status-icon { width: 20px; height: 20px; }
 @property --sparkle-phase {
@@ -487,6 +499,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 @media (max-width: 760px) {
   .sidebar { width: 190px; flex-basis: 190px; }
   .task-toolbar { padding: 0 16px; }
+  .app-shell[data-native-sidebar-controls]:not([data-sidebar-collapsed]) .task-toolbar { padding-left: 28px; }
   .toolbar-actions { gap: 8px; }
   .status-label { font-size: 10px; }
   .conversation-content { padding-right: 18px; padding-left: 18px; }

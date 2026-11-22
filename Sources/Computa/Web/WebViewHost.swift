@@ -40,7 +40,7 @@ struct WebWorkspaceView: View {
                         session: state.browserSession,
                         tabRowHeight: rowHeight,
                         usesSidebarTabs: browserPrimary,
-                        titlebarLeadingInset: browserPrimary && state.isTaskSidebarCollapsed && topInset > 0 ? 100 : 0,
+                        titlebarLeadingInset: browserPrimary && state.isTaskSidebarCollapsed && topInset > 0 ? 140 : 0,
                         titlebarTrailingInset: topInset > 0 ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
@@ -262,6 +262,7 @@ private struct SidebarTitlebarControls: View {
     @Bindable var state: AppState
     let search: () -> Void
     let newAgent: () -> Void
+    @State private var hoveringNewAgent = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -269,7 +270,19 @@ private struct SidebarTitlebarControls: View {
                     id: "task-sidebar-toggle") { state.isTaskSidebarCollapsed.toggle() }
             control("magnifyingglass", state.mixesBrowserTabsInSidebar ? "Search tabs" : "Search chats",
                     id: "task-sidebar-search", action: search)
-            control("plus", "New agent", id: "task-sidebar-new-agent", action: newAgent)
+            Button(action: newAgent) {
+                Text("New agent")
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 7)
+                    .frame(height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(hoveringNewAgent ? Color.primary.opacity(0.07) : .clear,
+                        in: RoundedRectangle(cornerRadius: 6))
+            .onHover { hoveringNewAgent = $0 }
+            .accessibilityIdentifier("task-sidebar-new-agent")
+            .help("New agent")
         }
         .fixedSize()
         .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
