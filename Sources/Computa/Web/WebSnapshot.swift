@@ -36,6 +36,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let primaryBrowserID: String?
     let selectedTaskID: String?
     let selectedEntryID: String?
+    let savedChats: [SavedChatSummary]
+    let savedChatSelection: AppState.SavedChatSelection?
     let tasks: [WebTaskSnapshot]
     let pendingApprovalCount: Int
     let connection: WebConnectionSnapshot
@@ -69,6 +71,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         primaryBrowserID = state.primaryBrowserID?.uuidString
         selectedTaskID = state.selectedTaskID
         selectedEntryID = state.selectedEntryID
+        savedChats = state.savedChats
+        savedChatSelection = state.savedChatSelection
         tasks = state.tasks.map { task in
             WebTaskSnapshot(
                 task,

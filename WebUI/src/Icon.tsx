@@ -1,5 +1,4 @@
 import Bot from '@octanejs/lucide/icons/bot';
-import History from '@octanejs/lucide/icons/history';
 import ArrowUp from '@octanejs/lucide/icons/arrow-up';
 import ArrowDown from '@octanejs/lucide/icons/arrow-down';
 import Check from '@octanejs/lucide/icons/check';
@@ -26,7 +25,6 @@ import X from '@octanejs/lucide/icons/x';
 // Import only the icons we use, through the same native Octane port as shadcn.
 const icons = {
   agent: Bot,
-  history: History,
   browser: Globe,
   check: Check,
   chevron: ChevronRight,

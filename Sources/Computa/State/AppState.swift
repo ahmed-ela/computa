@@ -95,6 +95,8 @@ final class AppState {
     private static let accessModePreferenceKey = "HeyDash.accessMode"
 
     var tasks: [AgentTask]
+    private(set) var savedChats: [SavedChatSummary] = []
+    var savedChatSelection: SavedChatSelection?
     var selectedTaskID: AgentTask.ID? {
         didSet { if selectedTaskID != oldValue { workspaceTabs.onChange?() } }
     }
@@ -1038,6 +1040,34 @@ final class AppState {
             && (!pendingApprovals.isEmpty || !resolvingApprovalIDs.isEmpty)
     }
 
+    struct SavedChatSelection: Codable, Equatable {
+        let id: String
+        var error: String?
+    }
+
+    func selectSidebarChat(_ id: String) {
+        guard !approvalGateBlocksInteraction, presentedSheet == nil, !isShuttingDown else { return }
+        if tasks.contains(where: { $0.id == id }) { selectTask(id); return }
+        guard savedChats.contains(where: { $0.id == id }), let runtime,
+              savedChatSelection?.id != id || savedChatSelection?.error != nil else { return }
+        selectTask(nil)
+        savedChatSelection = SavedChatSelection(id: id)
+        let revision = taskSelectionRevision
+        Task {
+            do {
+                let chat = try await runtime.readSavedChat(id)
+                guard chat.id == id else { throw CocoaError(.coderReadCorrupt) }
+                guard !isShuttingDown, taskSelectionRevision == revision, savedChatSelection?.id == id else { return }
+                if !tasks.contains(where: { $0.id == id }) { tasks.append(chat) }
+                savedChats.removeAll { $0.id == id }
+                selectTask(id)
+            } catch {
+                guard !isShuttingDown, taskSelectionRevision == revision, savedChatSelection?.id == id else { return }
+                savedChatSelection?.error = error.localizedDescription
+            }
+        }
+    }
+
     func selectTask(_ id: AgentTask.ID?) {
         workspaceTabs.browserIsPrimary = false
         if let id { workspaceTabs.open(.agent(id)) }
@@ -1045,6 +1075,7 @@ final class AppState {
     }
 
     func updateSelectedConversation(_ id: AgentTask.ID?, acknowledging: Bool) {
+        savedChatSelection = nil
         taskSelectionRevision &+= 1
         selectedTaskID = id
         if acknowledging, let id { markTaskCompletionRead(taskID: id) }
@@ -1161,6 +1192,7 @@ final class AppState {
             model: defaultModel
         )
         tasks.insert(task, at: 0)
+        savedChatSelection = nil
         taskSelectionRevision &+= 1
         selectedTaskID = task.id
         workspaceTabs.browserIsPrimary = false
@@ -1829,10 +1861,12 @@ final class AppState {
                 guard tab.kind == .agent, workspaceTabs.saved?.drafts[tab.id] == nil else { return nil }
                 return tab.id
             }
-            let snapshot = try await runtime.loadTasks(including: Set(openThreads))
+            let unreadThreads = unreadCompletions.compactMap { $1.hasUnreadCompletion ? $0 : nil }
+            let history = try await runtime.loadWorkspaceHistory(including: Set(openThreads).union(unreadThreads))
             guard !Task.isCancelled, !isShuttingDown else { return }
             if taskSnapshotRevision == snapshotRevisionBeforeLoading {
-                restoreStartupTasks(snapshot, replacing: tasksBeforeLoading,
+                savedChats = history.savedChats
+                restoreStartupTasks(history.tasks, replacing: tasksBeforeLoading,
                                     selectionRevisionBeforeLoading: selectionRevisionBeforeLoading)
             }
             guard !Task.isCancelled, !isShuttingDown else { return }
@@ -1947,6 +1981,8 @@ final class AppState {
     }
 
     func replaceTasks(with newTasks: [AgentTask]) {
+        savedChatSelection = nil
+        savedChats = []
         replaceTasks(with: newTasks, preservingMessageDraftsFor: [], preserveEmptySelection: false)
     }
 

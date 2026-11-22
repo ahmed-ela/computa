@@ -3,27 +3,28 @@ import XCTest
 @testable import Computa
 
 final class RuntimeContextContractTests: XCTestCase {
-    func testWorkspaceHistoryIncludesOnlyOpenChatsBeyondTheFirstPage() throws {
-        func page(_ ids: [String], next: String) throws -> Data {
-            try JSONSerialization.data(withJSONObject: ["result": ["data": ids.map { ["id": $0] }, "nextCursor": next]])
+    func testWorkspaceHistoryIndexesEveryPageAndReadsRecentOpenAndActiveChats() throws {
+        func page(_ ids: [String], next: String? = nil) throws -> Data {
+            let rows: [[String: Any]] = ids.map { ["id": $0, "preview": "Preview " + $0, "cwd": "/project",
+                "status": ["type": $0 == "running" ? "active" : "idle"]] }
+            return try JSONSerialization.data(withJSONObject: ["result": ["data": rows, "nextCursor": next as Any]])
         }
-        let recent = try page(["recent"], next: "page2")
-        var list = WorkspaceThreadList(openThreadIDs: ["recent", "older"])
-        XCTAssertEqual(try list.takePage(recent).compactMap { $0["id"] as? String }, ["recent"])
-        XCTAssertEqual(list.cursor, "page2")
-        let older = try page(["recent", "closed", "older"], next: "page3")
-        XCTAssertEqual(try list.takePage(older).compactMap { $0["id"] as? String }, ["older"])
+        let first = (1...100).map { "recent-\($0)" }
+        var list = WorkspaceThreadList(eagerThreadIDs: ["open"])
+        XCTAssertEqual(try list.takePage(page(first, next: "page2")).compactMap { $0["id"] as? String }, first)
+        XCTAssertEqual(try list.takePage(page([first[0], "closed", "open", "running"], next: "page3"))
+            .compactMap { $0["id"] as? String }, ["open", "running"])
+        XCTAssertEqual(list.cursor, "page3")
+        XCTAssertTrue(try list.takePage(page(["closed", "oldest"])).isEmpty)
         XCTAssertNil(list.cursor)
+        XCTAssertEqual(list.savedChats.map(\.id), ["closed", "oldest"])
+        XCTAssertEqual(list.savedChats.last?.title, "Preview oldest")
+        XCTAssertEqual(list.savedChats.last?.workspace, "/project")
 
-        var noOlderTabs = WorkspaceThreadList(openThreadIDs: ["recent"])
-        _ = try noOlderTabs.takePage(recent)
-        XCTAssertNil(noOlderTabs.cursor)
-
-        var missing = WorkspaceThreadList(openThreadIDs: ["deleted"])
-        _ = try missing.takePage(recent)
-        XCTAssertThrowsError(try missing.takePage(recent))
+        var repeated = WorkspaceThreadList(eagerThreadIDs: [])
+        _ = try repeated.takePage(page(first, next: "same"))
+        XCTAssertThrowsError(try repeated.takePage(page([], next: "same")))
     }
-
 
     func testIntermediateContextFullSentinelDoesNotInterruptSuccessfulCompaction() {
         var guardrail = AppServerCompactionProgressGuard()
