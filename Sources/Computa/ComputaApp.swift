@@ -58,6 +58,7 @@ private struct InertTestHostPermissions: AutomationPermissionClient {
 }
 
 extension FocusedValues {
+    @Entry var focusBrowserAddress: (() -> Void)?
     @Entry var newBrowserTabInPane: (() -> Void)?
     @Entry var browserPaneFocused: Bool?
     @Entry var tabWorkspace: AppState?
@@ -67,6 +68,7 @@ private struct WorkspaceCommands: Commands {
     let state: AppState
     let isTestHost: Bool
     @FocusedValue(\.newBrowserTabInPane) private var newBrowserTabInPane
+    @FocusedValue(\.focusBrowserAddress) private var focusBrowserAddress
     @FocusedValue(\.tabWorkspace) private var tabWorkspace
 
     @FocusedValue(\.browserPaneFocused) private var browserPaneFocused
@@ -82,7 +84,7 @@ private struct WorkspaceCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
-            Button("New Agent") { state.createTask() }
+            Button("New Chat") { state.createTask() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(workspaceUnavailable)
             Button("New Browser Tab") {
@@ -106,6 +108,9 @@ private struct WorkspaceCommands: Commands {
             .keyboardShortcut("w", modifiers: tabWorkspace == nil ? .command : [.command, .shift])
         }
         CommandGroup(after: .toolbar) {
+            Button("Focus Browser Address") { focusBrowserAddress?() }
+                .keyboardShortcut("l", modifiers: .command)
+                .disabled(workspaceUnavailable || focusBrowserAddress == nil)
             Group {
                 Button("Select Previous Workspace Tab") { state.selectAdjacentWorkspaceTab(.previous, inBrowserPane: usesBrowserShortcuts) }
                     .keyboardShortcut("[", modifiers: [.command, .shift])

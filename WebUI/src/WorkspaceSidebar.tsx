@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'octane';
 import { Button } from '@octanejs/shadcn/Button';
-import { Input } from '@octanejs/shadcn/Input';
 import { AgentStatusIcon } from './AgentStatusIcon';
 import { Icon } from './Icon';
 import { TaskActivityIndicator } from './TaskActivityIndicator';
@@ -61,8 +60,8 @@ function SiteIcon({ tab }: { tab: WorkspaceBrowser }) {
   return letter ? <span aria-hidden="true" className="site-initial">{letter}</span> : <Icon name="browser" size={16} />;
 }
 
-export function WorkspaceSidebar({ snapshot, search, setSearch, searchOpen, focusSearch, dismissSearch, nativeHost, post }: {
-  snapshot: AppSnapshot; search: string; setSearch: (value: string) => void; searchOpen: boolean; focusSearch: () => void; dismissSearch: () => void; nativeHost: boolean; post: Action;
+export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post }: {
+  snapshot: AppSnapshot; search: string; setSearch: (value: string) => void; nativeHost: boolean; post: Action;
 }) {
   const [now, setNow] = useState(() => Date.now() / 1000);
   const dragging = useRef<WorkspaceTab | null>(null);
@@ -85,34 +84,32 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, searchOpen, focu
     if (item.ref.kind === 'agent') post({ action: 'selectTask', id: item.ref.id });
     else post({ action: 'selectWorkspaceTab', tab: item.ref });
   };
+  const searchField = useRef<HTMLInputElement | null>(null);
   const nativeControls = nativeHost && snapshot.nativeSidebarControls;
   return <aside className="sidebar" aria-label="Workspace navigation">
     <div className="window-drag-strip" style={snapshot.titlebarHeight ? { height: snapshot.titlebarHeight + 'px' } : undefined}>
-      {!nativeControls && <>
+      {!nativeControls &&
         <Button variant="ghost" size="icon-xs" aria-label={collapsed ? 'Expand chat sidebar' : 'Collapse chat sidebar'}
           aria-expanded={!collapsed} onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !collapsed })}>
           <Icon name="sidebar" size={16} /></Button>
-        <Button variant="ghost" size="icon-xs" aria-label={searchLabel} title={searchLabel} onClick={focusSearch}>
-          <Icon name="search" size={15} /></Button>
-        <Button variant="ghost" size="icon-xs" aria-label="New agent" title="New agent"
-          onClick={() => { dismissSearch(); post({ action: 'createTask' }); }}>
-          <Icon name="plus" size={16} /></Button>
-      </>}
+      }
     </div>
     {(snapshot.mixesBrowserTabsInSidebar || snapshot.pendingApprovalCount > 0) && <nav className="primary-nav" aria-label="Primary">
       {snapshot.mixesBrowserTabsInSidebar && <Button variant="outline" className="nav-button new-task-button" aria-label="New browser tab" title="New browser tab"
-        onClick={() => { dismissSearch(); post({ action: 'newWorkspaceBrowserTab' }); }}>
+        onClick={() => { setSearch(''); post({ action: 'newWorkspaceBrowserTab' }); }}>
         <span className="new-browser-tab-icon" aria-hidden="true" />
         <span className={collapsed ? 'sr-only' : undefined}>New browser tab</span></Button>}
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
     </nav>}
-    {searchOpen && !collapsed && <div className="task-search">
-      <Input id="task-search" aria-label={searchLabel} placeholder={searchLabel} value={search}
-        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); dismissSearch(); } }}
+    {!collapsed && <div className="task-search">
+      <Icon name="search" size={15} />
+      <input ref={searchField} type="text" id="task-search" aria-label={searchLabel} placeholder={searchLabel}
+        value={search} autoComplete="off" spellCheck={false}
+        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setSearch(''); } }}
         onInput={event => setSearch((event.currentTarget as HTMLInputElement).value)} />
-      <Button variant="ghost" size="icon-xs" className="clear-search" aria-label="Close search" title="Close search"
-        onClick={dismissSearch}><Icon name="x" size={13} /></Button>
+      {search && <Button variant="ghost" size="icon-xs" className="clear-search" aria-label="Clear search" title="Clear search"
+        onClick={() => { setSearch(''); searchField.current?.focus(); }}><Icon name="x" size={13} /></Button>}
     </div>}
     <nav ref={tabList} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats'}>
       {items.map((item,index) => {

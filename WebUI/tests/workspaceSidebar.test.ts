@@ -32,7 +32,7 @@ test('open tabs keep their order and closed chats follow once, even with overlap
 test('sidebar uses the site icon or hostname initial in both sizes; an empty tab uses the globe', () => {
   for (const collapsed of [true,false]) {
     const snapshot = { ...fixture(), isTaskSidebarCollapsed:collapsed };
-    const render = () => renderToStaticMarkup(h(WorkspaceSidebar, {snapshot,search:'',searchOpen:false,dismissSearch:()=>{},setSearch:()=>{},focusSearch:()=>{},post:()=>{},nativeHost:true})).html;
+    const render = () => renderToStaticMarkup(h(WorkspaceSidebar, {snapshot,search:'',setSearch:()=>{},post:()=>{},nativeHost:true})).html;
     const initial = render();
     expect(initial).toContain('class="site-initial">R</span>');
     expect(initial.match(/aria-current="page"/g)?.length).toBe(1);
@@ -52,7 +52,7 @@ test('a matching browser tab stays available at either width in mixed mode', () 
   for (const isTaskSidebarCollapsed of [false, true]) {
     const html = renderToStaticMarkup(h(WorkspaceSidebar, {
       snapshot: { ...fixture(), isTaskSidebarCollapsed }, search: 'rail.example',
-      searchOpen: false, dismissSearch: () => {}, setSearch: () => {}, focusSearch: () => {}, nativeHost: true, post: () => {},
+      setSearch: () => {}, nativeHost: true, post: () => {},
     })).html;
     expect(html.match(/data-tab-kind=/g)?.length).toBe(1);
     expect(html).toContain('aria-label="Trips"');
@@ -69,11 +69,11 @@ test('chat-only navigation hides browser rows and creation in either sidebar wid
   for (const isTaskSidebarCollapsed of [false, true]) {
     const snapshot = { ...fixture(), mixesBrowserTabsInSidebar: false, primaryBrowserID: undefined, isTaskSidebarCollapsed };
     const html = renderToStaticMarkup(h(WorkspaceSidebar, {
-      snapshot, search: '', searchOpen: false, dismissSearch: () => {}, setSearch: () => {}, focusSearch: () => {}, nativeHost: true, post: () => {},
+      snapshot, search: '', setSearch: () => {}, nativeHost: true, post: () => {},
     })).html;
     expect(html).toContain('aria-label="Chats"');
     expect(html).not.toContain('Show chat history');
-    expect(html).toContain('aria-label="New agent"');
+    expect(html).not.toContain('aria-label="New agent"');
     expect(html).toContain('data-tab-kind="agent"');
     if (!isTaskSidebarCollapsed) expect(html).toContain('aria-current="page"');
     expect(html).not.toContain('data-tab-kind="browser"');
@@ -92,7 +92,7 @@ test('expanded chats have titles and activity indicators; the rail contains only
   snapshot.workspaceOrder = [];
   snapshot.savedChats = [{ id: 'saved', title: 'Saved chat', workspace: '/', updatedAt: 0 }];
   const rows = () => renderToStaticMarkup(h(WorkspaceSidebar, {
-    snapshot, search: '', searchOpen: false, dismissSearch: () => {}, setSearch: () => {}, focusSearch: () => {}, nativeHost: true, post: () => {},
+    snapshot, search: '', setSearch: () => {}, nativeHost: true, post: () => {},
   })).html.split('<nav').at(-1)!;
   const expanded = rows();
   expect(expanded.match(/class="task-row-title"/g)).toHaveLength(6);
@@ -108,18 +108,19 @@ test('expanded chats have titles and activity indicators; the rail contains only
   expect(rows()).not.toContain('data-tab-kind="agent"');
 });
 
-test('sidebar title bar puts Search and New agent beside Collapse and frees their rows', () => {
-  const snapshot = { ...fixture(), mixesBrowserTabsInSidebar: false };
-  const render = (nativeSidebarControls: boolean, searchOpen = false) => renderToStaticMarkup(h(WorkspaceSidebar, {
-    snapshot: { ...snapshot, nativeSidebarControls }, nativeHost: true, search: '', searchOpen,
-    focusSearch: () => {}, dismissSearch: () => {}, setSearch: () => {}, post: () => {},
-  })).html;
-  const preview = render(false);
-  const row = preview.split('class="window-drag-strip"')[1].split('</div>')[0];
-  expect(row.match(/aria-label="[^"]+"/g)).toEqual(['aria-label="Collapse chat sidebar"', 'aria-label="Search chats"', 'aria-label="New agent"']);
-  expect(preview).not.toContain('class="primary-nav"');
-  expect(preview).not.toContain('id="task-search"');
-  const native = render(true, true);
-  expect(native).not.toContain('aria-label="New agent"');
-  expect(native).toContain('id="task-search"');
+test('the expanded sidebar has one search field and only the fallback collapse button in its title bar', () => {
+  const render = (nativeSidebarControls: boolean, isTaskSidebarCollapsed = false, search = '') =>
+    renderToStaticMarkup(h(WorkspaceSidebar, {
+      snapshot: { ...fixture(), mixesBrowserTabsInSidebar: false, nativeSidebarControls, isTaskSidebarCollapsed },
+      nativeHost: true, search, setSearch: () => {}, post: () => {},
+    })).html;
+  for (const nativeControls of [false, true]) {
+    const html = render(nativeControls);
+    const titlebar = html.split('class="window-drag-strip"')[1].split('</div>')[0];
+    expect(titlebar.match(/aria-label="[^"]+"/g) ?? []).toEqual(nativeControls ? [] : ['aria-label="Collapse chat sidebar"']);
+    expect(html.match(/id="task-search"/g)).toHaveLength(1);
+    expect(html).not.toContain('aria-label="Clear search"');
+    expect(render(nativeControls, false, 'Trip')).toContain('aria-label="Clear search"');
+    expect(render(nativeControls, true)).not.toContain('id="task-search"');
+  }
 });

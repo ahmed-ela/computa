@@ -103,6 +103,7 @@ struct EmbeddedBrowserPane: View {
         .accessibilityIdentifier("embedded-browser-pane")
         .focusedValue(\.browserPaneFocused, true)
         .focusedSceneValue(\.newBrowserTabInPane, { createTab() })
+        .focusedSceneValue(\.focusBrowserAddress, { addressFocused = true })
         .onAppear { synchronizeAddress() }
         .onChange(of: session.selectedTabID) { _, _ in
             addressError = nil
@@ -204,20 +205,32 @@ struct EmbeddedBrowserPane: View {
             .help(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
             .accessibilityLabel(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
 
-            TextField("Search or enter a website address", text: $address)
-                .textFieldStyle(.roundedBorder)
-                .focused($addressFocused)
-                .onSubmit(navigate)
-                .accessibilityLabel("Website address")
-                .accessibilityIdentifier("browser-address")
-
-            Button(action: navigate) { Image(systemName: "arrow.right") }
-                .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("Go to address")
-                .accessibilityLabel("Go to address")
+            HStack(spacing: 7) {
+                Image(systemName: addressFocused || address.isEmpty ? "magnifyingglass" : "globe")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                TextField("Search or enter a website address", text: $address)
+                    .textFieldStyle(.plain)
+                    .focused($addressFocused)
+                    .onSubmit(navigate)
+                    .onExitCommand { addressFocused = false }
+                    .accessibilityLabel("Website address")
+                    .accessibilityIdentifier("browser-address")
+                if addressFocused {
+                    Button(action: navigate) { Image(systemName: "arrow.right") }
+                        .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .help("Go to address")
+                        .accessibilityLabel("Go to address")
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(.primary.opacity(0.055), in: Capsule())
+            .overlay { Capsule().strokeBorder(Color.secondary.opacity(addressFocused ? 0.7 : 0), lineWidth: 1.5).allowsHitTesting(false) }
         }
         .buttonStyle(.borderless)
-        .padding(10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
     }
 
     private func emptyPage(hasTab: Bool) -> some View {
