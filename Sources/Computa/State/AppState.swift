@@ -95,7 +95,9 @@ final class AppState {
     private static let accessModePreferenceKey = "HeyDash.accessMode"
 
     var tasks: [AgentTask]
-    var selectedTaskID: AgentTask.ID?
+    var selectedTaskID: AgentTask.ID? {
+        didSet { if selectedTaskID != oldValue { workspaceTabs.onChange?() } }
+    }
     var selectedEntryID: TimelineEntry.ID?
     var composerText = ""
     var isInspectorPresented = false
@@ -104,7 +106,11 @@ final class AppState {
         didSet { preferences.set(isTaskSidebarCollapsed, forKey: Self.sidebarCollapsedKey) }
     }
     let workspaceTabs: WorkspaceTabs
-    var isBrowserPresented = false
+    var isBrowserPresented = false {
+        didSet { if isBrowserPresented != oldValue { workspaceTabs.onChange?() } }
+    }
+    @ObservationIgnored private var waitingForWorkspaceHistory = false
+    @ObservationIgnored private var restoredWorkspaceDraftIDs = Set<String>()
     var isReviewPresented = false
     private(set) var review: AppReviewState?
     @ObservationIgnored private let reviewService = WorkspaceReviewService()
@@ -224,8 +230,20 @@ final class AppState {
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         websiteModeChoices = WebsiteModeCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
-        self.tasks = tasks
-        selectedTaskID = workspaceTabs.initialAgent(in: tasks)
+        let snapshot = workspaceTabs.saved
+        let existingIDs = Set(tasks.map(\.id))
+        let drafts = workspaceTabs.order.compactMap { tab -> AgentTask? in
+            guard tab.kind == .agent, !existingIDs.contains(tab.id) else { return nil }
+            return snapshot?.drafts[tab.id]?.task(id: tab.id)
+        }
+        restoredWorkspaceDraftIDs = Set(drafts.map(\.id))
+        self.tasks = tasks + drafts
+        waitingForWorkspaceHistory = tasks.isEmpty
+        if tasks.isEmpty {
+            selectedTaskID = drafts.first { $0.id == snapshot?.selectedAgent }?.id
+        } else {
+            selectedTaskID = workspaceTabs.initialAgent(in: self.tasks)
+        }
         selectedEntryID = selectedTask?.entries.last?.id
         retireWebsiteModelSelections()
         apiProviderSettings = APIProviderSettings(preferences: preferences,
@@ -244,7 +262,16 @@ final class AppState {
                     self.defaultModel = WebsiteModelCatalog.freshProfileDefaultModelID
                 }
             })
+        if let snapshot, !self.cookieMaintenanceOnlyLaunch {
+            self.browserSession.restoreWorkspacePages(snapshot)
+            workspaceTabs.browserIsPrimary = snapshot.browserIsPrimary && self.browserSession.selectedTabID != nil
+            isBrowserPresented = snapshot.showsBrowserPane
+        }
         for tab in self.browserSession.workspaceBrowserTabs { workspaceTabs.open(.browser(tab.workspaceID)) }
+        if !self.cookieMaintenanceOnlyLaunch {
+            workspaceTabs.onChange = { [weak self] in self?.saveWorkspace() }
+            self.browserSession.onWorkspacePageChanged = workspaceTabs.onChange
+        }
         self.browserSession.onWorkspaceTabOpened = { [weak self] id in self?.workspaceTabs.open(.browser(id)) }
         self.browserSession.onWorkspaceTabClosed = { [weak self] id, wasSelected in
             guard let self else { return }
@@ -256,6 +283,35 @@ final class AppState {
         self.browserSession.onProviderSignInRecoveryCandidate = { [weak self] candidate in
             self?.requestProviderSignInRecovery(candidate)
         }
+        if !tasks.isEmpty { saveWorkspace() }
+    }
+
+    private func saveWorkspace() {
+        guard !isShuttingDown, !cookieMaintenanceOnlyLaunch else { return }
+        let previous = workspaceTabs.saved
+        let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+        let pages = browserSession.restorablePages
+        let pageIDs = Set(pages.map { $0.id.uuidString })
+        var drafts: [String: SavedWorkspace.Draft] = [:]
+        let order = workspaceTabs.order.compactMap { tab -> WorkspaceTabID? in
+            if tab.kind == .browser { return pageIDs.contains(tab.id) ? tab : nil }
+            guard let task = byID[tab.id] else {
+                // Browser changes may arrive before the runtime has loaded conversation history.
+                return waitingForWorkspaceHistory ? tab : nil
+            }
+            if task.status == .draft, task.runtimeThreadID == nil, task.entries.isEmpty {
+                drafts[tab.id] = SavedWorkspace.Draft(task)
+            }
+            return .agent(task.runtimeThreadID ?? tab.id)
+        }
+        let selected = selectedTaskID.map { byID[$0]?.runtimeThreadID ?? $0 }
+            ?? (waitingForWorkspaceHistory && taskSelectionRevision == 0 ? previous?.selectedAgent : nil)
+        let selectedPage = browserSession.workspaceBrowserTabs.first { $0.id == browserSession.selectedTabID }
+            .flatMap { pageIDs.contains($0.workspaceID.uuidString) ? $0.workspaceID : nil }
+        workspaceTabs.save(SavedWorkspace(order: order, selectedAgent: selected, drafts: drafts,
+            browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
+            pages: pages, selectedPage: selectedPage, browserIsPrimary: workspaceTabs.browserIsPrimary && selectedPage != nil,
+            showsBrowserPane: isBrowserPresented))
     }
 
     var selectedTask: AgentTask? {
@@ -1050,6 +1106,7 @@ final class AppState {
               tasks[index].runtimeThreadID == nil
                 || ChatUnreadCompletionStore.identity(tasks[index].runtimeThreadID) == stable else { return false }
         tasks[index].runtimeThreadID = stable
+        saveWorkspace()
         return true
     }
 
@@ -1244,6 +1301,7 @@ final class AppState {
         guard taskID == selectedTaskID, let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].status == .draft,
               tasks[index].entries.isEmpty else { return }
         tasks[index].workspace = url.path
+        saveWorkspace()
         if isReviewPresented { requestReviewRefresh(taskID: taskID) }
     }
 
@@ -1268,6 +1326,7 @@ final class AppState {
                 && ProviderCLI(modelID: tasks[index].model) == ProviderCLI(modelID: modelID))
         else { return false }
         tasks[index].model = modelID
+        saveWorkspace()
         requestAutomaticWebsiteModelRefresh(for: modelID)
         updateWebsitePrewarming()
         contextUsageByTask.removeValue(forKey: taskID)
@@ -1762,7 +1821,11 @@ final class AppState {
             await runtime.configureEmbeddedWebModelTransport(websiteTransport())
             await runtime.configureEmbeddedBrowserTools(embeddedBrowserTools)
             guard !Task.isCancelled, !isShuttingDown else { return }
-            let snapshot = try await runtime.loadTasks()
+            let openThreads = workspaceTabs.order.compactMap { tab -> String? in
+                guard tab.kind == .agent, workspaceTabs.saved?.drafts[tab.id] == nil else { return nil }
+                return tab.id
+            }
+            let snapshot = try await runtime.loadTasks(including: Set(openThreads))
             guard !Task.isCancelled, !isShuttingDown else { return }
             if taskSnapshotRevision == snapshotRevisionBeforeLoading {
                 restoreStartupTasks(snapshot, replacing: tasksBeforeLoading,
@@ -1865,7 +1928,11 @@ final class AppState {
         let removedIDs = Set(baselineByID.keys).subtracting(currentIDs)
         // The MainActor can accept New Task, model edits, or runtime updates
         // while startup awaits disk history. Those newer task values win.
-        let changedTasks = tasks.filter { baselineByID[$0.id] != $0 }
+        let loadedIDs = Set(loadedTasks.map(\.id))
+        let changedTasks = tasks.filter { task in
+            baselineByID[task.id] != task || (!loadedIDs.contains(task.id) && task.status == .draft
+                && task.runtimeThreadID == nil && restoredWorkspaceDraftIDs.contains(task.id))
+        }
         let changedIDs = Set(changedTasks.map(\.id))
         let restoredTasks = changedTasks + loadedTasks.filter {
             !changedIDs.contains($0.id) && !removedIDs.contains($0.id)
@@ -1899,10 +1966,13 @@ final class AppState {
             if restored.runtimeThreadID == nil { restored.runtimeThreadID = priorThreads[task.id] }
             return restored
         }
-        let firstOpenAgent = workspaceTabs.initialAgent(in: newTasks)
+        waitingForWorkspaceHistory = false
+        restoredWorkspaceDraftIDs.removeAll()
+        let firstOpenAgent = workspaceTabs.initialAgent(in: tasks)
         selectedTaskID = preserveEmptySelection || newTasks.contains(where: { $0.id == priorSelection })
             ? priorSelection
             : firstOpenAgent
+        saveWorkspace()
         updateWebsitePrewarming()
         if let task = selectedTask, retainedTaskIDs.contains(task.id),
            task.entries.contains(where: { $0.id == priorEntry }) {
@@ -1968,6 +2038,7 @@ final class AppState {
                 tasks.insert(task, at: 0)
             }
             retireWebsiteModelSelections()
+            if workspaceTabs.order.contains(.agent(task.id)) { saveWorkspace() }
 
         case .turnDiffUpdated(let taskID, let turnID, let diff):
             guard let index = tasks.firstIndex(where: { $0.id == taskID }), !turnID.isEmpty else { return }

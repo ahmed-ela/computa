@@ -101,8 +101,13 @@ include background sessions. Unverified cleanup retains the owned page; if
 retained sessions exhaust capacity, restarting frees local pages without
 claiming their website conversations were deleted.
 
-Profiles initialize lazily. Session cookies can persist, but open-tab restoration
-is not implemented. No Chrome/Codex data or signed-in sessions are imported.
+Computa saves the open sidebar order, selected chat and browser tab, and split-pane state
+in local preferences. On relaunch or update, ordinary browser tabs reopen their last web
+address in the same WebKit profile. Each gets a fresh page and runtime handle. Pop-ups,
+provider setup, private sessions, and task-owned pages are excluded. Form contents,
+back/forward history and unsent chat text are session-local. Existing conversations
+reconnect through local runtime history. Builds that saved only chat IDs can migrate
+those IDs; browser addresses start persisting with the first build that records them.
 
 ## Deliberate first-version limitations
 
@@ -147,7 +152,7 @@ CLI call. Each task closed only its owned Temporary Chat tab; the human ChatGPT
 home tab stayed selected. After restarting Computa, both assistant replies were
 present in local history and the ChatGPT profile remained usable. This verifies
 the installed Swift transport, not the deferred Rust runtime migration or other
-providers. Open browser tabs are still not restored after restart.
+providers. The build tested in this checkpoint did not yet restore open browser tabs.
 
 The focused event, session, transport, response-codec, catalog, routing and
 AppState scopes passed 86 Swift tests; the fixed adapter passed 8 JavaScript

@@ -38,7 +38,7 @@ final class AppStateReviewTests: XCTestCase {
 
     func testDiffEventsUpdateTheirOwnTurnWithoutDuplicatingOrRetargetingTasks() throws {
         let root = try root()
-        let state = AppState(tasks: [task(root), task(root, id: "other")])
+        let state = AppState(tasks: [task(root), task(root, id: "other")], preferences: isolatedTestPreferences())
         state.apply(.turnDiffUpdated(taskID: "other", turnID: "one", diff: "first"))
         state.apply(.turnDiffUpdated(taskID: "other", turnID: "two", diff: "second"))
         state.apply(.turnDiffUpdated(taskID: "other", turnID: "one", diff: "updated first"))
@@ -50,7 +50,7 @@ final class AppStateReviewTests: XCTestCase {
 
     func testLastTurnSupplementsOnlyCompletedRenameReceiptsFromThatTurn() async throws {
         let root = try root()
-        let state = AppState(tasks: [task(root)])
+        let state = AppState(tasks: [task(root)], preferences: isolatedTestPreferences())
         state.apply(.turnDiffUpdated(taskID: "task", turnID: "latest", diff: ""))
         for (id, turn, status) in [("applied", "latest", ToolRunStatus.succeeded),
                                   ("proposed", "latest", .running), ("failed", "latest", .failed),
@@ -70,7 +70,7 @@ final class AppStateReviewTests: XCTestCase {
 
     func testCompletedPureMoveRefreshesOpenLastTurnWithoutAggregateNotification() async throws {
         let root = try root()
-        let state = AppState(tasks: [task(root, status: .running)])
+        let state = AppState(tasks: [task(root, status: .running)], preferences: isolatedTestPreferences())
         state.apply(.turnDiffUpdated(taskID: "task", turnID: "turn", diff: ""))
         state.toggleReview()
         try await waitForReview { state.review?.snapshot?.files.isEmpty == true && state.review?.loading == false }
@@ -100,7 +100,7 @@ final class AppStateReviewTests: XCTestCase {
         try git(root: root, arguments: ["init", "-q"])
         try git(root: root, arguments: ["add", "code.swift"])
         try git(root: root, arguments: ["commit", "-qm", "Review fixture"])
-        let state = AppState(tasks: [task(root, status: .running)])
+        let state = AppState(tasks: [task(root, status: .running)], preferences: isolatedTestPreferences())
         state.toggleReview()
         state.setReviewScope(.unstaged, taskID: "task")
         try await waitForReview { state.review?.snapshot?.scope == .unstaged && state.review?.snapshot?.files.isEmpty == true && state.review?.loading == false }
@@ -119,7 +119,7 @@ final class AppStateReviewTests: XCTestCase {
     }
 
     func testPatchStreamingAndCompletionUpdateOneOwnedCardWithoutLateProposalOverwrite() throws {
-        let state = AppState(tasks: [task(try root())])
+        let state = AppState(tasks: [task(try root())], preferences: isolatedTestPreferences())
         func entry(_ status: ToolRunStatus, turn: String = "turn", text: String) -> TimelineEntry {
             TimelineEntry(id: "patch", kind: .tool, title: "File changes", body: text,
                 toolEvent: ToolEvent(name: "fileChange", summary: text, status: status, input: "", output: nil, duration: nil),
@@ -136,7 +136,7 @@ final class AppStateReviewTests: XCTestCase {
 
     func testReviewSelectionAndMutationRequireCurrentNativeReceipt() async throws {
         let root = try root()
-        let state = AppState(tasks: [task(root), task(root, id: "other")])
+        let state = AppState(tasks: [task(root), task(root, id: "other")], preferences: isolatedTestPreferences())
         state.isReviewPresented = true
         await state.refreshReview(taskID: "task")
         let id = try XCTUnwrap(state.review?.snapshot?.id)
@@ -151,7 +151,7 @@ final class AppStateReviewTests: XCTestCase {
     func testDraftWorkspaceChoiceDoesNotRetargetSavedOrRunningChats() async throws {
         let first = try root(), chosen = try root()
         let runtime = ReviewWorkspaceRuntime()
-        let state = AppState(tasks: [task(first)], runtime: runtime)
+        let state = AppState(tasks: [task(first)], runtime: runtime, preferences: isolatedTestPreferences())
         try await state.setTaskWorkspace(chosen, taskID: "task")
         XCTAssertEqual(state.selectedTask?.workspace, chosen.path)
         let initialPaths = await runtime.paths()
