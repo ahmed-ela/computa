@@ -97,10 +97,34 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(state.shouldPresentBrowserPane)
         try await requireDOM("getComputedStyle(document.querySelector('.workspace')).display !== 'none' && innerWidth >= 600")
         state.selectWorkspaceTab(.browser(ref))
+        try await requireDOM("!!document.querySelector('[data-browser-primary=native] .site-favicon') && innerWidth === 230")
+        let expandedCenters = try await sidebarIconCenters(in: chat)
         state.isTaskSidebarCollapsed = true
         try await requireDOM("!!document.querySelector('.agent-rail .site-favicon') && innerWidth === 72")
+        let collapsedCenters = try await sidebarIconCenters(in: chat)
+        XCTAssertEqual(collapsedCenters, expandedCenters)
         state.isTaskSidebarCollapsed = false
-        try await requireDOM("!!document.querySelector('#task-search')")
+        try await requireDOM("!!document.querySelector('#task-search') && innerWidth === 230")
+        let reopenedCenters = try await sidebarIconCenters(in: chat)
+        XCTAssertEqual(reopenedCenters, expandedCenters)
+        state.isTaskSidebarCollapsed = true
+        try await requireDOM("!!document.querySelector('.agent-rail')")
+        _ = try await chat.evaluateJavaScript("document.querySelector('.sidebar-search-button').click(); true")
+        try await requireDOM("document.activeElement?.id === 'task-search' && innerWidth === 230")
+        _ = try await chat.evaluateJavaScript("""
+            const search = document.querySelector('#task-search'); search.value = 'Trip agent';
+            search.dispatchEvent(new Event('input', {bubbles: true})); true
+            """)
+        try await requireDOM("document.querySelectorAll('[data-tab-kind]').length === 1 && !!document.querySelector('.clear-search')")
+        let filteredCenters = try await sidebarIconCenters(in: chat)
+        state.isTaskSidebarCollapsed = true
+        try await requireDOM("innerWidth === 72 && !!document.querySelector('.agent-rail .task-row')")
+        let compactFilteredCenters = try await sidebarIconCenters(in: chat)
+        XCTAssertEqual(compactFilteredCenters, filteredCenters)
+        _ = try await chat.evaluateJavaScript("document.querySelector('.clear-search').click(); true")
+        try await requireDOM("document.querySelectorAll('.agent-rail [data-tab-kind]').length === 2 && !document.querySelector('.clear-search')")
+        state.isTaskSidebarCollapsed = false
+        try await requireDOM("!!document.querySelector('#task-search') && innerWidth === 230")
         _ = try await chat.evaluateJavaScript("document.querySelector('[data-tab-kind=browser]').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowDown',altKey:true,bubbles:true})); true")
         try await requireDOM("document.querySelector('[data-tab-kind]')?.dataset.tabKind === 'agent'")
         state.closeWorkspaceTab(.agent(task.id))
@@ -394,7 +418,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             AgentTask(runtimeThreadID: thread, title: "Review", summary: "", status: .running, workspace: "", model: "local"),
             AgentTask(title: "Earlier", summary: "", status: .completed, workspace: "", model: "local"),
             AgentTask(title: "Failed", summary: "", status: .failed, workspace: "", model: "local")
-        ]
+        ] + (1...20).map { AgentTask(title: "Archived \($0)", summary: "", status: .completed, workspace: "", model: "local") }
         let state = AppState(tasks: tasks, preferences: prefs, browserSession: session)
         let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 700),
@@ -409,6 +433,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
         let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 3 && !document.querySelector('.agent-rail')")
         XCTAssertTrue(expanded)
+        let expandedCenters = try await sidebarIconCenters(in: chat)
         let button = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
         let bounds = button.convert(button.bounds, to: nil)
         let zoom = try XCTUnwrap(window.standardWindowButton(.zoomButton))
@@ -429,6 +454,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 && !document.querySelector('#task-search')
             """)
         XCTAssertTrue(working)
+        let collapsedCenters = try await sidebarIconCenters(in: chat)
+        XCTAssertEqual(collapsedCenters, expandedCenters)
         let motionMatches = try await chat.evaluateJavaScript("""
             (() => {
                 const icon = document.querySelector('[data-agent-status="working"] .agent-status-icon');
@@ -489,6 +516,40 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let searchFocused = await waitForScriptBool(on: chat, script: "document.activeElement?.id === 'task-search'")
         XCTAssertTrue(searchFocused)
         XCTAssertFalse(state.isTaskSidebarCollapsed)
+
+        _ = try await chat.evaluateJavaScript("document.querySelector('[aria-label=\"Show chat history\"]').click(); true")
+        let scrollable = await waitForScriptBool(on: chat, script: """
+            (() => { const list = document.querySelector('nav[aria-label="Chat history"]');
+                if (!list) return false;
+                list.scrollTop = 150;
+                return list.scrollTop === 150;
+            })()
+            """)
+        XCTAssertTrue(scrollable)
+        let scrolledCenters = try await sidebarIconCenters(in: chat)
+        try await clickInWindow(at: toggle, window: window)
+        let historyCollapsed = await waitForScriptBool(on: chat, script: "!!document.querySelector('.agent-rail')")
+        XCTAssertTrue(historyCollapsed)
+        let collapsedHistoryCenters = try await sidebarIconCenters(in: chat)
+        XCTAssertEqual(collapsedHistoryCenters, scrolledCenters)
+    }
+
+    @MainActor
+    private func sidebarIconCenters(in webView: WKWebView) async throws -> [String: [Double]] {
+        let centers = try await webView.evaluateJavaScript("""
+            (() => {
+                const icons = document.querySelectorAll(
+                    '.primary-nav button > :first-child, .workspace-list-heading button svg, ' +
+                    '.task-search button svg, [data-tab-kind] > :first-child, .workspace-close svg'
+                );
+                return Object.fromEntries(Array.from(icons, icon => {
+                    const rect = icon.getBoundingClientRect();
+                    const label = icon.closest('[aria-label]')?.getAttribute('aria-label');
+                    return [label, [rect.x + rect.width / 2, rect.y + rect.height / 2]];
+                }));
+            })()
+            """)
+        return try XCTUnwrap(centers as? [String: [Double]])
     }
 
     @MainActor

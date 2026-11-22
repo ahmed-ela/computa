@@ -4,6 +4,30 @@ import XCTest
 
 final class ContextIndicatorPresentationTests: XCTestCase {
     @MainActor
+    func testSettingsGearStaysAtTheSamePointWhenSidebarCollapses() throws {
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences())
+        func gearPixels(collapsed: Bool) throws -> IndexSet {
+            state.isTaskSidebarCollapsed = collapsed
+            let bar = NativeRuntimeStatusBar(state: state)
+                .frame(width: collapsed ? 72 : 190, height: 34)
+                .environment(\.colorScheme, .light)
+                .background(Color.white)
+            let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(ImageRenderer(content: bar).cgImage))
+            var pixels = IndexSet()
+            for y in 0..<bitmap.pixelsHigh {
+                let background = bitmap.colorAt(x: bitmap.pixelsWide - 1, y: y)
+                for x in 0..<72 where bitmap.colorAt(x: x, y: y) != background {
+                    pixels.insert(y * 72 + x)
+                }
+            }
+            return pixels
+        }
+        let expanded = try gearPixels(collapsed: false)
+        XCTAssertFalse(expanded.isEmpty)
+        XCTAssertEqual(try gearPixels(collapsed: true), expanded)
+    }
+
+    @MainActor
     func testStatusBarHidesContextUsageForMeasuredAndCompactingTasks() throws {
         let task = AgentTask(title: "Status bar fixture", summary: "", status: .draft, workspace: "", model: "local")
         let state = AppState(tasks: [task], preferences: isolatedTestPreferences())
