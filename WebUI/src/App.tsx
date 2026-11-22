@@ -11,7 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@octanejs/shadcn/DropdownMenu';
-import { BotAdd16Filled, Icon } from './Icon';
+import { Icon } from './Icon';
 import { useConversationDrafts } from './conversationDrafts';
 import { WorkspaceSidebar } from './WorkspaceSidebar';
 import { copyText } from './clipboard';
@@ -900,6 +900,7 @@ export function App() {
   const nativeHost = Boolean(window.webkit?.messageHandlers?.localCodex);
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(nativeHost ? null : previewSnapshot);
   const [search, setSearch] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
   const draftState = useConversationDrafts(snapshot?.promptReceipts);
   const focusSearchOnExpand = useRef(false);
   const currentSnapshot = useRef(snapshot);
@@ -937,20 +938,36 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!snapshot?.isTaskSidebarCollapsed && focusSearchOnExpand.current) {
+    if (searchOpen && !snapshot?.isTaskSidebarCollapsed && focusSearchOnExpand.current) {
       focusSearchOnExpand.current = false;
       document.getElementById('task-search')?.focus();
     }
-  }, [snapshot?.isTaskSidebarCollapsed]);
+  }, [snapshot?.isTaskSidebarCollapsed, searchOpen]);
 
   function focusSearch() {
-    if (currentSnapshot.current?.isTaskSidebarCollapsed) {
-      focusSearchOnExpand.current = true;
-      post({ action: 'setTaskSidebarCollapsed', collapsed: false });
-    } else {
-      document.getElementById('task-search')?.focus();
-    }
+    const current = currentSnapshot.current;
+    if (!current || current.isSettingsPresented || current.pendingApprovalCount) return;
+    const field = document.getElementById('task-search');
+    if (field && !current.isTaskSidebarCollapsed) { field.focus(); return; }
+    focusSearchOnExpand.current = true;
+    setSearchOpen(true);
+    if (current.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarCollapsed', collapsed: false });
   }
+
+  function dismissSearch() {
+    focusSearchOnExpand.current = false;
+    setSearchOpen(false);
+    setSearch('');
+  }
+
+  useEffect(() => {
+    document.addEventListener('kolmogor-search-chats', focusSearch);
+    document.addEventListener('kolmogor-clear-chat-search', dismissSearch);
+    return () => {
+      document.removeEventListener('kolmogor-search-chats', focusSearch);
+      document.removeEventListener('kolmogor-clear-chat-search', dismissSearch);
+    };
+  }, []);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -980,12 +997,12 @@ export function App() {
 
   const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
   return (
-    <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined}
+    <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined} data-native-sidebar-controls={snapshot.nativeSidebarControls || undefined}
       data-browser-primary={snapshot.primaryBrowserID && !snapshot.isSettingsPresented ? (nativeHost ? "native" : "preview") : undefined}
       data-sidebar-collapsed={snapshot.isTaskSidebarCollapsed ? 'true' : undefined}
       data-browser-pane={nativeHost && snapshot.isBrowserPresented && !snapshot.isSettingsPresented ? 'open' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
-      <WorkspaceSidebar post={post} snapshot={snapshot} search={search} setSearch={setSearch} focusSearch={focusSearch} nativeHost={nativeHost} />
+      <WorkspaceSidebar post={post} snapshot={snapshot} search={search} setSearch={setSearch} searchOpen={searchOpen} focusSearch={focusSearch} dismissSearch={dismissSearch} nativeHost={nativeHost} />
       {!nativeHost && snapshot.primaryBrowserID && <main className="preview-browser-content">
         <Icon name="browser" /><strong>{snapshot.workspaceBrowsers?.find(tab => tab.id === snapshot.primaryBrowserID)?.title}</strong>
         <span>Pages open in the desktop browser.</span></main>}
@@ -1010,7 +1027,7 @@ export function App() {
           <div className="no-task-view">
             <p>Choose a model for your next task.</p>
             <DefaultModelSelector snapshot={snapshot} />
-            <Button onClick={() => post({ action: 'createTask' })}><BotAdd16Filled /> New agent</Button>
+            <Button onClick={() => post({ action: 'createTask' })}><Icon name="plus" size={16} /> New agent</Button>
           </div>
         )}
       </main>

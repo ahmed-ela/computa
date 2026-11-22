@@ -29,6 +29,7 @@ struct WorkspaceBrowserSnapshot: Codable, Equatable, Sendable {
 
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
+    var nativeSidebarControls = false
     let titlebarHeight: CGFloat?
     let mixesBrowserTabsInSidebar: Bool
     let workspaceOrder: [WorkspaceTabID]
