@@ -9,7 +9,7 @@ bun run build
 ```
 
 For Cloudflare Workers Builds in the personal account, connect this repository
-to a Worker named `computa`. Set the production branch to `kolmogor`, root
+to a Worker named `kolmogor`. Set the production branch to `kolmogor`, root
 directory to `Website`, build command to
 `bun install --frozen-lockfile && bun run build`, and deploy command to
 `npx wrangler deploy`. Set `BUN_VERSION` to `1.3.5` to match the lockfile.
