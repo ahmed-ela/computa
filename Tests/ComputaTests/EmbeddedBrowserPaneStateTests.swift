@@ -106,7 +106,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         <link rel="icon" href="/images/train.svg">
         <input id="reservation">
         """
-        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: html, iconPath: "/images/train.svg")
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: html, iconPath: "/images/train.svg",
+                                                iconDelay: .milliseconds(1000))
         let origin = try await site.start()
         defer { site.stop() }
         let prefs = isolatedTestPreferences()
@@ -150,6 +151,15 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertNotEqual(id, ref)
         let page = try XCTUnwrap(session.webView(for: id))
         try session.navigate(tabID: id, to: origin.appendingPathComponent("human/final"))
+        try await requireDOM("""
+        (() => {
+          const spinner = document.querySelector('[data-tab-kind=browser] .site-favicon-spinner');
+          return spinner && spinner.closest('button').textContent.includes('Cedar rail')
+            && spinner.offsetWidth === 16
+            && getComputedStyle(spinner).maskImage.includes('/icons/favicon-loading.svg')
+            && getComputedStyle(spinner).animationName === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'favicon-spin');
+        })()
+        """)
         try await requireDOM("""
         (() => { const row = document.querySelector('.workspace-tab-row [data-tab-kind=browser]');
           const icon = row?.querySelector('img'); return row?.getAttribute('aria-current') === 'page' &&
@@ -366,7 +376,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         defer { session.shutdown() }
         session.enableWorkspaceFavicons()
         let withIcon = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>First</title>", iconPath: "/favicon.ico")
-        let withoutIcon = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Second</title>")
+        // Allow same-origin images, but return a 404 for /favicon.ico.
+        let withoutIcon = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Second</title>",
+                                                       iconPath: "/unused.svg")
         defer { withIcon.stop(); withoutIcon.stop() }
         let first = try await withIcon.start(), second = try await withoutIcon.start()
         let id = try session.createTab(url: first.appendingPathComponent("human/final"))
@@ -379,6 +391,13 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let page = try XCTUnwrap(session.webView(for: id))
         let loaded = await waitForScriptBool(on: page, script: "document.title === 'Second' && document.readyState === 'complete'")
         XCTAssertTrue(loaded)
+        let noIconDeadline = ContinuousClock.now + .seconds(5)
+        while .now < noIconDeadline,
+              tab.isFaviconLoading || !withoutIcon.requests.contains(where: { $0.path == "/favicon.ico" }) {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(withoutIcon.requests.contains { $0.path == "/favicon.ico" })
+        XCTAssertFalse(tab.isFaviconLoading)
         XCTAssertNil(tab.favicon)
     }
 

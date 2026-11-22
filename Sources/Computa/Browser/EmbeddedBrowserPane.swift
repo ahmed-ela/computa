@@ -115,11 +115,7 @@ struct EmbeddedBrowserPane: View {
         }
     }
 
-    private static let newTabIcon: Image = {
-        guard let url = WebUIResourceLocator.indexURL?.deletingLastPathComponent().appendingPathComponent("icons/new-browser-tab.svg"),
-              let image = NSImage(contentsOf: url) else { return Image(systemName: "arrow.up.right.square") }
-        return Image(nsImage: image)
-    }()
+    private static let newTabIcon = tabIconAsset("new-browser-tab", fallback: "arrow.up.right.square")
 
     private var tabStrip: some View {
         HStack(spacing: 4) {
@@ -277,6 +273,28 @@ struct EmbeddedBrowserPane: View {
 }
 
 @MainActor
+private func tabIconAsset(_ name: String, fallback: String) -> Image {
+    guard let url = WebUIResourceLocator.indexURL?.deletingLastPathComponent().appendingPathComponent("icons/\(name).svg"),
+          let image = NSImage(contentsOf: url) else { return Image(systemName: fallback) }
+    return Image(nsImage: image)
+}
+
+private struct LoadingFavicon: View {
+    private static let icon = tabIconAsset("favicon-loading", fallback: "circle.lefthalf.filled")
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var visible = false
+
+    var body: some View {
+        let rotate = visible && !reduceMotion
+        Self.icon.renderingMode(.template).resizable().foregroundStyle(.secondary)
+            .rotationEffect(.degrees(rotate ? 360 : 0))
+            .animation(rotate ? .linear(duration: 1).repeatForever(autoreverses: false) : nil, value: rotate)
+            .onAppear { visible = true }
+            .accessibilityHidden(true)
+    }
+}
+
+@MainActor
 private struct EmbeddedBrowserTabButton: View {
     let tab: EmbeddedBrowserTab
     let selected: Bool
@@ -299,8 +317,8 @@ private struct EmbeddedBrowserTabButton: View {
         HStack(spacing: 4) {
             Button(action: onSelect) {
                 HStack(spacing: 6) {
-                    if tab.isLoading {
-                        ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+                    if tab.isFaviconLoading {
+                        LoadingFavicon().frame(width: 14, height: 14)
                     } else if let data = tab.favicon, let image = NSImage(data: data) {
                         Image(nsImage: image).resizable().scaledToFit().frame(width: 14, height: 14)
                     } else {

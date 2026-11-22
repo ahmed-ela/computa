@@ -31,8 +31,14 @@ test('sidebar uses the site icon or hostname initial in both sizes; an empty tab
     expect(initial).toContain('class="site-initial">R</span>');
     expect(initial.match(/aria-current="page"/g)?.length).toBe(1);
     expect(initial).toContain('aria-label="New tab"');
+    expect(initial).not.toContain('site-favicon-spinner');
+    snapshot.workspaceBrowsers![0].isFaviconLoading = true;
+    expect(render()).toContain('class="site-favicon-spinner"');
+    expect(render()).not.toContain('class="site-initial"');
+    snapshot.workspaceBrowsers![0].isFaviconLoading = false;
     snapshot.workspaceBrowsers![0].favicon = 'aWNvbg==';
     expect(render()).toContain('src="data:image/png;base64,aWNvbg=="');
+    expect(render()).not.toContain('site-favicon-spinner');
     expect(render()).not.toContain('class="site-initial"');
   }
 });

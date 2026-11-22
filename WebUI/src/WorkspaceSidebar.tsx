@@ -35,6 +35,7 @@ export function workspaceItems(snapshot: AppSnapshot, history: boolean, search: 
 }
 
 function SiteIcon({ tab }: { tab: WorkspaceBrowser }) {
+  if (tab.isFaviconLoading) return <span aria-hidden="true" className="site-favicon-spinner" />;
   if (tab.favicon) return <img className="site-favicon" alt="" src={'data:image/png;base64,' + tab.favicon} />;
   const letter = tab.host?.replace(/^www\./i, '').slice(0, 1).toUpperCase();
   return letter ? <span aria-hidden="true" className="site-initial">{letter}</span> : <Icon name="browser" size={16} />;

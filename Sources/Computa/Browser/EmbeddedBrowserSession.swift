@@ -14,6 +14,8 @@ final class EmbeddedBrowserTab: Identifiable {
     fileprivate let kimiProfileID: UUID?
     fileprivate(set) var setupProvider: EmbeddedWebModelTransport.Provider?
     fileprivate(set) var favicon: Data?
+    fileprivate var pendingFaviconGeneration: UUID?
+    var isFaviconLoading: Bool { isLoading || pendingFaviconGeneration == documentGeneration }
     fileprivate(set) var title = "New tab"
     fileprivate(set) var url: URL?
     fileprivate(set) var isLoading = false
@@ -4076,9 +4078,13 @@ final class EmbeddedBrowserSession {
               entry.faviconRequestedGeneration != entry.tab.documentGeneration else { return }
         let generation = entry.tab.documentGeneration
         entry.faviconRequestedGeneration = generation
+        entry.tab.pendingFaviconGeneration = generation
         Task { @MainActor [weak entry, weak view = entry.view] in
-            guard let view, let data = await BrowserFavicon.read(in: view), let entry,
-                  entry.tab.documentGeneration == generation, view.url?.host == url.host else { return }
+            guard let view else { return }
+            let data = await BrowserFavicon.read(in: view)
+            guard let entry, entry.tab.documentGeneration == generation else { return }
+            entry.tab.pendingFaviconGeneration = nil
+            guard view.url?.host == url.host else { return }
             entry.tab.favicon = data
         }
     }
