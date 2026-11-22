@@ -5,7 +5,7 @@ type CompletionAction = Extract<NativeAction, { action: 'acknowledgeTaskCompleti
 export function displayedCompletionAcknowledgment(
   snapshot: AppSnapshot | null, visible: boolean, focused: boolean,
 ): CompletionAction | undefined {
-  if (!snapshot || !visible || !focused || snapshot.isSettingsPresented
+  if (!snapshot || snapshot.primaryBrowserID || !visible || !focused || snapshot.isSettingsPresented
     || snapshot.isReviewPresented || snapshot.pendingApprovalCount > 0) return;
   const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
   if (!task || task.status !== 'Completed' || task.isBusy || !task.hasUnreadCompletion

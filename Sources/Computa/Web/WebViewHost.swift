@@ -15,6 +15,8 @@ struct WebWorkspaceView: View {
     private func workspace(topInset: CGFloat) -> some View {
         // The web chat and native browser share one divider below the window controls.
         let rowHeight = topInset > 0 ? topInset : 32
+        let browserPrimary = state.primaryBrowserID != nil && state.shouldPresentBrowserPane
+        let sidebarWidth: CGFloat = state.isTaskSidebarCollapsed ? 72 : 230
         return ZStack(alignment: .center) {
             HSplitView {
                 CodexWebView(
@@ -22,7 +24,9 @@ struct WebWorkspaceView: View {
                     snapshot: WebUISnapshot(state: state, titlebarHeight: rowHeight),
                     showAccessModeSettings: { showsAccessModeSettings = true }
                 )
-                .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: browserPrimary ? sidebarWidth : 600,
+                       idealWidth: browserPrimary ? sidebarWidth : 640,
+                       maxWidth: browserPrimary ? sidebarWidth : .infinity, maxHeight: .infinity)
                 // Each split item has its own safe area. Let the web sidebar
                 // paint behind the traffic lights using its actual width and theme.
                 .ignoresSafeArea(.container, edges: .top)
@@ -34,6 +38,7 @@ struct WebWorkspaceView: View {
                     EmbeddedBrowserPane(
                         session: state.browserSession,
                         tabRowHeight: rowHeight,
+                        usesSidebarTabs: browserPrimary,
                         titlebarTrailingInset: topInset > 0 ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
@@ -41,7 +46,10 @@ struct WebWorkspaceView: View {
                         onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
                         canConfigureKimiProfile: state.canConfigureKimiProfile,
                         onSwitchKimiProfile: state.switchKimiSignInProfile(from:),
-                        onClose: { state.isBrowserPresented = false }
+                        onClose: {
+                            state.workspaceTabs.browserIsPrimary = false
+                            state.isBrowserPresented = false
+                        }
                     )
                     .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea(.container, edges: .top)
@@ -91,6 +99,7 @@ struct WebWorkspaceView: View {
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
         }
+        .onAppear { state.browserSession.enableWorkspaceFavicons() }
         .onChange(of: state.presentedSheet) { _, sheet in
             if sheet != .settings { showsAccessModeSettings = false }
         }
@@ -270,7 +279,8 @@ private struct BrowserTitlebarToggle: View {
     @Bindable var state: AppState
 
     var body: some View {
-        Toggle(isOn: $state.isBrowserPresented) {
+        Toggle(isOn: Binding(get: { state.isBrowserPresented && state.primaryBrowserID == nil },
+                             set: { _ in state.toggleWorkspaceBrowser() })) {
             Self.globe
                 .renderingMode(.template)
                 .resizable()
@@ -283,7 +293,7 @@ private struct BrowserTitlebarToggle: View {
         .buttonStyle(.borderless)
         .accessibilityLabel("Browser")
         .accessibilityIdentifier("browser-toggle")
-        .help(state.shouldPresentBrowserPane ? "Hide browser" : "Show browser")
+        .help(state.primaryBrowserID != nil && state.selectedTaskID != nil ? "Show chat beside browser" : state.shouldPresentBrowserPane ? "Hide browser" : "Show browser")
         .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
         .frame(width: Self.width, alignment: .leading)
     }

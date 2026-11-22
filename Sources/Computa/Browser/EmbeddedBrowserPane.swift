@@ -8,6 +8,7 @@ import WebKit
 struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
     var tabRowHeight: CGFloat = 32
+    var usesSidebarTabs = false
     var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
     var canLoadModels = false
@@ -115,29 +116,11 @@ struct EmbeddedBrowserPane: View {
 
     private var tabStrip: some View {
         HStack(spacing: 4) {
-            ScrollViewReader { scroll in
-                ScrollView(.horizontal) {
-                    HStack(spacing: 4) {
-                        ForEach(session.humanTabs) { tab in
-                            EmbeddedBrowserTabButton(
-                                tab: tab,
-                                selected: tab.id == session.selectedTabID,
-                                isKimiProfile: session.isKimiProfileTab(tab.id),
-                                onSelect: { session.selectTab(tab.id) },
-                                onClose: { session.closeTab(tab.id) }
-                            )
-                            .id(tab.id)
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-                .scrollIndicators(.hidden)
-                .onChange(of: session.selectedTabID) { _, id in
-                    if let id { scroll.scrollTo(id, anchor: .trailing) }
-                }
-                .onAppear {
-                    if let id = session.selectedTabID { scroll.scrollTo(id, anchor: .trailing) }
-                }
+            if usesSidebarTabs {
+                Text(selectedTab?.title ?? "New tab").font(.system(size: 12, weight: .medium)).lineLimit(1)
+                Spacer()
+            } else {
+                tabPicker
             }
 
             Button { createTab() } label: {
@@ -157,6 +140,33 @@ struct EmbeddedBrowserPane: View {
         // The globe is a native accessory at the trailing edge of this row.
         .padding(.trailing, titlebarTrailingInset)
         .frame(height: tabRowHeight)
+    }
+
+    private var tabPicker: some View {
+        ScrollViewReader { scroll in
+            ScrollView(.horizontal) {
+                HStack(spacing: 4) {
+                    ForEach(session.workspaceBrowserTabs) { tab in
+                        EmbeddedBrowserTabButton(
+                            tab: tab,
+                            selected: tab.id == session.selectedTabID,
+                            isKimiProfile: session.isKimiProfileTab(tab.id),
+                            onSelect: { session.selectTab(tab.id) },
+                            onClose: { session.closeTab(tab.id) }
+                        )
+                        .id(tab.id)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .scrollIndicators(.hidden)
+            .onChange(of: session.selectedTabID) { _, id in
+                if let id { scroll.scrollTo(id, anchor: .trailing) }
+            }
+            .onAppear {
+                if let id = session.selectedTabID { scroll.scrollTo(id, anchor: .trailing) }
+            }
+        }
     }
 
     private var navigationBar: some View {
@@ -313,6 +323,8 @@ private struct EmbeddedBrowserTabButton: View {
                 HStack(spacing: 6) {
                     if tab.isLoading {
                         ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+                    } else if let data = tab.favicon, let image = NSImage(data: data) {
+                        Image(nsImage: image).resizable().scaledToFit().frame(width: 14, height: 14)
                     } else {
                         Image(systemName: tabIcon).font(.caption)
                             .foregroundStyle(.secondary)

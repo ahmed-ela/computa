@@ -46,6 +46,12 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         self.openScreenRecordingSettings = openScreenRecordingSettings
     }
 
+    private static func workspaceTab(_ value: Any?) -> WorkspaceTabID? {
+        guard let fields = value as? [String: String], let id = fields["id"],
+              let kind = WorkspaceTabID.Kind(rawValue: fields["kind"] ?? "") else { return nil }
+        return .init(kind: kind, id: id)
+    }
+
     func attach(webView: WKWebView) {
         self.webView = webView
         Self.diagnostic("attached frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
@@ -104,6 +110,20 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             let kind = allowed.contains(reported) ? reported : "UnknownError"
             let line = body["line"] as? Int ?? 0
             Self.diagnostic("client failure kind=\(kind) line=\(line)")
+
+        case "newWorkspaceBrowserTab":
+            state.newWorkspaceBrowserTab()
+
+        case "selectWorkspaceTab", "closeWorkspaceTab", "moveWorkspaceTab":
+            guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
+                  let tab = Self.workspaceTab(body["tab"]), state.openWorkspaceTabs.contains(tab) else { return }
+            switch action {
+            case "selectWorkspaceTab": state.selectWorkspaceTab(tab)
+            case "closeWorkspaceTab": state.closeWorkspaceTab(tab)
+            default:
+                guard let target = Self.workspaceTab(body["target"]), state.openWorkspaceTabs.contains(target) else { return }
+                state.workspaceTabs.move(tab, to: target)
+            }
 
         case "selectTask":
             guard let id = body["id"] as? String,
@@ -207,7 +227,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
         case "toggleBrowser":
             guard !state.approvalGateBlocksInteraction else { return }
-            state.isBrowserPresented.toggle()
+            state.toggleWorkspaceBrowser()
 
         case "toggleReview":
             state.toggleReview()
@@ -442,8 +462,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         }
 
         if ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-           navigationAction.navigationType == .linkActivated {
-            NSWorkspace.shared.open(url)
+           navigationAction.navigationType == .linkActivated,
+           navigationAction.sourceFrame.isMainFrame, WebUIResourceLocator.contains(webView.url) {
+            state?.newWorkspaceBrowserTab(url: url)
         }
         return .cancel
     }
