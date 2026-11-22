@@ -660,7 +660,6 @@ function Composer({
             */}
           </div>
           <div className="composer-right">
-            <span className="send-shortcut" title="Enter sends · Shift+Enter inserts a newline"><kbd>↵</kbd></span>
             {task.status === 'Running' ? (
               <Button variant="outline" size="icon" className="stop-button" aria-label="Stop task" title="Stop task" onClick={() => post({ action: 'interruptTask', taskID: task.id })}>
                 <Icon name="pause" size={18} />
@@ -807,7 +806,7 @@ function Conversation({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSna
         <div className="conversation-content" ref={contentRef}>
           {rows.length === 0 ? (
             <div className="empty-conversation">
-              <h1>Breathe. We’ll take care of it.</h1>
+              <h1>Computa will take care of it.</h1>
               <p>Ask a question or give your Mac a task.</p>
               {showProjectFolderPicker && task.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="outline" size="sm" className="choose-workspace-button" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose a project folder</Button> : null}
             </div>
