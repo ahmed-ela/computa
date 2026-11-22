@@ -61,22 +61,35 @@ extension FocusedValues {
     @Entry var newBrowserTabInPane: (() -> Void)?
 }
 
-private struct WorkspaceCreationCommands: Commands {
+private struct WorkspaceCommands: Commands {
     let state: AppState
     let isTestHost: Bool
     @FocusedValue(\.newBrowserTabInPane) private var newBrowserTabInPane
+
+    private var workspaceUnavailable: Bool {
+        isTestHost || state.approvalGateBlocksInteraction || state.presentedSheet != nil
+    }
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
             Button("New Agent") { state.createTask() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
-                .disabled(isTestHost || state.approvalGateBlocksInteraction || state.presentedSheet != nil)
+                .disabled(workspaceUnavailable)
             Button("New Browser Tab") {
                 if let newBrowserTabInPane { newBrowserTabInPane() }
                 else { state.newWorkspaceBrowserTab() }
             }
             .keyboardShortcut("t", modifiers: .command)
-            .disabled(isTestHost || state.approvalGateBlocksInteraction || state.presentedSheet != nil)
+            .disabled(workspaceUnavailable)
+        }
+        CommandGroup(after: .toolbar) {
+            Group {
+                Button("Select Previous Workspace Tab") { state.selectAdjacentWorkspaceTab(.previous) }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                Button("Select Next Workspace Tab") { state.selectAdjacentWorkspaceTab(.next) }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+            }
+            .disabled(workspaceUnavailable || state.openWorkspaceTabs.isEmpty)
         }
     }
 }
@@ -125,7 +138,7 @@ struct ComputaApp: App {
                 if let updates { CheckForUpdatesButton(updates: updates) }
             }
             #endif
-            WorkspaceCreationCommands(state: state, isTestHost: launchMode == .testHost)
+            WorkspaceCommands(state: state, isTestHost: launchMode == .testHost)
 
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") {

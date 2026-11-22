@@ -21,8 +21,11 @@ retain their [separate qualification gates](../TODO.md#embedded-browser-agent-co
 
 Press **⌘T** from a chat or browser tab to open Google. The sidebar’s **New browser tab**
 button and the browser toolbar’s square-and-arrow button also open a browser tab.
-Use **⇧⌘N** for a new agent chat or **⌘N** for a new window. To visit another site,
-enter a web address or search term in the address field and press **Return**.
+Use **⇧⌘N** for a new agent chat or **⌘N** for a new window. Press **⌘⇧[** for the
+previous open tab and **⌘⇧]** for the next. Both follow the sidebar order across
+agent and browser tabs and wrap at either end.
+
+To visit another site, enter a web address or search term in the address field and press **Return**.
 Each tab has its own history and reload control. Drag the divider to resize
 the pane. Hiding the pane keeps its tabs open.
 

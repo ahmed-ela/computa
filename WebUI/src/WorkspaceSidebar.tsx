@@ -46,6 +46,10 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, focusSearch, nat
   const [history, setHistory] = useState(false);
   const [now, setNow] = useState(() => Date.now() / 1000);
   const dragging = useRef<WorkspaceTab | null>(null);
+  const tabList = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    tabList.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [snapshot.selectedTaskID, snapshot.primaryBrowserID]);
   const active = snapshot.tasks.some(isTaskActive);
   const collapsed = Boolean(snapshot.isTaskSidebarCollapsed);
   useEffect(() => {
@@ -91,7 +95,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, focusSearch, nat
         <Icon name={history ? 'sidebar' : 'history'} size={15} /></Button>
       {!collapsed && <span>{history ? 'Chat history' : 'Open tabs'}</span>}
     </div>
-    <nav className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={history ? 'Chat history' : 'Open tabs'}>
+    <nav ref={tabList} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={history ? 'Chat history' : 'Open tabs'}>
       {items.map((item,index) => {
         const status = item.task && sidebarAgentStatus(item.task);
         const selected = item.browser ? snapshot.primaryBrowserID === item.ref.id : !snapshot.primaryBrowserID && snapshot.selectedTaskID === item.ref.id;
