@@ -9,6 +9,7 @@ protocol AgentRuntimeClient: Sendable {
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption]
     func installedCLIModels() async throws -> [LocalModelOption]
     func loadTasks() async throws -> [AgentTask]
+    func loadTasks(including openThreadIDs: Set<String>) async throws -> [AgentTask]
     func events() -> AsyncStream<AgentRuntimeEvent>
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws
@@ -32,6 +33,7 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    func loadTasks(including openThreadIDs: Set<String>) async throws -> [AgentTask] { try await loadTasks() }
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { throw AgentCLIError.unavailable("CLI catalog unavailable.") }
     func installedCLIModels() async throws -> [LocalModelOption] { throw InstalledCodexCLI.Failure.missing }
     /// Older adapters may keep their restricted submission path. They cannot

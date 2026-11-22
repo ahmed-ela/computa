@@ -11,38 +11,88 @@ struct WorkspaceTabID: Codable, Hashable, Sendable {
     static func browser(_ id: UUID) -> Self { Self(kind: .browser, id: id.uuidString) }
 }
 
+/// Relaunch metadata only. WebKit leases, runtime handles and message contents never cross launches.
+struct SavedWorkspace: Codable, Equatable {
+    struct Page: Codable, Equatable {
+        let id: UUID
+        let url: URL?
+        let mobile: Bool
+    }
+
+    struct Draft: Codable, Equatable {
+        let title: String
+        let summary: String
+        let workspace: String
+        let model: String
+
+        init(_ task: AgentTask) {
+            title = task.title
+            summary = task.summary
+            workspace = task.workspace
+            model = task.model
+        }
+
+        func task(id: String) -> AgentTask {
+            AgentTask(id: id, title: title, summary: summary, status: .draft, workspace: workspace, model: model)
+        }
+    }
+
+    var order: [WorkspaceTabID]
+    var selectedAgent: String?
+    var drafts: [String: Draft]
+    var browserProfile: UUID?
+    var pages: [Page]
+    var selectedPage: UUID?
+    var browserIsPrimary: Bool
+    var showsBrowserPane: Bool
+}
+
 @MainActor @Observable
 final class WorkspaceTabs {
-    private static let preferenceKey = "Computa.Workspace.OpenAgents.v1"
+    private static let legacyKey = "Computa.Workspace.OpenAgents.v1"
+    private static let snapshotKey = "Computa.Workspace.OpenTabs.v2"
     private let defaults: UserDefaults
+    @ObservationIgnored private(set) var saved: SavedWorkspace?
+    @ObservationIgnored var onChange: (() -> Void)?
     private(set) var order: [WorkspaceTabID]
-    private(set) var hasSavedAgents: Bool
-    var browserIsPrimary = false
+    private var hasSavedAgents: Bool
+    var browserIsPrimary = false {
+        didSet { if oldValue != browserIsPrimary { onChange?() } }
+    }
 
     init(defaults: UserDefaults) {
         self.defaults = defaults
-        let saved = defaults.stringArray(forKey: Self.preferenceKey)
-        hasSavedAgents = saved != nil
-        var seen = Set<String>()
-        order = (saved ?? []).filter { seen.insert($0).inserted }.map(WorkspaceTabID.agent)
+        let snapshot = defaults.data(forKey: Self.snapshotKey).flatMap { try? JSONDecoder().decode(SavedWorkspace.self, from: $0) }
+        saved = snapshot
+        let legacy = defaults.stringArray(forKey: Self.legacyKey)
+        hasSavedAgents = snapshot != nil || legacy != nil
+        var seen = Set<WorkspaceTabID>()
+        order = (snapshot?.order ?? (legacy ?? []).map(WorkspaceTabID.agent)).filter { seen.insert($0).inserted }
+    }
+
+    func save(_ snapshot: SavedWorkspace) {
+        guard saved != snapshot, let data = try? JSONEncoder().encode(snapshot) else { return }
+        defaults.set(data, forKey: Self.snapshotKey)
+        saved = snapshot
+        hasSavedAgents = true
     }
 
     func open(_ tab: WorkspaceTabID) {
         guard !order.contains(tab) else { return }
         order.insert(tab, at: 0)
-        if tab.kind == .agent { saveAgents() }
+        onChange?()
     }
 
     func close(_ tab: WorkspaceTabID) {
         order.removeAll { $0 == tab }
-        if tab.kind == .agent { saveAgents() }
+        onChange?()
     }
 
     func move(_ tab: WorkspaceTabID, to target: WorkspaceTabID) {
         guard tab != target, let from = order.firstIndex(of: tab), let to = order.firstIndex(of: target) else { return }
         order.remove(at: from)
         order.insert(tab, at: to)
-        saveAgents()
+        onChange?()
     }
 
     /// On upgrade, open the current conversation and any still-running agents.
@@ -50,23 +100,28 @@ final class WorkspaceTabs {
     func initialAgent(in tasks: [AgentTask]) -> String? {
         guard !tasks.isEmpty else { return nil }
         let ids = Set(tasks.map(\.id))
+        func key(_ id: String) -> String { UUID(uuidString: id)?.uuidString ?? id }
+        var localForThread: [String: String] = [:]
+        for task in tasks {
+            localForThread[key(task.id)] = task.id
+            if let thread = task.runtimeThreadID { localForThread[key(thread)] = task.id }
+        }
         let hadOpenAgents = order.contains { $0.kind == .agent }
-        let before = order
-        order.removeAll { $0.kind == .agent && !ids.contains($0.id) }
+        var seen = Set<WorkspaceTabID>()
+        order = order.compactMap { tab in
+            guard tab.kind == .agent else { return tab }
+            if ids.contains(tab.id) { return tab }
+            return localForThread[key(tab.id)].map(WorkspaceTabID.agent)
+        }.filter { seen.insert($0).inserted }
         if !hasSavedAgents || (hadOpenAgents && !order.contains { $0.kind == .agent }) {
             let seed = tasks.filter { $0.id == tasks.first?.id || $0.status == .running }
             order.insert(contentsOf: seed.map { .agent($0.id) }, at: 0)
         }
-        if order != before { saveAgents() }
-        return order.first { $0.kind == .agent && ids.contains($0.id) }?.id
-    }
-
-    private func saveAgents() {
-        let ids = order.filter { $0.kind == .agent }.map(\.id)
-        if !hasSavedAgents || defaults.stringArray(forKey: Self.preferenceKey) != ids {
-            defaults.set(ids, forKey: Self.preferenceKey)
+        if let selected = saved?.selectedAgent {
+            let local = localForThread[key(selected)] ?? selected
+            if order.contains(.agent(local)) { return local }
         }
-        hasSavedAgents = true
+        return order.first { $0.kind == .agent }?.id
     }
 }
 

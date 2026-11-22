@@ -3,6 +3,28 @@ import XCTest
 @testable import Computa
 
 final class RuntimeContextContractTests: XCTestCase {
+    func testWorkspaceHistoryIncludesOnlyOpenChatsBeyondTheFirstPage() throws {
+        func page(_ ids: [String], next: String) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["result": ["data": ids.map { ["id": $0] }, "nextCursor": next]])
+        }
+        let recent = try page(["recent"], next: "page2")
+        var list = WorkspaceThreadList(openThreadIDs: ["recent", "older"])
+        XCTAssertEqual(try list.takePage(recent).compactMap { $0["id"] as? String }, ["recent"])
+        XCTAssertEqual(list.cursor, "page2")
+        let older = try page(["recent", "closed", "older"], next: "page3")
+        XCTAssertEqual(try list.takePage(older).compactMap { $0["id"] as? String }, ["older"])
+        XCTAssertNil(list.cursor)
+
+        var noOlderTabs = WorkspaceThreadList(openThreadIDs: ["recent"])
+        _ = try noOlderTabs.takePage(recent)
+        XCTAssertNil(noOlderTabs.cursor)
+
+        var missing = WorkspaceThreadList(openThreadIDs: ["deleted"])
+        _ = try missing.takePage(recent)
+        XCTAssertThrowsError(try missing.takePage(recent))
+    }
+
+
     func testIntermediateContextFullSentinelDoesNotInterruptSuccessfulCompaction() {
         var guardrail = AppServerCompactionProgressGuard()
         guardrail.observeTurnStart(taskID: "task", turnID: "turn")

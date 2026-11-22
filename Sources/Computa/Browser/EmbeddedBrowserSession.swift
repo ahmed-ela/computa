@@ -8,7 +8,7 @@ import WebKit
 final class EmbeddedBrowserTab: Identifiable {
     let id: UUID
     // The privileged sidebar receives this display handle, never a browser-tool target ID.
-    let workspaceID = UUID()
+    let workspaceID: UUID
     let isPopup: Bool
     let requestsMobileSite: Bool
     fileprivate let kimiProfileID: UUID?
@@ -26,7 +26,8 @@ final class EmbeddedBrowserTab: Identifiable {
     fileprivate(set) var isWebInspectorEnabled = false
     fileprivate(set) var isWebInspectorAvailable = false
 
-    fileprivate init(id: UUID = UUID(), isPopup: Bool = false, kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false) {
+    fileprivate init(id: UUID = UUID(), workspaceID: UUID = UUID(), isPopup: Bool = false, kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false) {
+        self.workspaceID = workspaceID
         self.requestsMobileSite = requestsMobileSite
         self.id = id; self.isPopup = isPopup; self.kimiProfileID = kimiProfileID
     }
@@ -75,7 +76,32 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private var workspaceFaviconsEnabled = false
     @ObservationIgnored var onWorkspaceTabOpened: ((UUID) -> Void)?
     @ObservationIgnored var onWorkspaceTabClosed: ((UUID, Bool) -> Void)?
+    @ObservationIgnored var onWorkspacePageChanged: (() -> Void)?
     private(set) var selectedTabID: UUID?
+
+    var workspaceProfileID: UUID? { persistent ? persistentProfileIdentifier() : nil }
+
+    var restorablePages: [SavedWorkspace.Page] {
+        guard persistent else { return [] }
+        return tabs.compactMap { tab in
+            guard let entry = entries[tab.id], entry.isRestorable else { return nil }
+            return SavedWorkspace.Page(id: tab.workspaceID, url: entry.restoreURL, mobile: tab.requestsMobileSite)
+        }
+    }
+
+    func restoreWorkspacePages(_ snapshot: SavedWorkspace) {
+        guard persistent, snapshot.browserProfile == workspaceProfileID else { return }
+        var seen = Set(workspaceBrowserTabs.map(\.workspaceID))
+        for page in snapshot.pages where tabs.count < maximumTabs {
+            guard snapshot.order.contains(.browser(page.id)), seen.insert(page.id).inserted else { continue }
+            // createTab validates every address and gives the new view fresh runtime authority.
+            _ = try? createTab(url: EmbeddedBrowserURLPolicy.workspaceAddress(page.url), select: false, modelOwned: false,
+                               requestsMobileSite: page.mobile, workspaceID: page.id)
+        }
+        let selected = workspaceBrowserTabs.first { $0.workspaceID == snapshot.selectedPage }
+        if let tab = selected ?? workspaceBrowserTabs.first { selectTab(tab.id) }
+    }
+
     private(set) var kimiModelProfileID: UUID?
     private(set) var errorMessage: String?
     #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
@@ -228,6 +254,8 @@ final class EmbeddedBrowserSession {
         let usesIsolatedChatGPTProfile: Bool
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
+        var restoreURL: URL?
+        var isRestorable: Bool { isAvailableToBrowserTools && !isToolOwned && !tab.isPopup }
         var isRegularBrowserTab: Bool { !isModelOwned && tab.kimiProfileID == nil }
         var isDesktopHumanRecoverySource: Bool { isRegularBrowserTab && !isToolOwned && !tab.requestsMobileSite }
         var isAvailableToBrowserTools: Bool { isRegularBrowserTab && tab.setupProvider == nil }
@@ -418,6 +446,7 @@ final class EmbeddedBrowserSession {
         let id = try createTab()
         guard let tab = humanTab(id: id) else { throw Failure.tabClosed }
         tab.setupProvider = provider
+        onWorkspacePageChanged?()
         tab.isWebInspectorAvailable = false
         do { try navigate(tabID: id, to: provider.startURL) }
         catch { closeTab(id); throw error }
@@ -778,7 +807,7 @@ final class EmbeddedBrowserSession {
     }
 
     private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
-                           requestsMobileSite: Bool = false, isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
+                           requestsMobileSite: Bool = false, workspaceID: UUID = UUID(), isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
             guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
@@ -809,7 +838,7 @@ final class EmbeddedBrowserSession {
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
             let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned,
                                         usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil, kimiProfileID: kimiProfile?.id,
-                                        requestsMobileSite: requestsMobileSite)
+                                        requestsMobileSite: requestsMobileSite, workspaceID: workspaceID)
             if toolOwned { mountModelView(entry) }
             // Empty tabs intentionally do not load a homepage or trigger any network request.
             if let url { try navigate(tabID: entry.tab.id, to: url) }
@@ -822,14 +851,14 @@ final class EmbeddedBrowserSession {
 
     private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
                              popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false,
-                             kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false) throws -> Entry {
+                             kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false, workspaceID: UUID = UUID()) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
         guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         // Apply before construction/initial navigation for human, tool, model
         // and popup tabs. Keep WebKit's own platform/engine user-agent prefix.
         configuration.applicationNameForUserAgent = EmbeddedBrowserIdentity.currentApplicationName
-        let tab = EmbeddedBrowserTab(isPopup: popupOpenerTabID != nil, kimiProfileID: kimiProfileID, requestsMobileSite: requestsMobileSite)
+        let tab = EmbeddedBrowserTab(workspaceID: workspaceID, isPopup: popupOpenerTabID != nil, kimiProfileID: kimiProfileID, requestsMobileSite: requestsMobileSite)
         let view: WKWebView
         #if DEBUG
         if modelOwned, let factory = modelViewFactoryForTesting { view = factory(configuration) }
@@ -908,6 +937,7 @@ final class EmbeddedBrowserSession {
         guard let entry = entries[id] else { errorMessage = Failure.tabClosed.localizedDescription; return }
         guard !entry.isModelOwned else { return }
         selectedTabID = id
+        onWorkspacePageChanged?()
         errorMessage = entry.tab.error
     }
 
@@ -988,6 +1018,10 @@ final class EmbeddedBrowserSession {
             entry.pendingConversationURL = url
             (entry.view as? EmbeddedModelWebView)?.captureNativeFocus()
             entry.navigation = entry.view.load(URLRequest(url: url))
+            if persistent, entry.isRestorable {
+                entry.restoreURL = EmbeddedBrowserURLPolicy.workspaceAddress(url)
+                onWorkspacePageChanged?()
+            }
         } catch {
             report(error.localizedDescription, tabID: tabID)
             throw error
@@ -3704,6 +3738,11 @@ final class EmbeddedBrowserSession {
         entry.tab.canGoForward = view.canGoForward
         // A provisional load can still expose the old page URL. Observe the
         // committed document or settled native URL without inspecting its DOM.
+        if persistent, entry.isRestorable, committedNavigation || !view.isLoading,
+           let url = view.url, entry.restoreURL != url {
+            entry.restoreURL = EmbeddedBrowserURLPolicy.workspaceAddress(url)
+            onWorkspacePageChanged?()
+        }
         if entry.isRegularBrowserTab, committedNavigation || !view.isLoading {
             observeHumanVerificationCheckpoint(entry)
             if entry.recoverySettledGeneration == entry.tab.documentGeneration {

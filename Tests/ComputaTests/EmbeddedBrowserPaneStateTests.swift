@@ -113,8 +113,116 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let restored = AppState(tasks: [], preferences: prefs, browserSession: restoredSession)
         restored.replaceTasks(with: tasks)
         XCTAssertEqual(restored.openWorkspaceTabs, expected)
-        XCTAssertEqual(restored.selectedTaskID, tasks[0].id)
+        XCTAssertEqual(restored.selectedTaskID, tasks[1].id)
         XCTAssertTrue(restored.tasks.contains { $0.id == tasks[2].id })
+    }
+
+    @MainActor
+    func testMixedWorkspaceReopensPagesAndBindsChatToRestoredThread() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Workspace fixture</title>")
+        let address = try await site.start().appendingPathComponent("human/final")
+        defer { site.stop() }
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        let session = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        let task = AgentTask(title: "Review", summary: "", status: .completed, workspace: "", model: "test")
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session)
+        let thread = UUID().uuidString.lowercased()
+        state.apply(.taskThreadBound(taskID: task.id, threadID: thread))
+        let id = try session.createTab(url: address, requestsMobileSite: true)
+        let page = try XCTUnwrap(session.humanTab(id: id))
+        let view = try XCTUnwrap(session.webView(for: id))
+        let loaded = await waitForScriptBool(on: view, script: "document.title === 'Workspace fixture'")
+        XCTAssertTrue(loaded)
+        _ = try await view.evaluateJavaScript("location.hash = 'seat'; true")
+        let deadline = ContinuousClock.now + .seconds(5)
+        while session.restorablePages.first?.url?.fragment != "seat", .now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(session.restorablePages.first?.url?.fragment, "seat")
+        state.newWorkspaceBrowserTab()
+        let blank = try XCTUnwrap(state.primaryBrowserID)
+        state.createTask()
+        let draft = try XCTUnwrap(state.selectedTaskID)
+        state.workspaceTabs.move(.agent(task.id), to: .browser(blank))
+        state.selectWorkspaceTab(.browser(page.workspaceID))
+        state.toggleWorkspaceBrowser()
+        state.selectTask(task.id)
+        // Private runtime pages and explicitly closed human tabs are absent from the saved order.
+        _ = try session.createModelTab(url: URL(string: "about:blank")!)
+        _ = try session.createToolTab(url: URL(string: "about:blank")!)
+        let closed = try session.createTab(select: false)
+        session.closeTab(closed)
+        let expectedOrder = state.openWorkspaceTabs.map { $0 == .agent(task.id) ? .agent(thread) : $0 }
+        _ = await state.shutdownRuntime()
+
+        let newSession = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        defer { newSession.shutdown() }
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: newSession)
+        // Simulate browser callbacks while the app server is still reading history.
+        let reopened = try XCTUnwrap(newSession.workspaceBrowserTabs.first { $0.workspaceID == page.workspaceID })
+        newSession.selectTab(reopened.id)
+        let history = AgentTask(id: thread, runtimeThreadID: thread, title: task.title, summary: "",
+                                status: .completed, workspace: "", model: task.model)
+        restored.replaceTasks(with: [history] + restored.tasks)
+        XCTAssertEqual(restored.openWorkspaceTabs, expectedOrder)
+        XCTAssertEqual(restored.selectedTaskID, thread)
+        XCTAssertTrue(restored.tasks.contains { $0.id == draft && $0.status == .draft })
+        XCTAssertNil(restored.primaryBrowserID)
+        XCTAssertTrue(restored.shouldPresentBrowserPane)
+        XCTAssertEqual(newSession.selectedTabID, reopened.id)
+        XCTAssertNotEqual(reopened.id, id)
+        XCTAssertFalse(reopened.isWebInspectorEnabled)
+        XCTAssertTrue(reopened.requestsMobileSite)
+        XCTAssertEqual(newSession.tabs.count, 2)
+        let restoredView = try XCTUnwrap(newSession.webView(for: reopened.id))
+        let restoredPageLoaded = await waitForScriptBool(on: restoredView, script: "document.title === 'Workspace fixture' && location.hash === '#seat'")
+        XCTAssertTrue(restoredPageLoaded)
+        restored.selectWorkspaceTab(.browser(blank))
+        let next = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        defer { next.shutdown() }
+        let nextState = AppState(tasks: [history], preferences: prefs, browserSession: next)
+        XCTAssertEqual(nextState.primaryBrowserID, blank)
+        XCTAssertEqual(nextState.openWorkspaceTabs, expectedOrder)
+    }
+
+    @MainActor
+    func testLegacyOrderMigratesAndClosedTabsStayClosed() throws {
+        let prefs = isolatedTestPreferences()
+        let tasks = ["alpha", "beta"].map {
+            AgentTask(id: $0, title: $0, summary: "", status: .completed, workspace: "", model: "test")
+        }
+        prefs.set(["beta", "missing", "alpha", "beta"], forKey: "Computa.Workspace.OpenAgents.v1")
+        prefs.set(Data([0xff]), forKey: "Computa.Workspace.OpenTabs.v2")
+        let first = AppState(tasks: tasks, preferences: prefs)
+        XCTAssertEqual(first.selectedTaskID, "beta")
+        XCTAssertEqual(first.openWorkspaceTabs, [.agent("beta"), .agent("alpha")])
+        first.closeWorkspaceTab(.agent("beta"))
+        first.closeWorkspaceTab(.agent("alpha"))
+        let next = AppState(tasks: tasks, preferences: prefs)
+        XCTAssertTrue(next.openWorkspaceTabs.isEmpty)
+        XCTAssertNil(next.selectedTaskID)
+    }
+
+    @MainActor
+    func testRestoreRespectsProfileAndNeverLoadsCredentialRoutesOrPrivilegedSchemes() throws {
+        let prefs = isolatedTestPreferences(), profile = UUID(), blank = UUID()
+        let pages = ["file:///tmp/private", "https://user:secret@example.com", "https://example.com/#access_token=secret",
+                     "https://example.com/?code=grant&state=test"].map {
+            SavedWorkspace.Page(id: UUID(), url: URL(string: $0)!, mobile: false)
+        }
+        let record = SavedWorkspace(order: pages.map { .browser($0.id) } + [.browser(blank)], selectedAgent: nil,
+            drafts: [:], browserProfile: profile, pages: pages + [.init(id: blank, url: nil, mobile: true)],
+            selectedPage: blank, browserIsPrimary: true, showsBrowserPane: false)
+        let other = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
+        defer { other.shutdown() }
+        other.restoreWorkspacePages(record)
+        XCTAssertTrue(other.tabs.isEmpty)
+        let session = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        defer { session.shutdown() }
+        session.restoreWorkspacePages(record)
+        XCTAssertEqual(session.tabs.count, pages.count + 1)
+        XCTAssertTrue(session.restorablePages.allSatisfy { $0.url == nil })
+        XCTAssertEqual(session.restorablePages.last?.id, blank)
     }
 
     @MainActor

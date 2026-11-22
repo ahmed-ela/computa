@@ -56,13 +56,16 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         channel.continuation.yield(event)
     }
 
-    func loadTasks() async throws -> [AgentTask] {
+    func loadTasks() async throws -> [AgentTask] { try await loadTasks(including: []) }
+
+    func loadTasks(including openThreadIDs: Set<String>) async throws -> [AgentTask] {
         listen()
         let external = try await providerChats.load()
         for chat in external { providerOwners[chat.id] = ProviderCLI(modelID: chat.model) }
-        let regular = try await bundled.loadTasks()
-        for chat in regular { owners[chat.id] = false }
         let saved = try cliThreads.entries()
+        let bundledIDs = openThreadIDs.subtracting(saved.keys).subtracting(external.map(\.id))
+        let regular = try await bundled.loadTasks(including: bundledIDs)
+        for chat in regular { owners[chat.id] = false }
         guard !saved.isEmpty else { return (regular + external).sorted { $0.updatedAt > $1.updatedAt } }
         let native: [AgentTask]
         do { native = try await cli.loadTasks() }

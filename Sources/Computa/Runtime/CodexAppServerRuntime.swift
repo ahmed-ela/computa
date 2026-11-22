@@ -366,6 +366,37 @@ enum AppServerCompletedToolItemContract {
     }
 }
 
+/// Keep the usual first history page and hydrate only open chats from older pages.
+struct WorkspaceThreadList {
+    private var missing: Set<String>
+    private var seenCursors = Set<String>()
+    private var seenIDs = Set<String>()
+    private(set) var cursor: String?
+
+    init(openThreadIDs: Set<String>) { missing = openThreadIDs }
+
+    mutating func takePage(_ response: Data) throws -> [[String: Any]] {
+        guard let object = try JSONSerialization.jsonObject(with: response) as? [String: Any],
+              let result = object["result"] as? [String: Any], let page = result["data"] as? [[String: Any]] else {
+            throw CocoaError(.coderReadCorrupt)
+        }
+        let first = cursor == nil
+        let selected = page.filter { record in
+            guard let id = record["id"] as? String else { return false }
+            let wasOpen = missing.remove(id) != nil
+            return (first || wasOpen) && seenIDs.insert(id).inserted
+        }
+        cursor = nil
+        if !missing.isEmpty, let next = result["nextCursor"], !(next is NSNull) {
+            guard let next = next as? String, !next.isEmpty, seenCursors.insert(next).inserted else {
+                throw CocoaError(.coderReadCorrupt)
+            }
+            cursor = next
+        }
+        return selected
+    }
+}
+
 enum AppServerThreadHistoryContract {
     /// Explicit saved names win. Unnamed chats use their first visible user
     /// prompt, whose appended runtime guidance was removed during history read.
@@ -1046,9 +1077,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
 
     func hasBoundThread(taskID: String) async -> Bool { await core.hasBoundThread(taskID: taskID) }
 
-    func loadTasks() async throws -> [AgentTask] {
+    func loadTasks() async throws -> [AgentTask] { try await loadTasks(including: []) }
+
+    func loadTasks(including openThreadIDs: Set<String>) async throws -> [AgentTask] {
         try await core.start()
-        return try await core.loadTasks()
+        return try await core.loadTasks(including: openThreadIDs)
     }
 
     func events() -> AsyncStream<AgentRuntimeEvent> {
@@ -3440,29 +3473,23 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        private func bundledThreadRecords() async throws -> [[String: Any]] {
-            let response = try await request(
-                method: "thread/list",
-                params: [
+        private func bundledThreadRecords(including openThreadIDs: Set<String>) async throws -> [[String: Any]] {
+            var list = WorkspaceThreadList(openThreadIDs: openThreadIDs)
+            var records: [[String: Any]] = []
+            repeat {
+                var params: [String: Any] = [
                     "limit": 100,
                     "modelProviders": Array(Set([configuration.modelProvider, "web_browser", "computa_api"])).sorted(),
-                    "archived": false,
-                    "sortKey": "recency_at",
-                    "sortDirection": "desc",
+                    "archived": false, "sortKey": "recency_at", "sortDirection": "desc",
                 ]
-            )
-
-            guard let object = try JSONSerialization.jsonObject(with: response) as? [String: Any],
-                  let result = object["result"] as? [String: Any],
-                  let records = result["data"] as? [[String: Any]]
-            else {
-                throw RuntimeError.malformedResponse("thread/list did not return a thread collection")
-            }
-
+                if let cursor = list.cursor { params["cursor"] = cursor }
+                let response = try await request(method: "thread/list", params: params)
+                records += try list.takePage(response)
+            } while list.cursor != nil
             return records
         }
 
-        func loadTasks() async throws -> [AgentTask] {
+        func loadTasks(including openThreadIDs: Set<String>) async throws -> [AgentTask] {
             var records: [[String: Any]] = []
             var histories: [String: Data] = [:]
             var unavailable: [AgentTask] = []
@@ -3480,7 +3507,7 @@ private extension CodexAppServerRuntime {
                         histories[id] = bytes
                     } catch { unavailable.append(InstalledCodexCLI.unavailableTask(threadID: id, modelID: model, error: error)) }
                 }
-            } else { records = try await bundledThreadRecords() }
+            } else { records = try await bundledThreadRecords(including: openThreadIDs) }
 
             var explicitlyNamedTaskIDs = Set<AgentTask.ID>()
             var tasks = records.compactMap { record -> AgentTask? in

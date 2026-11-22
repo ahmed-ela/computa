@@ -32,6 +32,19 @@ enum EmbeddedBrowserURLPolicy {
         }
     }
 
+    /// Restore ordinary pages as GET navigations. OAuth grants belong to the original sign-in.
+    static func workspaceAddress(_ url: URL?) -> URL? {
+        guard let url, (try? validate(url)) != nil, let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        var fragment = URLComponents()
+        fragment.percentEncodedQuery = parts.percentEncodedFragment
+        let keys = Set(((parts.queryItems ?? []) + (fragment.queryItems ?? [])).map { $0.name.lowercased() })
+        guard keys.isDisjoint(with: ["access_token", "refresh_token", "id_token"]),
+              !(keys.contains("code") && keys.contains("state")) else { return nil }
+        return url
+    }
+
     /// srcdoc is a browser-created iframe document, not a top-level address.
     /// Keep address-bar and popup validation unchanged; the containing web
     /// document and WebKit's frame/origin rules supply its browsing context.
