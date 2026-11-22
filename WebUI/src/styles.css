@@ -74,6 +74,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 :is(.nav-button, .task-row, .workspace-list-heading) > :first-child { justify-self: center; }
 .nav-button { width: 100%; min-width: 0; padding-inline: 0; }
 .new-task-button { grid-template-columns: calc(var(--sidebar-icon-track) - 2px) minmax(0, 1fr); }
+.new-agent-button { border: 0; background: transparent; box-shadow: none; }
 .approval-nav { min-height: 32px; color: var(--orange); font-size: 12px; }
 .count-pill { margin-left: auto; font-variant-numeric: tabular-nums; }
 .connection-dot, .status-dot, .task-row-status { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
@@ -85,8 +86,8 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .section-count { margin-left: 7px; font-variant-numeric: tabular-nums; }
 .task-list { min-height: 0; flex: 1; overflow: hidden auto; padding-block: 2px 14px; }
 .task-row { width: 100%; height: 27px; margin-bottom: 1px; padding: 0 6px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--text); }
-.task-row:hover { background: var(--surface-hover); }
-.task-row:active { translate: none; }
+.task-row:hover, .new-agent-button:hover { background: var(--surface-hover); }
+.task-row:active, .new-agent-button:active { translate: none; }
 .task-row.selected { background: var(--surface-selected); }
 .task-row-title { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .task-row.selected .task-row-title { font-weight: 500; }

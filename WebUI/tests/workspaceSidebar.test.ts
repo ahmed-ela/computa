@@ -12,7 +12,7 @@ const { workspaceItems, WorkspaceSidebar } = await import('../src/WorkspaceSideb
 function fixture(): AppSnapshot {
   const snapshot = makePreviewSnapshot();
   const sharedID = snapshot.tasks[0].id;
-  return { ...snapshot, selectedTaskID: sharedID, primaryBrowserID: sharedID,
+  return { ...snapshot, mixesBrowserTabsInSidebar: true, selectedTaskID: sharedID, primaryBrowserID: sharedID,
     workspaceOrder: [{kind:'browser', id:sharedID}, {kind:'agent', id:sharedID}, {kind:'browser', id:'empty'}],
     workspaceBrowsers: [{id:sharedID,title:'Trips',host:'www.rail.example'}, {id:'empty',title:'New tab'}] };
 }
@@ -57,4 +57,20 @@ test('a browser in the main pane does not acknowledge the previously selected ag
   Object.assign(task,{status:'Completed',hasUnreadCompletion:true,isBusy:false,unreadCompletionID:'completion'});
   expect(displayedCompletionAcknowledgment(snapshot,true,true)).toBeUndefined();
   expect(displayedCompletionAcknowledgment({...snapshot,primaryBrowserID:undefined},true,true)?.taskID).toBe(task.id);
+});
+
+test('chat-only navigation hides browser rows and creation in either sidebar width', () => {
+  for (const isTaskSidebarCollapsed of [false, true]) {
+    const snapshot = { ...fixture(), mixesBrowserTabsInSidebar: false, primaryBrowserID: undefined, isTaskSidebarCollapsed };
+    const html = renderToStaticMarkup(h(WorkspaceSidebar, {
+      snapshot, search: '', setSearch: () => {}, focusSearch: () => {}, nativeHost: true, post: () => {},
+    })).html;
+    expect(html).toContain('aria-label="Open chats"');
+    expect(html).toContain('aria-label="New agent"');
+    expect(html).toContain('data-tab-kind="agent"');
+    expect(html).toContain('aria-current="page"');
+    expect(html).not.toContain('data-tab-kind="browser"');
+    expect(html).not.toContain('aria-label="New browser tab"');
+    expect(workspaceItems(snapshot, false, 'rail.example')).toEqual([]);
+  }
 });

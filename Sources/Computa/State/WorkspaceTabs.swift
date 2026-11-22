@@ -134,6 +134,9 @@ extension AppState {
 
     var openWorkspaceTabs: [WorkspaceTabID] {
         let agents = Set(tasks.map(\.id))
+        if !mixesBrowserTabsInSidebar {
+            return workspaceTabs.order.filter { $0.kind == .agent && agents.contains($0.id) }
+        }
         let browsers = Set(browserSession.workspaceBrowserTabs.map { $0.workspaceID.uuidString })
         return workspaceTabs.order.filter { $0.kind == .agent ? agents.contains($0.id) : browsers.contains($0.id) }
     }
@@ -144,10 +147,19 @@ extension AppState {
         primaryBrowserID.map(WorkspaceTabID.browser) ?? selectedTaskID.map(WorkspaceTabID.agent)
     }
 
-    func selectAdjacentWorkspaceTab(_ direction: TabDirection) {
-        let tabs = openWorkspaceTabs
+    func commandTab(inBrowserPane: Bool) -> WorkspaceTabID? {
+        guard inBrowserPane else { return selectedWorkspaceTab }
+        return browserSession.workspaceBrowserTabs.first { $0.id == browserSession.selectedTabID }.map { .browser($0.workspaceID) }
+    }
+
+    func commandTabs(inBrowserPane: Bool) -> [WorkspaceTabID] {
+        inBrowserPane ? browserSession.workspaceBrowserTabs.map { .browser($0.workspaceID) } : openWorkspaceTabs
+    }
+
+    func selectAdjacentWorkspaceTab(_ direction: TabDirection, inBrowserPane: Bool = false) {
+        let tabs = commandTabs(inBrowserPane: inBrowserPane)
         guard let first = tabs.first, let last = tabs.last else { return }
-        let current = selectedWorkspaceTab
+        let current = commandTab(inBrowserPane: inBrowserPane)
         let target: WorkspaceTabID
         if let current, let index = tabs.firstIndex(of: current) {
             target = tabs[(index + direction.rawValue + tabs.count) % tabs.count]
@@ -167,7 +179,8 @@ extension AppState {
             guard let id = UUID(uuidString: tab.id),
                   let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == id }) else { return }
             browserSession.selectTab(page.id)
-            workspaceTabs.browserIsPrimary = true
+            if mixesBrowserTabsInSidebar { workspaceTabs.browserIsPrimary = true }
+            else { isBrowserPresented = true }
         }
     }
 
@@ -183,9 +196,11 @@ extension AppState {
     }
 
     func closeWorkspaceTab(_ tab: WorkspaceTabID) {
-        guard !approvalGateBlocksInteraction, presentedSheet == nil, openWorkspaceTabs.contains(tab) else { return }
+        guard !approvalGateBlocksInteraction, presentedSheet == nil else { return }
         switch tab.kind {
-        case .agent: removeWorkspaceTab(tab, wasSelected: primaryBrowserID == nil && selectedTaskID == tab.id)
+        case .agent:
+            guard openWorkspaceTabs.contains(tab) else { return }
+            removeWorkspaceTab(tab, wasSelected: primaryBrowserID == nil && selectedTaskID == tab.id)
         case .browser:
             if let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID.uuidString == tab.id }) {
                 browserSession.closeTab(page.id)
@@ -194,7 +209,8 @@ extension AppState {
     }
 
     func removeWorkspaceTab(_ tab: WorkspaceTabID, wasSelected: Bool) {
-        let index = workspaceTabs.order.firstIndex(of: tab) ?? 0
+        let order = mixesBrowserTabsInSidebar ? workspaceTabs.order : openWorkspaceTabs
+        let index = order.firstIndex(of: tab) ?? 0
         workspaceTabs.close(tab)
         let remaining = openWorkspaceTabs
         let next = wasSelected && !remaining.isEmpty ? remaining[min(index, remaining.count - 1)] : nil

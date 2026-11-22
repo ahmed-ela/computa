@@ -26,15 +26,24 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let state = AppState(tasks: [], preferences: prefs, browserSession: session)
 
         state.newWorkspaceBrowserTab()
-        let first = try XCTUnwrap(state.primaryBrowserID)
+        let first = try XCTUnwrap(session.workspaceBrowserTabs.first?.workspaceID)
+        XCTAssertNil(state.primaryBrowserID)
+        XCTAssertTrue(state.shouldPresentBrowserPane)
         let link = try XCTUnwrap(URL(string: "https://example.test/article"))
         state.newWorkspaceBrowserTab(url: link)
-        let second = try XCTUnwrap(state.primaryBrowserID)
+        let second = try XCTUnwrap(session.humanTab(id: XCTUnwrap(session.selectedTabID))?.workspaceID)
 
         XCTAssertNotEqual(first, second)
         XCTAssertEqual(session.restorablePages.map(\.id), [first, second])
         XCTAssertEqual(session.restorablePages.map { $0.url?.absoluteString },
                        ["https://www.google.com/", link.absoluteString])
+        XCTAssertEqual(state.commandTab(inBrowserPane: true), .browser(second))
+        state.selectAdjacentWorkspaceTab(.previous, inBrowserPane: true)
+        XCTAssertEqual(state.commandTab(inBrowserPane: true), .browser(first))
+        state.closeWorkspaceTab(.browser(first))
+        XCTAssertEqual(state.commandTabs(inBrowserPane: true), [.browser(second)])
+        XCTAssertTrue(state.openWorkspaceTabs.isEmpty)
+        XCTAssertTrue(WebUISnapshot(state: state).workspaceBrowsers.isEmpty)
     }
 
     @MainActor
@@ -44,7 +53,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let tasks = ["First", "Second", "History"].map {
             AgentTask(title: $0, summary: "", status: .draft, workspace: "", model: "local")
         }
-        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session)
+        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session, mixesBrowserTabsInSidebar: true)
         let first = WorkspaceTabID.agent(tasks[0].id)
         let second = WorkspaceTabID.agent(tasks[1].id)
         state.selectTask(tasks[1].id)
@@ -127,7 +136,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         defer { session.shutdown() }
         let task = AgentTask(title: "Trip agent", summary: "", status: .draft, workspace: "", model: "local")
-        let state = AppState(tasks: [task], preferences: prefs, browserSession: session)
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, mixesBrowserTabsInSidebar: true)
         let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1110, height: 720),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -282,7 +291,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let prefs = isolatedTestPreferences(), profile = UUID()
         let session = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         let task = AgentTask(title: "Review", summary: "", status: .completed, workspace: "", model: "test")
-        let state = AppState(tasks: [task], preferences: prefs, browserSession: session)
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, mixesBrowserTabsInSidebar: true)
         let thread = UUID().uuidString.lowercased()
         state.apply(.taskThreadBound(taskID: task.id, threadID: thread))
         let id = try session.createTab(url: address, requestsMobileSite: true)
@@ -315,7 +324,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
 
         let newSession = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         defer { newSession.shutdown() }
-        let restored = AppState(tasks: [], preferences: prefs, browserSession: newSession)
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: newSession, mixesBrowserTabsInSidebar: true)
         // Simulate browser callbacks while the app server is still reading history.
         let reopened = try XCTUnwrap(newSession.workspaceBrowserTabs.first { $0.workspaceID == page.workspaceID })
         newSession.selectTab(reopened.id)
@@ -338,9 +347,22 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         restored.selectWorkspaceTab(.browser(blank))
         let next = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         defer { next.shutdown() }
-        let nextState = AppState(tasks: [history], preferences: prefs, browserSession: next)
+        let nextState = AppState(tasks: [history], preferences: prefs, browserSession: next, mixesBrowserTabsInSidebar: true)
         XCTAssertEqual(nextState.primaryBrowserID, blank)
         XCTAssertEqual(nextState.openWorkspaceTabs, expectedOrder)
+
+        // A saved primary page from the mixed layout reopens beside the same chat.
+        let split = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        defer { split.shutdown() }
+        let separate = AppState(tasks: [history], preferences: prefs, browserSession: split)
+        XCTAssertNil(separate.primaryBrowserID)
+        XCTAssertTrue(separate.shouldPresentBrowserPane)
+        XCTAssertEqual(split.humanTab(id: try XCTUnwrap(split.selectedTabID))?.workspaceID, blank)
+        XCTAssertEqual(separate.openWorkspaceTabs, expectedOrder.filter { $0.kind == .agent })
+        XCTAssertEqual(separate.selectedTaskID, nextState.selectedTaskID)
+        XCTAssertEqual(separate.workspaceTabs.order, expectedOrder)
+        XCTAssertEqual(split.restorablePages.map(\.id), next.restorablePages.map(\.id))
+
     }
 
     @MainActor
@@ -460,7 +482,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             let sidebarBehindLights = await waitForScriptBool(on: chat, script: """
                 (() => {
                     const sidebar = document.querySelector('.sidebar');
-                    return document.documentElement.dataset.appearance === '\(state.appearance.rawValue)'
+                    const add = sidebar?.querySelector('button[aria-label="New agent"]');
+                    const style = add && getComputedStyle(add);
+                    return style?.borderTopWidth === '0px' && style.backgroundColor === 'rgba(0, 0, 0, 0)'
+                        && !sidebar.querySelector('[aria-label="New browser tab"], [data-tab-kind=browser]')
+                        && document.documentElement.dataset.appearance === '\(state.appearance.rawValue)'
                         && sidebar && document.elementFromPoint(120, 12)?.closest('.sidebar') === sidebar
                         && sidebar.getBoundingClientRect().top === 0;
                 })()
@@ -635,8 +661,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let scrollable = await waitForScriptBool(on: chat, script: """
             (() => { const list = document.querySelector('nav[aria-label="Chat history"]');
                 if (!list) return false;
-                list.scrollTop = 150;
-                return list.scrollTop === 150;
+                const offset = Math.min(150, list.scrollHeight - list.clientHeight);
+                list.scrollTop = offset;
+                return offset > 0 && list.scrollTop === offset;
             })()
             """)
         XCTAssertTrue(scrollable)
@@ -1526,7 +1553,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     func testSnapshotCarriesDisplayHandleWithoutNativeTabIDOrBrowserContents() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
-        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, mixesBrowserTabsInSidebar: true)
         let tabID = try session.createTab()
         state.isBrowserPresented = true
         let snapshot = WebUISnapshot(state: state)
