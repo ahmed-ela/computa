@@ -506,8 +506,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .workspace-tab-row .workspace-close { position: absolute; right: 0; top: 50%; transform: translateY(-50%); opacity: 0; }
 .workspace-tab-row:hover .workspace-close, .workspace-tab-row:focus-within .workspace-close { opacity: 1; }
 .agent-rail .workspace-tab-row { display: flex; justify-content: center; }
-.site-favicon, .site-initial, .add-browser-icon { width: 16px; height: 16px; flex: 0 0 16px; }
+.site-favicon, .site-initial, .new-browser-tab-icon { width: 16px; height: 16px; flex: 0 0 16px; }
 .site-favicon { object-fit: contain; }
 .site-initial { display: grid; place-content: center; border-radius: 4px; background: var(--surface-selected); font-size: 11px; font-weight: 600; }
-.add-browser-icon { position: relative; }
-.add-browser-icon b { position: absolute; right: -1px; bottom: -1px; display: grid; place-content: center; width: 10px; height: 10px; background: var(--text); color: var(--bg); box-shadow: 0 0 0 1px var(--bg); border-radius: 50%; font: 600 10px/1 system-ui; }
+.new-browser-tab-icon { background: currentColor; mask: url('/icons/new-browser-tab.svg') center / contain no-repeat; }

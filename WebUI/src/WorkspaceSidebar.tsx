@@ -69,10 +69,10 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
         <Icon name="sidebar" size={16} /></Button>}
     </div>
     <nav className="primary-nav" aria-label="Primary">
-      <Button variant="outline" className="nav-button new-task-button" aria-label="New task" title="New task" onClick={() => create('createTask')}>
-        <BotAdd16Filled /><span className={collapsed ? 'sr-only' : undefined}>New task</span></Button>
+      <Button variant="outline" className="nav-button new-task-button" aria-label="New agent" title="New agent" onClick={() => create('createTask')}>
+        <BotAdd16Filled /><span className={collapsed ? 'sr-only' : undefined}>New agent</span></Button>
       <Button variant="outline" className="nav-button new-task-button" aria-label="New browser tab" title="New browser tab" onClick={() => create('newWorkspaceBrowserTab')}>
-        <span className="add-browser-icon"><Icon name="browser" size={15} /><b aria-hidden="true">+</b></span>
+        <span className="new-browser-tab-icon" aria-hidden="true" />
         <span className={collapsed ? 'sr-only' : undefined}>New browser tab</span></Button>
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}

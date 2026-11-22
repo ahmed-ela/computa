@@ -999,7 +999,7 @@ export function App() {
           <div className="no-task-view">
             <p>Choose a model for your next task.</p>
             <DefaultModelSelector snapshot={snapshot} />
-            <Button onClick={() => post({ action: 'createTask' })}><BotAdd16Filled /> New task</Button>
+            <Button onClick={() => post({ action: 'createTask' })}><BotAdd16Filled /> New agent</Button>
           </div>
         )}
       </main>

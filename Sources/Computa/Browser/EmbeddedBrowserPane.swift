@@ -100,6 +100,7 @@ struct EmbeddedBrowserPane: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityIdentifier("embedded-browser-pane")
+        .focusedSceneValue(\.newBrowserTabInPane, { createTab() })
         .onAppear { synchronizeAddress() }
         .onChange(of: session.selectedTabID) { _, _ in
             addressError = nil
@@ -114,6 +115,12 @@ struct EmbeddedBrowserPane: View {
         }
     }
 
+    private static let newTabIcon: Image = {
+        guard let url = WebUIResourceLocator.indexURL?.deletingLastPathComponent().appendingPathComponent("icons/new-browser-tab.svg"),
+              let image = NSImage(contentsOf: url) else { return Image(systemName: "arrow.up.right.square") }
+        return Image(nsImage: image)
+    }()
+
     private var tabStrip: some View {
         HStack(spacing: 4) {
             if usesSidebarTabs {
@@ -124,14 +131,15 @@ struct EmbeddedBrowserPane: View {
             }
 
             Button { createTab() } label: {
-                Image(systemName: "plus")
+                Self.newTabIcon.renderingMode(.template).resizable()
+                    .frame(width: 16, height: 16)
                     .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
             }
-            .keyboardShortcut("t", modifiers: .command)
             .contextMenu {
                 Button("New Mobile Tab") { createTab(requestsMobileSite: true) }
             }
-            .help("New tab (⌘T). Control-click for a mobile tab.")
+            .help("New browser tab (⌘T). Control-click for a mobile tab.")
             .accessibilityLabel("New browser tab")
             .accessibilityIdentifier("browser-new-tab")
         }
@@ -254,7 +262,7 @@ struct EmbeddedBrowserPane: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             if !hasTab {
-                Button("New tab") { createTab() }
+                Button("New browser tab") { createTab() }
                     .buttonStyle(.bordered)
                     .padding(.top, 4)
             }

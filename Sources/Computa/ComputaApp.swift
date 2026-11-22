@@ -57,6 +57,30 @@ private struct InertTestHostPermissions: AutomationPermissionClient {
     func requestScreenRecording() -> AutomationPermissionSnapshot { current() }
 }
 
+extension FocusedValues {
+    @Entry var newBrowserTabInPane: (() -> Void)?
+}
+
+private struct WorkspaceCreationCommands: Commands {
+    let state: AppState
+    let isTestHost: Bool
+    @FocusedValue(\.newBrowserTabInPane) private var newBrowserTabInPane
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("New Agent") { state.createTask() }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+                .disabled(isTestHost || state.approvalGateBlocksInteraction || state.presentedSheet != nil)
+            Button("New Browser Tab") {
+                if let newBrowserTabInPane { newBrowserTabInPane() }
+                else { state.newWorkspaceBrowserTab() }
+            }
+            .keyboardShortcut("t", modifiers: .command)
+            .disabled(isTestHost || state.approvalGateBlocksInteraction || state.presentedSheet != nil)
+        }
+    }
+}
+
 @main
 @MainActor
 struct ComputaApp: App {
@@ -101,13 +125,7 @@ struct ComputaApp: App {
                 if let updates { CheckForUpdatesButton(updates: updates) }
             }
             #endif
-            CommandGroup(after: .newItem) {
-                Button("New Task") {
-                    state.createTask()
-                }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
-                .disabled(launchMode == .testHost)
-            }
+            WorkspaceCreationCommands(state: state, isTestHost: launchMode == .testHost)
 
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") {

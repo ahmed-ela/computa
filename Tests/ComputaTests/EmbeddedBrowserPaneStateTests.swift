@@ -56,6 +56,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             if !ok { throw CocoaError(.coderInvalidValue) }
         }
         try await requireDOM("!!document.querySelector('.composer-shell textarea')")
+        let iconURL = try XCTUnwrap(WebUIResourceLocator.indexURL?.deletingLastPathComponent()
+            .appendingPathComponent("icons/new-browser-tab.svg"))
+        XCTAssertNotNil(NSImage(contentsOf: iconURL))
+        try await requireDOM("""
+        (() => { const icon = document.querySelector('button[aria-label="New browser tab"] .new-browser-tab-icon');
+          return icon && getComputedStyle(icon).maskImage.includes('/icons/new-browser-tab.svg')
+            && icon.getBoundingClientRect().width === 16; })()
+        """)
         _ = try await chat.evaluateJavaScript("""
         const draft = document.querySelector('.composer-shell textarea'); draft.value='Return ticket';
         draft.dispatchEvent(new Event('input', { bubbles:true }));
@@ -113,6 +121,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let restored = AppState(tasks: [task], preferences: prefs, browserSession: EmbeddedBrowserSession(persistent: false))
         XCTAssertTrue(restored.openWorkspaceTabs.isEmpty)
         XCTAssertEqual(restored.tasks.map(\.id), [task.id])
+
+        try await requireDOM("!!document.querySelector('nav[aria-label=\"Open tabs\"] .sidebar-empty')")
+        _ = try await chat.evaluateJavaScript("document.querySelector('button[aria-label=\"New agent\"]').click(); true")
+        try await requireDOM("!!document.querySelector('[data-tab-kind=agent][aria-current=page]')")
+        let newAgent = try XCTUnwrap(state.selectedTaskID)
+        XCTAssertNotEqual(newAgent, task.id)
+        XCTAssertEqual(state.openWorkspaceTabs, [.agent(newAgent)])
+        XCTAssertTrue(session.workspaceBrowserTabs.isEmpty)
     }
 
     @MainActor
