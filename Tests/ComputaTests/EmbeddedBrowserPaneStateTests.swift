@@ -24,6 +24,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let close = try XCTUnwrap(window.standardWindowButton(.closeButton))
         let frameView = try XCTUnwrap(hosting.superview)
         window.orderBack(nil)
+        state.isBrowserPresented = false
+        await settleLayout(hosting)
+        let toggle = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .right }?.view)
+        let toggleCenter = toggle.convert(NSPoint(x: toggle.bounds.midX, y: toggle.bounds.midY), to: nil)
+        for expected in [true, false] {
+            try await clickInWindow(at: toggleCenter, window: window)
+            XCTAssertEqual(state.isBrowserPresented, expected)
+        }
         for (width, presented) in [(1100, false), (980, true), (1280, true), (1280, false)] {
             window.setContentSize(NSSize(width: width, height: 740))
             state.isBrowserPresented = presented

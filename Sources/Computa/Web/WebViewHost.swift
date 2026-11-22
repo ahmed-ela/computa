@@ -257,12 +257,24 @@ private struct SidebarTitlebarToggle: View {
 
 private struct BrowserTitlebarToggle: View {
     static let width: CGFloat = 34
+    #if SWIFT_PACKAGE
+    // Command-line SwiftPM copies the SVG without compiling the asset catalog.
+    private static let globe: Image = {
+        guard let url = Bundle.module.url(forResource: "BrowserGlobe", withExtension: "svg"),
+              let image = NSImage(contentsOf: url) else { return Image(systemName: "globe") }
+        return Image(nsImage: image)
+    }()
+    #else
+    private static let globe = Image(decorative: "BrowserGlobe")
+    #endif
     @Bindable var state: AppState
 
     var body: some View {
         Toggle(isOn: $state.isBrowserPresented) {
-            Image(systemName: "globe")
-                .font(.system(size: 16, weight: .medium))
+            Self.globe
+                .renderingMode(.template)
+                .resizable()
+                .frame(width: 16, height: 16)
                 .foregroundStyle(state.shouldPresentBrowserPane ? Color.accentColor : .secondary)
                 .frame(width: 28, height: 22)
                 .contentShape(Rectangle())

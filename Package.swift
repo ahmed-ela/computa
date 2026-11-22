@@ -20,6 +20,7 @@ let package = Package(
             dependencies: ["AutomationCore"],
             path: "Sources/Computa",
             resources: [
+                .copy("Assets.xcassets/BrowserGlobe.imageset/BrowserGlobe.svg"),
                 .copy("Resources/WebUI"),
                 .copy("Resources/VisualGrounding"),
                 .copy("Resources/AgentRuntime"),
