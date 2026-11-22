@@ -26,6 +26,13 @@ enter a web address or search term in the address field and press **Return**.
 Each tab has its own history and reload control. Drag the divider to resize
 the pane. Hiding the pane keeps its tabs open.
 
+## Inspecting a tab during development
+
+In a Debug session, developers can opt a human tab into Safari’s Develop menu
+by calling `EmbeddedBrowserSession.setWebInspectorEnabled(_:for:)` with its tab ID.
+Pass `false` to detach inspection when finished. The session checks tab ownership
+and revokes inspection when a tool takes control of the tab.
+
 ## Composition
 
 - `EmbeddedBrowserSession` owns tabs, WebViews, independent website data,

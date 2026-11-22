@@ -217,8 +217,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 await state?.interrupt(taskID: taskID)
             }
 
+#if DEBUG
         case "toggleInspector":
             state.isInspectorPresented.toggle()
+#endif
 
         case "setTaskSidebarCollapsed":
             guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
