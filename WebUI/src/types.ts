@@ -151,7 +151,7 @@ export interface ModelProviderSetup {
 }
 
 export interface WorkspaceTab { kind: 'agent' | 'browser'; id: string }
-export interface WorkspaceBrowser { id: string; title: string; host?: string; favicon?: string }
+export interface WorkspaceBrowser { id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean }
 
 export interface AppSnapshot {
   revision: number;

@@ -178,14 +178,16 @@ final class InitialRequestHTTPFixture: @unchecked Sendable {
     private let finalStatus: Int
     private let finalHTML: String?
     private let iconPath: String?
+    private let iconDelay: DispatchTimeInterval
     private let queue = DispatchQueue(label: "ComputaTests.InitialRequestHTTP")
     private let lock = NSLock()
     private var connections: [NWConnection] = []
     private var recorded: [APIModelServer.HTTPRequest] = []
     var requests: [APIModelServer.HTTPRequest] { lock.lock(); defer { lock.unlock() }; return recorded }
 
-    init(finalStatus: Int, finalHTML: String? = nil, iconPath: String? = nil) throws {
+    init(finalStatus: Int, finalHTML: String? = nil, iconPath: String? = nil, iconDelay: DispatchTimeInterval = .seconds(0)) throws {
         self.iconPath = iconPath
+        self.iconDelay = iconDelay
         self.finalHTML = finalHTML
         self.finalStatus = finalStatus
         let parameters = NWParameters.tcp
@@ -211,7 +213,9 @@ final class InitialRequestHTTPFixture: @unchecked Sendable {
                 self.lock.lock(); self.recorded.append(request); self.lock.unlock()
                 if request.path == self.iconPath, request.method == "GET" {
                     let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><rect width='16' height='16' fill='red'/></svg>"
-                    self.respond(connection, status: 200, location: nil, body: Data(svg.utf8), mimeType: "image/svg+xml")
+                    self.queue.asyncAfter(deadline: .now() + self.iconDelay) {
+                        self.respond(connection, status: 200, location: nil, body: Data(svg.utf8), mimeType: "image/svg+xml")
+                    }
                     return
                 }
                 let parts = request.path.split(separator: "/")

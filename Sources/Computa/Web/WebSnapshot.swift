@@ -24,6 +24,7 @@ struct WorkspaceBrowserSnapshot: Codable, Equatable, Sendable {
     let title: String
     let host: String?
     let favicon: Data?
+    let isFaviconLoading: Bool
 }
 
 struct WebUISnapshot: Codable, Equatable, Sendable {
@@ -60,7 +61,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         self.titlebarHeight = titlebarHeight
         workspaceOrder = state.openWorkspaceTabs
         workspaceBrowsers = state.browserSession.workspaceBrowserTabs.map {
-            WorkspaceBrowserSnapshot(id: $0.workspaceID.uuidString, title: $0.title, host: $0.url?.host, favicon: $0.favicon)
+            WorkspaceBrowserSnapshot(id: $0.workspaceID.uuidString, title: $0.title, host: $0.url?.host,
+                                     favicon: $0.favicon, isFaviconLoading: $0.isFaviconLoading)
         }
         primaryBrowserID = state.primaryBrowserID?.uuidString
         selectedTaskID = state.selectedTaskID
