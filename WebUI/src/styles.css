@@ -90,13 +90,13 @@ kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 
 /* Keep the work itself visually primary. */
 .workspace { display: flex; min-width: 0; flex: 1; flex-direction: column; }
-.task-toolbar { display: flex; height: 60px; flex: 0 0 60px; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+.task-toolbar { display: flex; box-sizing: content-box; height: 32px; flex: none; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--border); }
 .preview-browser-toggle { position: absolute; top: 2px; right: 6px; }
 .preview-browser-toggle[aria-pressed="true"] { color: var(--blue); }
-.app-shell:not([data-native-host]) .task-toolbar { padding-right: 48px; }
-.toolbar-title-block { min-width: 0; }
+.app-shell:not([data-browser-pane]) .task-toolbar { padding-right: 48px; }
+.toolbar-title-block { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .toolbar-title-block strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
-.toolbar-workspace { display: block; color: var(--text-tertiary); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar-workspace { display: block; max-width: 40%; color: var(--text-tertiary); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-toolbar-button { gap: 6px; }
 .review-toolbar-button.active { background: var(--surface-selected); }
 .toolbar-actions { display: flex; align-items: center; gap: 12px; }

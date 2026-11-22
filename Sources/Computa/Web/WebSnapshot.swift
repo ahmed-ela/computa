@@ -21,6 +21,7 @@ struct ModelProviderSetup: Codable, Equatable, Sendable {
 
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
+    let titlebarHeight: CGFloat?
     let selectedTaskID: String?
     let selectedEntryID: String?
     let tasks: [WebTaskSnapshot]
@@ -44,7 +45,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let promptReceipts: [PromptReceipt]
 
     @MainActor
-    init(state: AppState) {
+    init(state: AppState, titlebarHeight: CGFloat? = nil) {
+        self.titlebarHeight = titlebarHeight
         selectedTaskID = state.selectedTaskID
         selectedEntryID = state.selectedEntryID
         tasks = state.tasks.map { task in

@@ -173,9 +173,9 @@ function Sidebar({
   );
 }
 
-function TaskToolbar({ task }: { task?: TaskSnapshot }) {
+function TaskToolbar({ task, rowHeight }: { task?: TaskSnapshot; rowHeight?: number }) {
   return (
-    <header className="task-toolbar">
+    <header className="task-toolbar" style={rowHeight ? { height: `${rowHeight}px` } : undefined}>
       <div className="toolbar-title-block">
         {task ? <strong>{task.title === 'Untitled task' ? 'New task' : task.title}</strong> : null}
         {task?.workspace && task.workspace !== 'No workspace selected' ? <span className="toolbar-workspace" title={task.workspace}>{task.workspace.split('/').filter(Boolean).at(-1) ?? task.workspace}</span> : null}
@@ -1081,7 +1081,8 @@ export function App() {
 
   const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
   return (
-    <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined}>
+    <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined}
+      data-browser-pane={nativeHost && snapshot.isBrowserPresented && !snapshot.isSettingsPresented ? 'open' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
       <Sidebar snapshot={snapshot} search={search} setSearch={setSearch} />
       <main className="workspace">
@@ -1091,7 +1092,7 @@ export function App() {
           onClick={() => post({ action: 'toggleBrowser' })}>
           <Icon name="browser" size={18} />
         </Button>}
-        <TaskToolbar task={task} />
+        <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} />
         {task ? (
           <Conversation snapshot={snapshot} task={task} />
         ) : (

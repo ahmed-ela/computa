@@ -152,6 +152,7 @@ export interface ModelProviderSetup {
 
 export interface AppSnapshot {
   revision: number;
+  titlebarHeight?: number;
   selectedTaskID?: string;
   selectedEntryID?: string;
   tasks: TaskSnapshot[];

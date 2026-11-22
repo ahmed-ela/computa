@@ -7,14 +7,25 @@ struct WebWorkspaceView: View {
     @State private var showsAccessModeSettings = false
 
     var body: some View {
-        ZStack(alignment: .center) {
+        GeometryReader { geometry in
+            workspace(topInset: geometry.safeAreaInsets.top)
+        }
+    }
+
+    private func workspace(topInset: CGFloat) -> some View {
+        // The web chat and native browser share one divider below the window controls.
+        let rowHeight = topInset > 0 ? topInset : 32
+        return ZStack(alignment: .center) {
             HSplitView {
                 CodexWebView(
                     state: state,
-                    snapshot: WebUISnapshot(state: state),
+                    snapshot: WebUISnapshot(state: state, titlebarHeight: rowHeight),
                     showAccessModeSettings: { showsAccessModeSettings = true }
                 )
                 .frame(minWidth: 600, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                // Each split item has its own safe area. Let the web sidebar
+                // paint behind the traffic lights using its actual width and theme.
+                .ignoresSafeArea(.container, edges: .top)
 
                 // External pages are sibling views, never children of the
                 // privileged Octane document or its script-message bridge.
@@ -22,6 +33,8 @@ struct WebWorkspaceView: View {
                 if state.shouldPresentBrowserPane {
                     EmbeddedBrowserPane(
                         session: state.browserSession,
+                        tabRowHeight: rowHeight,
+                        titlebarTrailingInset: topInset > 0 ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
                         modelSetupStatus: state.websiteModelSetupStatus(for:),
@@ -31,6 +44,7 @@ struct WebWorkspaceView: View {
                         onClose: { state.isBrowserPresented = false }
                     )
                     .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea(.container, edges: .top)
                     // When this pane opens, the chat already occupies the whole split.
                     // Give the new pane room above its minimum before growing the chat.
                     .layoutPriority(1)
@@ -177,6 +191,14 @@ private final class WindowConfiguredWebView: WKWebView {
         browserAccessory.layoutAttribute = .right
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // The web sidebar paints the title bar, but AppKit owns window dragging there.
+        if let window, let superview, superview.convert(point, to: nil).y >= window.contentLayoutRect.maxY {
+            return nil
+        }
+        return super.hitTest(point)
+    }
+
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if let window, window !== newWindow, window.styleMask.contains(.titled),
            let index = window.titlebarAccessoryViewControllers.firstIndex(of: browserAccessory) {
@@ -200,6 +222,7 @@ private final class WindowConfiguredWebView: WKWebView {
 }
 
 private struct BrowserTitlebarToggle: View {
+    static let width: CGFloat = 34
     @Bindable var state: AppState
 
     var body: some View {
@@ -216,7 +239,7 @@ private struct BrowserTitlebarToggle: View {
         .accessibilityIdentifier("browser-toggle")
         .help(state.shouldPresentBrowserPane ? "Hide browser" : "Show browser")
         .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
-        .padding(.trailing, 6)
+        .frame(width: Self.width, alignment: .leading)
     }
 }
 
