@@ -9,7 +9,7 @@ not remaining feature requirements or instructions to reconnect Chrome.
 The initial browser delivery is the human-operated right pane: toggle/resize,
 new/select/close tabs, address navigation, history/reload/stop and an independent
 Computa-owned website-data profile. Hiding the pane preserves tabs; open tabs
-are not restored after quitting. See [usage](README.md#native-browser-pane) and
+are not restored after quitting. See [usage](docs/EMBEDDED-BROWSER.md#using-the-browser-pane) and
 [implementation](docs/EMBEDDED-BROWSER.md).
 
 ### Embedded-browser agent control
