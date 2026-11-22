@@ -5,7 +5,7 @@
 The Kolmogor repository is
 [`ahmed-ela/kolmogor`](https://github.com/ahmed-ela/kolmogor), with product site
 [kolmogor.com](https://kolmogor.com). The shipping Xcode project and scheme are named Kolmogor. The Swift module and its source directory retain their original names.
-The Kolmogor Release build, signed DMG, mounted-installer migration from
+The earlier Computa release build, signed DMG, mounted-installer migration from
 the legacy app, and startup on the existing Mac passed. The checked pre-existing data
 remained byte-identical before launch. See [the distribution checkpoint](DISTRIBUTION.md)
 for scope and artifact identity; clean-Mac, stream/final-answer and controlled
