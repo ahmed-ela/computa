@@ -6,6 +6,25 @@ import XCTest
 
 final class EmbeddedBrowserPaneStateTests: XCTestCase {
     @MainActor
+    func testNewWorkspaceTabOpensGoogleAndExplicitLinkOpensItsDestination() throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session)
+
+        state.newWorkspaceBrowserTab()
+        let first = try XCTUnwrap(state.primaryBrowserID)
+        let link = try XCTUnwrap(URL(string: "https://example.test/article"))
+        state.newWorkspaceBrowserTab(url: link)
+        let second = try XCTUnwrap(state.primaryBrowserID)
+
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(session.restorablePages.map(\.id), [first, second])
+        XCTAssertEqual(session.restorablePages.map { $0.url?.absoluteString },
+                       ["https://www.google.com/", link.absoluteString])
+    }
+
+    @MainActor
     func testMixedSidebarFaviconSwitchingReorderAndHistory() async throws {
         let html = """
         <title>Cedar rail</title>
@@ -139,8 +158,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(25))
         }
         XCTAssertEqual(session.restorablePages.first?.url?.fragment, "seat")
-        state.newWorkspaceBrowserTab()
-        let blank = try XCTUnwrap(state.primaryBrowserID)
+        let blankID = try session.createTab()
+        let blank = try XCTUnwrap(session.humanTab(id: blankID)?.workspaceID)
+        state.selectWorkspaceTab(.browser(blank))
         state.createTask()
         let draft = try XCTUnwrap(state.selectedTaskID)
         state.workspaceTabs.move(.agent(task.id), to: .browser(blank))

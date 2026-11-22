@@ -275,7 +275,7 @@ struct EmbeddedBrowserPane: View {
     private func createTab(requestsMobileSite: Bool = false) {
         guard !isInteractionBlocked else { return }
         do {
-            _ = try session.createTab(requestsMobileSite: requestsMobileSite)
+            _ = try session.createTab(url: EmbeddedBrowserURLPolicy.newTabURL, requestsMobileSite: requestsMobileSite)
             addressError = nil
             address = ""
             // Only an explicit human new-tab action changes editor focus.

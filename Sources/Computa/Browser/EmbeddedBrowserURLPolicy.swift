@@ -2,6 +2,8 @@ import Foundation
 
 /// Resolves human address-bar input while restricting navigation to web pages.
 enum EmbeddedBrowserURLPolicy {
+    static let newTabURL = URL(string: "https://www.google.com/")!
+
     enum Rejection: Error, LocalizedError, Equatable {
         case invalidAddress
         case unsupportedScheme
