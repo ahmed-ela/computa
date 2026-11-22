@@ -6,6 +6,19 @@ import XCTest
 
 final class EmbeddedBrowserPaneStateTests: XCTestCase {
     @MainActor
+    func testFaviconSpinnerHasATransparentCenterAndVisibleRim() throws {
+        let index = try XCTUnwrap(WebUIResourceLocator.indexURL)
+        let url = index.deletingLastPathComponent().appendingPathComponent("icons/favicon-loading.svg")
+        let icon = try XCTUnwrap(NSImage(contentsOf: url))
+        let pixels = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(icon.tiffRepresentation)))
+        let centerY = pixels.pixelsHigh / 2
+        let center = try XCTUnwrap(pixels.colorAt(x: pixels.pixelsWide / 2, y: centerY))
+        let rim = try XCTUnwrap(pixels.colorAt(x: pixels.pixelsWide * 14 / 16, y: centerY))
+        XCTAssertEqual(center.alphaComponent, 0)
+        XCTAssertGreaterThan(rim.alphaComponent, 0.5)
+    }
+
+    @MainActor
     func testNewWorkspaceTabOpensGoogleAndExplicitLinkOpensItsDestination() throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
