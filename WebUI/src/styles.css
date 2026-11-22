@@ -40,7 +40,6 @@ body { font-size: 13px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
 :where(button:not(:disabled), summary) { cursor: pointer; }
 :where(button:not([data-slot]), summary, [tabindex]):focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
-kbd { font: inherit; font-size: 10px; color: var(--text-tertiary); }
 ::selection { background: color-mix(in srgb, var(--text) 15%, transparent); }
 ::-webkit-scrollbar { width: 7px; height: 7px; }
 ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: color-mix(in srgb, var(--text-tertiary) 35%, transparent); background-clip: padding-box; }
@@ -316,7 +315,6 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .setting-row > .model-selector-trigger { flex-shrink: 0; }
 .composer-shell select { border: 0; background: transparent; color: var(--text-secondary); font-size: 11px; }
 .composer-shell [data-slot="native-select-icon"] { width: 13px; height: 13px; }
-.send-shortcut { display: flex; gap: 2px; }
 .send-button { flex: 0 0 auto; }
 .queue-send-button, .stop-button { flex: 0 0 auto; }
 .composer-submit-status { display: block; margin-top: 7px; color: var(--text-tertiary); font-size: 10px; line-height: 1.45; }
@@ -488,7 +486,6 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
   .status-label { font-size: 10px; }
   .conversation-content { padding-right: 18px; padding-left: 18px; }
   .composer-zone { padding-right: 16px; padding-left: 16px; }
-  .send-shortcut { display: none; }
   .inspector { position: absolute; z-index: 20; top: 0; right: 0; bottom: 0; width: 280px; box-shadow: -12px 0 32px #0002; }
   .settings-modal { width: 100%; }
 }

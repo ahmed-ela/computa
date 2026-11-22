@@ -660,7 +660,6 @@ function Composer({
             */}
           </div>
           <div className="composer-right">
-            <span className="send-shortcut" title="Enter sends · Shift+Enter inserts a newline"><kbd>↵</kbd></span>
             {task.status === 'Running' ? (
               <Button variant="outline" size="icon" className="stop-button" aria-label="Stop task" title="Stop task" onClick={() => post({ action: 'interruptTask', taskID: task.id })}>
                 <Icon name="pause" size={18} />
