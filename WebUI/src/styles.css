@@ -85,6 +85,10 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .section-count { margin-left: 7px; font-variant-numeric: tabular-nums; }
 .task-list { min-height: 0; flex: 1; overflow: hidden auto; padding-block: 2px 14px; }
 .task-row { width: 100%; height: 27px; margin-bottom: 1px; padding: 0 6px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--text); }
+.task-row[data-tab-kind="agent"]:not(.agent-rail-button) {
+  grid-template-columns: minmax(0, 1fr) auto; padding-inline-start: 16px; column-gap: 6px;
+}
+.task-row > .task-row-title:first-child { justify-self: stretch; }
 .task-row:hover, .new-agent-button:hover { background: var(--surface-hover); }
 .task-row:active, .new-agent-button:active { translate: none; }
 .task-row.selected { background: var(--surface-selected); }
@@ -100,11 +104,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .app-shell[data-sidebar-collapsed] .sidebar { width: 72px; flex-basis: 72px; }
 .app-shell[data-native-host][data-sidebar-collapsed] .task-toolbar { padding-left: 52px; }
 .agent-rail-button { color: var(--text-secondary); }
-.agent-rail-button[data-agent-status="ready"] { color: var(--blue); }
 .agent-rail-button .agent-status-icon { width: 20px; height: 20px; }
-.agent-status-icon .agent-ready-badge { width: 12px; height: 12px; }
-.agent-ready-badge circle { fill: currentColor; stroke: var(--sidebar); stroke-width: 2; }
-.agent-ready-badge path { stroke: var(--text-inverse); transform-box: view-box; transform-origin: center; transform: scale(1.45); }
 @property --sparkle-phase {
   syntax: "<angle>";
   inherits: true;

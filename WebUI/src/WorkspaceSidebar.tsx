@@ -15,17 +15,21 @@ type Action = (action: NativeAction) => void;
 const keyOf = (ref: WorkspaceTab) => ref.kind + ':' + ref.id;
 
 export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
+  const collapsed = snapshot.isTaskSidebarCollapsed;
   const available = new Map<string, Item>();
   for (const task of snapshot.tasks) {
+    if (collapsed && !isTaskActive(task)) continue;
     const ref: WorkspaceTab = { kind: 'agent', id: task.id };
     available.set(keyOf(ref), { ref, task, title: task.title, open: false, updatedAt: task.updatedAt,
       searchText: [task.title, task.summary, task.workspace].join(' ') });
   }
-  for (const chat of snapshot.savedChats ?? []) {
-    const ref: WorkspaceTab = { kind: 'agent', id: chat.id };
-    if (!available.has(keyOf(ref))) available.set(keyOf(ref), {
-      ref, title: chat.title, open: false, updatedAt: chat.updatedAt, searchText: [chat.title, chat.workspace].join(' '),
-    });
+  if (!collapsed) {
+    for (const chat of snapshot.savedChats ?? []) {
+      const ref: WorkspaceTab = { kind: 'agent', id: chat.id };
+      if (!available.has(keyOf(ref))) available.set(keyOf(ref), {
+        ref, title: chat.title, open: false, updatedAt: chat.updatedAt, searchText: [chat.title, chat.workspace].join(' '),
+      });
+    }
   }
   if (snapshot.mixesBrowserTabsInSidebar) {
     for (const browser of snapshot.workspaceBrowsers ?? []) {
@@ -65,15 +69,15 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, focusSearch, nat
   const tabList = useRef<HTMLElement | null>(null);
   useEffect(() => {
     tabList.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }, [snapshot.selectedTaskID, snapshot.primaryBrowserID]);
+  }, [snapshot.selectedTaskID, snapshot.primaryBrowserID, snapshot.isTaskSidebarCollapsed]);
   const active = snapshot.tasks.some(isTaskActive);
   const collapsed = Boolean(snapshot.isTaskSidebarCollapsed);
   useEffect(() => {
-    if (!active) return;
+    if (collapsed || !active) return;
     return startSidebarClock(setNow, { now: () => Date.now() / 1000, everySecond: (tick) => {
       const timer = window.setInterval(tick, 1000); return () => window.clearInterval(timer);
     } });
-  }, [active]);
+  }, [active, collapsed]);
   const items = workspaceItems(snapshot, search);
   const noun = snapshot.mixesBrowserTabsInSidebar ? 'tabs' : 'chats';
   const searchLabel = 'Search ' + noun;
@@ -125,8 +129,8 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, focusSearch, nat
               event.preventDefault(); const neighbor = items[index + (event.key === 'ArrowUp' ? -1 : 1)];
               if (neighbor?.open) post({ action: 'moveWorkspaceTab', tab: item.ref, target: neighbor.ref });
             }}>
-            {item.browser ? <SiteIcon tab={item.browser} /> : collapsed && status
-              ? <AgentStatusIcon working={status === 'working'} taskID={item.ref.id} /> : <Icon name="agent" size={16} />}
+            {item.browser ? <SiteIcon tab={item.browser} /> : collapsed
+              ? <AgentStatusIcon taskID={item.ref.id} /> : null}
             {!collapsed && <span className="task-row-title">{item.title}</span>}
             {!collapsed && item.task && <TaskActivityIndicator task={item.task} now={now} />}
           </Button>

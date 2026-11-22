@@ -48,7 +48,7 @@ test('sidebar uses the site icon or hostname initial in both sizes; an empty tab
     expect(render()).not.toContain('class="site-initial"');
   }
 });
-test('collapsing a filtered list keeps the same tabs in their slots', () => {
+test('a matching browser tab stays available at either width in mixed mode', () => {
   for (const isTaskSidebarCollapsed of [false, true]) {
     const html = renderToStaticMarkup(h(WorkspaceSidebar, {
       snapshot: { ...fixture(), isTaskSidebarCollapsed }, search: 'rail.example',
@@ -75,9 +75,35 @@ test('chat-only navigation hides browser rows and creation in either sidebar wid
     expect(html).not.toContain('Show chat history');
     expect(html).toContain('aria-label="New agent"');
     expect(html).toContain('data-tab-kind="agent"');
-    expect(html).toContain('aria-current="page"');
+    if (!isTaskSidebarCollapsed) expect(html).toContain('aria-current="page"');
     expect(html).not.toContain('data-tab-kind="browser"');
     expect(html).not.toContain('aria-label="New browser tab"');
     expect(workspaceItems(snapshot, 'rail.example')).toEqual([]);
   }
+});
+
+test('expanded chats have titles and activity indicators; the rail contains only active chats', () => {
+  const snapshot = fixture();
+  snapshot.mixesBrowserTabsInSidebar = false;
+  snapshot.tasks = ['Running', 'Waiting', 'Completed', 'Failed', 'Draft'].map((status, index) => ({
+    ...snapshot.tasks[0], id: String(index), title: 'Chat ' + index, status,
+    isBusy: index === 1, hasUnreadCompletion: index === 2,
+  }));
+  snapshot.workspaceOrder = [];
+  snapshot.savedChats = [{ id: 'saved', title: 'Saved chat', workspace: '/', updatedAt: 0 }];
+  const rows = () => renderToStaticMarkup(h(WorkspaceSidebar, {
+    snapshot, search: '', setSearch: () => {}, focusSearch: () => {}, nativeHost: true, post: () => {},
+  })).html.split('<nav').at(-1)!;
+  const expanded = rows();
+  expect(expanded.match(/class="task-row-title"/g)).toHaveLength(6);
+  expect(expanded).not.toContain('<svg');
+  expect(expanded).toContain('task-row-unread');
+  snapshot.isTaskSidebarCollapsed = true;
+  const collapsed = rows();
+  expect(workspaceItems(snapshot, '').map(item => item.ref.id)).toEqual(['0', '1']);
+  expect(collapsed.match(/data-tab-kind="agent"/g)).toHaveLength(2);
+  expect(collapsed.match(/class="agent-status-icon"/g)).toHaveLength(2);
+  expect(collapsed).toContain('aria-label="Chat 1 — Working"');
+  snapshot.tasks = snapshot.tasks.slice(2);
+  expect(rows()).not.toContain('data-tab-kind="agent"');
 });
