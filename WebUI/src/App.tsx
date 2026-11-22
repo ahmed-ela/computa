@@ -943,17 +943,21 @@ export function App() {
     }
   }, [snapshot?.isTaskSidebarCollapsed]);
 
+  function focusSearch() {
+    if (currentSnapshot.current?.isTaskSidebarCollapsed) {
+      focusSearchOnExpand.current = true;
+      post({ action: 'setTaskSidebarCollapsed', collapsed: false });
+    } else {
+      document.getElementById('task-search')?.focus();
+    }
+  }
+
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if (!event.metaKey || snapshot?.isSettingsPresented) return;
       if (event.key.toLowerCase() === 'k' && !snapshot?.pendingApprovalCount) {
         event.preventDefault();
-        if (snapshot?.isTaskSidebarCollapsed) {
-          focusSearchOnExpand.current = true;
-          post({ action: 'setTaskSidebarCollapsed', collapsed: false });
-        } else {
-          document.getElementById('task-search')?.focus();
-        }
+        focusSearch();
       }
       if (!nativeHost && event.key.toLowerCase() === 'n' && event.shiftKey) { event.preventDefault(); post({ action: 'createTask' }); }
       if (!nativeHost && event.key === ',') { event.preventDefault(); post({ action: 'showSettings' }); }
@@ -981,7 +985,7 @@ export function App() {
       data-sidebar-collapsed={snapshot.isTaskSidebarCollapsed ? 'true' : undefined}
       data-browser-pane={nativeHost && snapshot.isBrowserPresented && !snapshot.isSettingsPresented ? 'open' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
-      <WorkspaceSidebar post={post} snapshot={snapshot} search={search} setSearch={setSearch} nativeHost={nativeHost} />
+      <WorkspaceSidebar post={post} snapshot={snapshot} search={search} setSearch={setSearch} focusSearch={focusSearch} nativeHost={nativeHost} />
       {!nativeHost && snapshot.primaryBrowserID && <main className="preview-browser-content">
         <Icon name="browser" /><strong>{snapshot.workspaceBrowsers?.find(tab => tab.id === snapshot.primaryBrowserID)?.title}</strong>
         <span>Pages open in the desktop browser.</span></main>}

@@ -9,7 +9,7 @@ struct NativeRuntimeStatusBar: View {
     @State private var approvalErrorPresented = false
 
     var body: some View {
-        HStack(spacing: state.isTaskSidebarCollapsed ? 4 : 10) {
+        HStack(spacing: 4) {
             if state.approvalGateBlocksInteraction {
                 // General Settings yields to approvals. Its gear can still open
                 // the native access settings without covering the approval card.
@@ -70,13 +70,12 @@ struct NativeRuntimeStatusBar: View {
                 }
             }
 
-            if !state.isTaskSidebarCollapsed { Spacer(minLength: 12) }
-
             // Temporarily hide context usage from the status bar.
             // ContextUsageIndicator(state: state)
         }
-        .padding(.horizontal, state.isTaskSidebarCollapsed ? 4 : 18)
-        .frame(maxWidth: .infinity)
+        // Center the 22-point gear on the sidebar’s fixed 32-point icon column.
+        .padding(.leading, 21)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .lineLimit(1)
         .disabled(state.presentedSheet != nil)
         .onChange(of: state.approvalGateBlocksInteraction) { _, blocked in

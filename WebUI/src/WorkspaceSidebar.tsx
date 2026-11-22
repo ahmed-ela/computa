@@ -40,8 +40,8 @@ function SiteIcon({ tab }: { tab: WorkspaceBrowser }) {
   return letter ? <span aria-hidden="true" className="site-initial">{letter}</span> : <Icon name="browser" size={16} />;
 }
 
-export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post }: {
-  snapshot: AppSnapshot; search: string; setSearch: (value: string) => void; nativeHost: boolean; post: Action;
+export function WorkspaceSidebar({ snapshot, search, setSearch, focusSearch, nativeHost, post }: {
+  snapshot: AppSnapshot; search: string; setSearch: (value: string) => void; focusSearch: () => void; nativeHost: boolean; post: Action;
 }) {
   const [history, setHistory] = useState(false);
   const [now, setNow] = useState(() => Date.now() / 1000);
@@ -54,7 +54,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       const timer = window.setInterval(tick, 1000); return () => window.clearInterval(timer);
     } });
   }, [active]);
-  const items = workspaceItems(snapshot, history, collapsed ? '' : search);
+  const items = workspaceItems(snapshot, history, search);
   const select = (item: Item) => {
     if (history) { setHistory(false); setSearch(''); post({ action: 'selectTask', id: item.ref.id }); }
     else post({ action: 'selectWorkspaceTab', tab: item.ref });
@@ -77,15 +77,20 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
     </nav>
-    {!collapsed && <div className="task-search">
-      <Input id="task-search" className="pr-8" aria-label={history ? 'Search chat history' : 'Search tabs'}
-        placeholder={history ? 'Search chat history' : 'Search tabs'} value={search} onInput={event => setSearch((event.currentTarget as HTMLInputElement).value)} />
-      {search && <Button variant="ghost" size="icon-xs" aria-label="Clear search" onClick={() => setSearch('')}><Icon name="x" size={13} /></Button>}
-    </div>}
-    <div className="sidebar-section-heading workspace-list-heading">{!collapsed && <span>{history ? 'Chat history' : 'Open tabs'}</span>}
+    <div className="task-search">
+      {!collapsed && <Input id="task-search" aria-label={history ? 'Search chat history' : 'Search tabs'}
+        placeholder={history ? 'Search chat history' : 'Search tabs'} value={search} onInput={event => setSearch((event.currentTarget as HTMLInputElement).value)} />}
+      <Button variant="ghost" size="icon-xs" className="sidebar-search-button" tabIndex={collapsed ? 0 : -1}
+        aria-label={history ? 'Search chat history' : 'Search tabs'} title={history ? 'Search chat history' : 'Search tabs'} onClick={focusSearch}>
+        <Icon name="search" size={15} /></Button>
+      {search && <Button variant="ghost" size="icon-xs" className="clear-search" aria-label="Clear search" onClick={() => setSearch('')}><Icon name="x" size={13} /></Button>}
+    </div>
+    <div className="sidebar-section-heading workspace-list-heading">
       <Button variant="ghost" size="icon-xs" aria-pressed={history} aria-label={history ? 'Show open tabs' : 'Show chat history'}
         title={history ? 'Show open tabs' : 'Show chat history'} onClick={() => { setSearch(''); setHistory(!history); }}>
-        <Icon name={history ? 'sidebar' : 'history'} size={15} /></Button></div>
+        <Icon name={history ? 'sidebar' : 'history'} size={15} /></Button>
+      {!collapsed && <span>{history ? 'Chat history' : 'Open tabs'}</span>}
+    </div>
     <nav className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={history ? 'Chat history' : 'Open tabs'}>
       {items.map((item,index) => {
         const status = item.task && sidebarAgentStatus(item.task);
@@ -96,7 +101,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           onDragEnd={() => { dragging.current = null; }}
           onDragOver={event => { if (dragging.current) event.preventDefault(); }}
           onDrop={event => { event.preventDefault(); if (dragging.current) post({ action: 'moveWorkspaceTab', tab: dragging.current, target: item.ref }); dragging.current = null; }}>
-          <Button variant="ghost" size={collapsed ? 'icon' : 'default'} className={collapsed ? 'agent-rail-button' : 'task-row' + (selected ? ' selected' : '')}
+          <Button variant="ghost" className={'task-row' + (collapsed ? ' agent-rail-button' : '') + (selected ? ' selected' : '')}
             aria-label={label} title={label} data-agent-status={collapsed ? status : undefined}
             data-tab-kind={item.ref.kind} aria-current={selected ? 'page' : undefined} onClick={() => select(item)}
             onKeyDown={event => {

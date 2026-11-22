@@ -26,7 +26,7 @@ test('one order supports overlapping typed IDs, mixed search and separate chat h
 test('sidebar uses the site icon or hostname initial in both sizes; an empty tab uses the globe', () => {
   for (const collapsed of [true,false]) {
     const snapshot = { ...fixture(), isTaskSidebarCollapsed:collapsed };
-    const render = () => renderToStaticMarkup(h(WorkspaceSidebar, {snapshot,search:'',setSearch:()=>{},post:()=>{},nativeHost:true})).html;
+    const render = () => renderToStaticMarkup(h(WorkspaceSidebar, {snapshot,search:'',setSearch:()=>{},focusSearch:()=>{},post:()=>{},nativeHost:true})).html;
     const initial = render();
     expect(initial).toContain('class="site-initial">R</span>');
     expect(initial.match(/aria-current="page"/g)?.length).toBe(1);
@@ -34,6 +34,16 @@ test('sidebar uses the site icon or hostname initial in both sizes; an empty tab
     snapshot.workspaceBrowsers![0].favicon = 'aWNvbg==';
     expect(render()).toContain('src="data:image/png;base64,aWNvbg=="');
     expect(render()).not.toContain('class="site-initial"');
+  }
+});
+test('collapsing a filtered list keeps the same tabs in their slots', () => {
+  for (const isTaskSidebarCollapsed of [false, true]) {
+    const html = renderToStaticMarkup(h(WorkspaceSidebar, {
+      snapshot: { ...fixture(), isTaskSidebarCollapsed }, search: 'rail.example',
+      setSearch: () => {}, focusSearch: () => {}, nativeHost: true, post: () => {},
+    })).html;
+    expect(html.match(/data-tab-kind=/g)?.length).toBe(1);
+    expect(html).toContain('aria-label="Trips"');
   }
 });
 test('a browser in the main pane does not acknowledge the previously selected agent', () => {
