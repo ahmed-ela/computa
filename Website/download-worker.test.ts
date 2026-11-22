@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { newestMacDownload } from './download-worker.js';
+import worker, { newestMacDownload } from './download-worker.js';
 
 const base = 'https://github.com/ahmed-ela/kolmogor/releases';
 function alpha(build: number, overrides = {}) {
@@ -45,4 +45,13 @@ test('existing Computa clients follow the same signed release across the rename'
   expect(newestMacDownload([legacy], true)).toEndWith('/' + legacy.tag_name + '/appcast.xml');
   expect(newestMacDownload([renamed, legacy])).toEndWith('/' + renamed.assets[0].name);
   expect(newestMacDownload([legacy, renamed], true)).toEndWith('/' + renamed.tag_name + '/appcast.xml');
+});
+
+test('only the old homepage redirects to the canonical host', async () => {
+  const assets = { ASSETS: { fetch: () => new Response('Kolmogor') } };
+  const response = await worker.fetch(new Request('https://computa.wtf/?ref=share'), assets);
+  expect(response.status).toBe(301);
+  expect(response.headers.get('location')).toBe('https://kolmogor.com/?ref=share');
+  const homepage = await worker.fetch(new Request('https://kolmogor.com/'), assets);
+  expect(await homepage.text()).toBe('Kolmogor');
 });

@@ -29,7 +29,12 @@ export function newestMacDownload(releases, appcast = false) {
 
 export default {
   async fetch(request, env) {
-    const path = new URL(request.url).pathname;
+    const url = new URL(request.url);
+    const path = url.pathname;
+    if (url.hostname === 'computa.wtf' && path === '/') {
+      url.hostname = 'kolmogor.com';
+      return Response.redirect(url.toString(), 301);
+    }
     const appcast = path === '/appcast.xml';
     if (!appcast && path !== '/download' && path !== '/download/') return env.ASSETS.fetch(request);
     if (!['GET', 'HEAD'].includes(request.method)) return new Response(null, { status: 405, headers: { Allow: 'GET, HEAD' } });
