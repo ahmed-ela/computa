@@ -997,7 +997,14 @@ export function App() {
           <Icon name="browser" size={18} />
         </Button>}
         <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} />
-        {task ? (
+        {snapshot.savedChatSelection ? (
+          <div className="no-task-view" role={snapshot.savedChatSelection.error ? 'alert' : 'status'}>
+            {snapshot.savedChatSelection.error ? <>
+              <p>Couldn’t open this chat. {snapshot.savedChatSelection.error}</p>
+              <Button onClick={() => post({ action: 'selectTask', id: snapshot.savedChatSelection!.id })}>Retry</Button>
+            </> : <p>Loading chat…</p>}
+          </div>
+        ) : task ? (
           <Conversation snapshot={snapshot} task={task} draftState={draftState} />
         ) : (
           <div className="no-task-view">

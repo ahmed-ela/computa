@@ -126,10 +126,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             }
 
         case "selectTask":
-            guard let id = body["id"] as? String,
-                  state.tasks.contains(where: { $0.id == id })
-            else { return }
-            state.selectTask(id)
+            guard let id = body["id"] as? String else { return }
+            state.selectSidebarChat(id)
 
         case "acknowledgeTaskCompletion":
             // A rendered background web view is not evidence that the user

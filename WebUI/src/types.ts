@@ -157,6 +157,8 @@ export interface AppSnapshot {
   revision: number;
   mixesBrowserTabsInSidebar?: boolean;
   workspaceOrder?: WorkspaceTab[];
+  savedChats?: { id: string; title: string; workspace: string; updatedAt: number }[];
+  savedChatSelection?: { id: string; error?: string };
   workspaceBrowsers?: WorkspaceBrowser[];
   primaryBrowserID?: string;
   titlebarHeight?: number;

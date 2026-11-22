@@ -179,8 +179,10 @@ extension AppState {
             guard let id = UUID(uuidString: tab.id),
                   let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == id }) else { return }
             browserSession.selectTab(page.id)
-            if mixesBrowserTabsInSidebar { workspaceTabs.browserIsPrimary = true }
-            else { isBrowserPresented = true }
+            if mixesBrowserTabsInSidebar {
+                savedChatSelection = nil
+                workspaceTabs.browserIsPrimary = true
+            } else { isBrowserPresented = true }
         }
     }
 

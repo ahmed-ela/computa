@@ -67,11 +67,11 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 /* Keep a fixed leading column in both sidebar widths. Only the label column flexes. */
 .primary-nav, .task-list { padding-inline: var(--sidebar-inset); }
 .primary-nav { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; padding-block: 10px 14px; }
-.nav-button, .task-row, .workspace-list-heading {
+.nav-button, .task-row {
   display: grid; grid-template-columns: var(--sidebar-icon-track) minmax(0, 1fr) auto;
   align-items: center; justify-content: start; justify-items: start; gap: 0; text-align: left;
 }
-:is(.nav-button, .task-row, .workspace-list-heading) > :first-child { justify-self: center; }
+:is(.nav-button, .task-row) > :first-child { justify-self: center; }
 .nav-button { width: 100%; min-width: 0; padding-inline: 0; }
 .new-task-button { grid-template-columns: calc(var(--sidebar-icon-track) - 2px) minmax(0, 1fr); }
 .new-agent-button { border: 0; background: transparent; box-shadow: none; }
@@ -82,10 +82,13 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .task-search input { width: 100%; min-width: 0; padding-inline: var(--sidebar-icon-track) 8px; }
 .sidebar-search-button { position: absolute; left: calc(var(--sidebar-icon-track) / 2); transform: translateX(-50%); color: var(--text-tertiary); }
 .task-search .clear-search, .workspace-tab-row .workspace-close { position: absolute; left: calc(0px - var(--sidebar-inset)); width: 20px; }
-.sidebar-section-heading { flex: 0 0 27px; margin-inline: var(--sidebar-inset); color: var(--text-tertiary); font-size: 11px; }
 .section-count { margin-left: 7px; font-variant-numeric: tabular-nums; }
 .task-list { min-height: 0; flex: 1; overflow: hidden auto; padding-block: 2px 14px; }
 .task-row { width: 100%; height: 27px; margin-bottom: 1px; padding: 0 6px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--text); }
+.task-row[data-tab-kind="agent"]:not(.agent-rail-button) {
+  grid-template-columns: minmax(0, 1fr) auto; padding-inline-start: 16px; column-gap: 6px;
+}
+.task-row > .task-row-title:first-child { justify-self: stretch; }
 .task-row:hover, .new-agent-button:hover { background: var(--surface-hover); }
 .task-row:active, .new-agent-button:active { translate: none; }
 .task-row.selected { background: var(--surface-selected); }
@@ -101,11 +104,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .app-shell[data-sidebar-collapsed] .sidebar { width: 72px; flex-basis: 72px; }
 .app-shell[data-native-host][data-sidebar-collapsed] .task-toolbar { padding-left: 52px; }
 .agent-rail-button { color: var(--text-secondary); }
-.agent-rail-button[data-agent-status="ready"] { color: var(--blue); }
 .agent-rail-button .agent-status-icon { width: 20px; height: 20px; }
-.agent-status-icon .agent-ready-badge { width: 12px; height: 12px; }
-.agent-ready-badge circle { fill: currentColor; stroke: var(--sidebar); stroke-width: 2; }
-.agent-ready-badge path { stroke: var(--text-inverse); transform-box: view-box; transform-origin: center; transform: scale(1.45); }
 @property --sparkle-phase {
   syntax: "<angle>";
   inherits: true;
@@ -505,7 +504,6 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .app-shell[data-browser-primary="native"] .sidebar { width: 100%; flex-basis: 100%; }
 .app-shell[data-browser-primary] :is(.workspace,.inspector) { display: none; }
 .preview-browser-content { display: grid; flex: 1; align-content: center; justify-items: center; gap: 10px; }
-.workspace-list-heading { margin-bottom: 3px; }
 .workspace-tab-row { position: relative; width: 100%; }
 .workspace-tab-row .workspace-close { top: 50%; transform: translateY(-50%); opacity: 0; pointer-events: none; }
 .workspace-tab-row:hover .workspace-close, .workspace-tab-row:focus-within .workspace-close { opacity: 1; pointer-events: auto; }

@@ -366,14 +366,15 @@ enum AppServerCompletedToolItemContract {
     }
 }
 
-/// Keep the usual first history page and hydrate only open chats from older pages.
+/// Index every page. Read transcripts eagerly for recent, open, unread and active chats.
 struct WorkspaceThreadList {
-    private var missing: Set<String>
+    private let eagerThreadIDs: Set<String>
     private var seenCursors = Set<String>()
     private var seenIDs = Set<String>()
     private(set) var cursor: String?
+    private(set) var savedChats: [SavedChatSummary] = []
 
-    init(openThreadIDs: Set<String>) { missing = openThreadIDs }
+    init(eagerThreadIDs: Set<String>) { self.eagerThreadIDs = eagerThreadIDs }
 
     mutating func takePage(_ response: Data) throws -> [[String: Any]] {
         guard let object = try JSONSerialization.jsonObject(with: response) as? [String: Any],
@@ -382,12 +383,16 @@ struct WorkspaceThreadList {
         }
         let first = cursor == nil
         let selected = page.filter { record in
-            guard let id = record["id"] as? String else { return false }
-            let wasOpen = missing.remove(id) != nil
-            return (first || wasOpen) && seenIDs.insert(id).inserted
+            guard let id = record["id"] as? String, seenIDs.insert(id).inserted else { return false }
+            let status = record["status"] as? [String: Any]
+            if first || eagerThreadIDs.contains(id) || status?["type"] as? String == "active" { return true }
+            savedChats.append(SavedChatSummary(id: id, title: AppServerThreadHistoryContract.displayTitle(
+                name: record["name"] as? String, preview: record["preview"] as? String),
+                workspace: record["cwd"] as? String ?? "", updatedAt: (record["updatedAt"] as? NSNumber)?.doubleValue ?? 0))
+            return false
         }
         cursor = nil
-        if !missing.isEmpty, let next = result["nextCursor"], !(next is NSNull) {
+        if let next = result["nextCursor"], !(next is NSNull) {
             guard let next = next as? String, !next.isEmpty, seenCursors.insert(next).inserted else {
                 throw CocoaError(.coderReadCorrupt)
             }
@@ -1077,12 +1082,14 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
 
     func hasBoundThread(taskID: String) async -> Bool { await core.hasBoundThread(taskID: taskID) }
 
-    func loadTasks() async throws -> [AgentTask] { try await loadTasks(including: []) }
+    func loadTasks() async throws -> [AgentTask] { try await loadWorkspaceHistory(including: []).tasks }
 
-    func loadTasks(including openThreadIDs: Set<String>) async throws -> [AgentTask] {
+    func loadWorkspaceHistory(including threadIDs: Set<String>) async throws -> WorkspaceHistory {
         try await core.start()
-        return try await core.loadTasks(including: openThreadIDs)
+        return try await core.loadWorkspaceHistory(including: threadIDs)
     }
+
+    func readSavedChat(_ id: String) async throws -> AgentTask { try await core.readSavedChat(id) }
 
     func events() -> AsyncStream<AgentRuntimeEvent> {
         eventStream
@@ -3473,8 +3480,8 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        private func bundledThreadRecords(including openThreadIDs: Set<String>) async throws -> [[String: Any]] {
-            var list = WorkspaceThreadList(openThreadIDs: openThreadIDs)
+        private func bundledThreadRecords(including openThreadIDs: Set<String>) async throws -> (records: [[String: Any]], savedChats: [SavedChatSummary]) {
+            var list = WorkspaceThreadList(eagerThreadIDs: openThreadIDs)
             var records: [[String: Any]] = []
             repeat {
                 var params: [String: Any] = [
@@ -3486,29 +3493,58 @@ private extension CodexAppServerRuntime {
                 let response = try await request(method: "thread/list", params: params)
                 records += try list.takePage(response)
             } while list.cursor != nil
-            return records
+            let summaries = list.savedChats.map { chat in
+                var summary = chat
+                summary.id = taskForThread[chat.id] ?? chat.id
+                return summary
+            }
+            return (records, summaries)
         }
 
-        func loadTasks(including openThreadIDs: Set<String>) async throws -> [AgentTask] {
+        private func readThread(_ threadID: String) async throws -> (record: [String: Any], history: Data) {
+            let history = try await request(method: "thread/read", params: ["threadId": threadID, "includeTurns": true])
+            let object = try JSONSerialization.jsonObject(with: history) as? [String: Any]
+            let result = object?["result"] as? [String: Any]
+            guard let record = result?["thread"] as? [String: Any], record["id"] as? String == threadID else {
+                throw RuntimeError.malformedResponse("thread/read returned a different thread")
+            }
+            return (record, history)
+        }
+
+        func readSavedChat(_ id: String) async throws -> AgentTask {
+            let threadID = threadForTask[id] ?? id
+            let (record, history) = try await readThread(threadID)
+            let tasks = try await restoreTasks([record], histories: [threadID: history], requireHistory: true)
+            guard let task = tasks.first, task.id == id else { throw CocoaError(.coderReadCorrupt) }
+            return task
+        }
+
+        func loadWorkspaceHistory(including openThreadIDs: Set<String>) async throws -> WorkspaceHistory {
             var records: [[String: Any]] = []
             var histories: [String: Data] = [:]
             var unavailable: [AgentTask] = []
+            var savedChats: [SavedChatSummary] = []
             if configuration.usesInstalledCLI {
                 for (id, model) in try cliThreads.entries() {
                     do {
-                        let bytes = try await request(method: "thread/read", params: ["threadId": id, "includeTurns": true])
-                        let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any]
-                        let result = object?["result"] as? [String: Any]
-                        guard var record = result?["thread"] as? [String: Any], record["id"] as? String == id else {
-                            throw RuntimeError.malformedResponse("thread/read returned a different thread")
-                        }
+                        let thread = try await readThread(id)
+                        var record = thread.record
                         record["model"] = model
                         records.append(record)
-                        histories[id] = bytes
+                        histories[id] = thread.history
                     } catch { unavailable.append(InstalledCodexCLI.unavailableTask(threadID: id, modelID: model, error: error)) }
                 }
-            } else { records = try await bundledThreadRecords(including: openThreadIDs) }
+            } else { (records, savedChats) = try await bundledThreadRecords(including: openThreadIDs) }
+            let tasks = try await restoreTasks(records, histories: histories)
+            for receipt in await webModelServer.latestCleanupReceipts() {
+                events.yield(.websiteSessionCleanupUpdated(receipt))
+            }
+            return WorkspaceHistory(tasks: tasks + unavailable, savedChats: savedChats)
+        }
 
+        private func restoreTasks(_ records: [[String: Any]], histories: [String: Data],
+                                  requireHistory: Bool = false) async throws -> [AgentTask] {
+            var cachedHistories = histories
             var explicitlyNamedTaskIDs = Set<AgentTask.ID>()
             var tasks = records.compactMap { record -> AgentTask? in
                 guard let threadID = record["id"] as? String else { return nil }
@@ -3561,7 +3597,7 @@ private extension CodexAppServerRuntime {
                 let threadID = threadForTask[taskID] ?? taskID
                 do {
                     let history: Data
-                    if let cached = histories.removeValue(forKey: threadID) { history = cached }
+                    if let cached = cachedHistories.removeValue(forKey: threadID) { history = cached }
                     else { history = try await request(method: "thread/read", params: ["threadId": threadID, "includeTurns": true]) }
                     let failures = try nativeFailureStore().load(threadID: threadID)
                     let historyTurnIDs = try AppServerThreadHistoryContract.turnIDs(from: history)
@@ -3602,6 +3638,7 @@ private extension CodexAppServerRuntime {
                             body: "The local diff record could not be loaded. Source files have not been changed. " + error.localizedDescription))
                     }
                 } catch {
+                    if requireHistory { throw error }
                     tasks[index].entries.append(TimelineEntry(kind: .system, title: "Saved chat history unavailable",
                         body: "The local transcript could not be loaded. It has not been erased. " + error.localizedDescription))
                 }
@@ -3612,10 +3649,7 @@ private extension CodexAppServerRuntime {
             }) {
                 prepareVisualGrounderInBackground()
             }
-            for receipt in await webModelServer.latestCleanupReceipts() {
-                events.yield(.websiteSessionCleanupUpdated(receipt))
-            }
-            return tasks + unavailable
+            return tasks
         }
 
         func resolveApproval(requestID: String, approved: Bool) throws {

@@ -56,22 +56,32 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         channel.continuation.yield(event)
     }
 
-    func loadTasks() async throws -> [AgentTask] { try await loadTasks(including: []) }
+    func loadTasks() async throws -> [AgentTask] { try await loadWorkspaceHistory(including: []).tasks }
 
-    func loadTasks(including openThreadIDs: Set<String>) async throws -> [AgentTask] {
+    func loadWorkspaceHistory(including openThreadIDs: Set<String>) async throws -> WorkspaceHistory {
         listen()
         let external = try await providerChats.load()
         for chat in external { providerOwners[chat.id] = ProviderCLI(modelID: chat.model) }
         let saved = try cliThreads.entries()
         let bundledIDs = openThreadIDs.subtracting(saved.keys).subtracting(external.map(\.id))
-        let regular = try await bundled.loadTasks(including: bundledIDs)
-        for chat in regular { owners[chat.id] = false }
-        guard !saved.isEmpty else { return (regular + external).sorted { $0.updatedAt > $1.updatedAt } }
-        let native: [AgentTask]
-        do { native = try await cli.loadTasks() }
-        catch { native = saved.map { InstalledCodexCLI.unavailableTask(threadID: $0.key, modelID: $0.value, error: error) } }
-        for chat in native { owners[chat.id] = true }
-        return (regular + native + external).sorted { $0.updatedAt > $1.updatedAt }
+        var history = try await bundled.loadWorkspaceHistory(including: bundledIDs)
+        for chat in history.tasks { owners[chat.id] = false }
+        history.tasks += external
+        if !saved.isEmpty {
+            let native: [AgentTask]
+            do { native = try await cli.loadTasks() }
+            catch { native = saved.map { InstalledCodexCLI.unavailableTask(threadID: $0.key, modelID: $0.value, error: error) } }
+            for chat in native { owners[chat.id] = true }
+            history.tasks += native
+        }
+        history.tasks.sort { $0.updatedAt > $1.updatedAt }
+        return history
+    }
+
+    func readSavedChat(_ id: String) async throws -> AgentTask {
+        let task = try await bundled.readSavedChat(id)
+        owners[task.id] = false
+        return task
     }
 
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { try await providerChats.models(provider) }

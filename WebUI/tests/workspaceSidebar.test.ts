@@ -16,12 +16,18 @@ function fixture(): AppSnapshot {
     workspaceOrder: [{kind:'browser', id:sharedID}, {kind:'agent', id:sharedID}, {kind:'browser', id:'empty'}],
     workspaceBrowsers: [{id:sharedID,title:'Trips',host:'www.rail.example'}, {id:'empty',title:'New tab'}] };
 }
-test('one order supports overlapping typed IDs, mixed search and separate chat history', () => {
+test('open tabs keep their order and closed chats follow once, even with overlapping IDs', () => {
   const snapshot = fixture();
-  expect(workspaceItems(snapshot,false,'').map(item => item.ref)).toEqual(snapshot.workspaceOrder!);
-  expect(workspaceItems(snapshot,false,'rail.example').map(item => item.title)).toEqual(['Trips']);
-  expect(workspaceItems(snapshot,true,'').map(item => item.ref.id)).toEqual(snapshot.tasks.slice(1).map(t => t.id));
-  expect(workspaceItems(snapshot,true,'rail.example')).toEqual([]);
+  const stale = { id: snapshot.tasks[0].id, title: 'Old title', workspace: '/', updatedAt: 0 };
+  const older = { id: 'oldest', title: 'Saved conversation', workspace: '/old-project', updatedAt: 0 };
+  snapshot.savedChats = [stale, older];
+  const items = workspaceItems(snapshot, '');
+  expect(items.filter(item => item.open).map(item => item.ref)).toEqual(snapshot.workspaceOrder!);
+  expect(items.filter(item => !item.open).map(item => item.ref.id)).toEqual([...snapshot.tasks.slice(1).sort((a,b) => b.updatedAt - a.updatedAt).map(t => t.id), older.id]);
+  expect(workspaceItems(snapshot, 'rail.example').map(item => item.title)).toEqual(['Trips']);
+  expect(workspaceItems(snapshot, 'OLD-project').map(item => item.title)).toEqual([older.title]);
+  expect(workspaceItems({ ...snapshot, workspaceOrder: [] }, '').map(item => item.ref.id))
+    .toEqual([...snapshot.tasks.slice().sort((a,b) => b.updatedAt - a.updatedAt).map(task => task.id), older.id]);
 });
 test('sidebar uses the site icon or hostname initial in both sizes; an empty tab uses the globe', () => {
   for (const collapsed of [true,false]) {
@@ -42,7 +48,7 @@ test('sidebar uses the site icon or hostname initial in both sizes; an empty tab
     expect(render()).not.toContain('class="site-initial"');
   }
 });
-test('collapsing a filtered list keeps the same tabs in their slots', () => {
+test('a matching browser tab stays available at either width in mixed mode', () => {
   for (const isTaskSidebarCollapsed of [false, true]) {
     const html = renderToStaticMarkup(h(WorkspaceSidebar, {
       snapshot: { ...fixture(), isTaskSidebarCollapsed }, search: 'rail.example',
@@ -65,12 +71,39 @@ test('chat-only navigation hides browser rows and creation in either sidebar wid
     const html = renderToStaticMarkup(h(WorkspaceSidebar, {
       snapshot, search: '', setSearch: () => {}, focusSearch: () => {}, nativeHost: true, post: () => {},
     })).html;
-    expect(html).toContain('aria-label="Open chats"');
+    expect(html).toContain('aria-label="Chats"');
+    expect(html).not.toContain('Show chat history');
     expect(html).toContain('aria-label="New agent"');
     expect(html).toContain('data-tab-kind="agent"');
-    expect(html).toContain('aria-current="page"');
+    if (!isTaskSidebarCollapsed) expect(html).toContain('aria-current="page"');
     expect(html).not.toContain('data-tab-kind="browser"');
     expect(html).not.toContain('aria-label="New browser tab"');
-    expect(workspaceItems(snapshot, false, 'rail.example')).toEqual([]);
+    expect(workspaceItems(snapshot, 'rail.example')).toEqual([]);
   }
+});
+
+test('expanded chats have titles and activity indicators; the rail contains only active chats', () => {
+  const snapshot = fixture();
+  snapshot.mixesBrowserTabsInSidebar = false;
+  snapshot.tasks = ['Running', 'Waiting', 'Completed', 'Failed', 'Draft'].map((status, index) => ({
+    ...snapshot.tasks[0], id: String(index), title: 'Chat ' + index, status,
+    isBusy: index === 1, hasUnreadCompletion: index === 2,
+  }));
+  snapshot.workspaceOrder = [];
+  snapshot.savedChats = [{ id: 'saved', title: 'Saved chat', workspace: '/', updatedAt: 0 }];
+  const rows = () => renderToStaticMarkup(h(WorkspaceSidebar, {
+    snapshot, search: '', setSearch: () => {}, focusSearch: () => {}, nativeHost: true, post: () => {},
+  })).html.split('<nav').at(-1)!;
+  const expanded = rows();
+  expect(expanded.match(/class="task-row-title"/g)).toHaveLength(6);
+  expect(expanded).not.toContain('<svg');
+  expect(expanded).toContain('task-row-unread');
+  snapshot.isTaskSidebarCollapsed = true;
+  const collapsed = rows();
+  expect(workspaceItems(snapshot, '').map(item => item.ref.id)).toEqual(['0', '1']);
+  expect(collapsed.match(/data-tab-kind="agent"/g)).toHaveLength(2);
+  expect(collapsed.match(/class="agent-status-icon"/g)).toHaveLength(2);
+  expect(collapsed).toContain('aria-label="Chat 1 — Working"');
+  snapshot.tasks = snapshot.tasks.slice(2);
+  expect(rows()).not.toContain('data-tab-kind="agent"');
 });
