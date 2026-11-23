@@ -78,6 +78,20 @@ final class WorkspaceTabs {
     @ObservationIgnored var onChange: (() -> Void)?
     private(set) var order: [WorkspaceTabID]
     private(set) var agents: [String: SavedWorkspace.Agent]
+    enum ClosedTab {
+        case agent(String)
+        case browser(SavedWorkspace.Page, paneIndex: Int)
+
+        var tab: WorkspaceTabID {
+            switch self {
+            case .agent(let id): .agent(id)
+            case .browser(let page, _): .browser(page.id)
+            }
+        }
+    }
+
+    // Session-only history of explicit user closes. Closed pages retain no WebKit or tool handles.
+    private(set) var recentlyClosed: [(content: ClosedTab, index: Int)] = []
     private var hasSavedAgents: Bool
     var browserIsPrimary = false {
         didSet { if oldValue != browserIsPrimary { onChange?() } }
@@ -101,9 +115,19 @@ final class WorkspaceTabs {
         hasSavedAgents = true
     }
 
+    func rememberClose(_ content: ClosedTab) {
+        guard let index = order.firstIndex(of: content.tab) else { return }
+        recentlyClosed.removeAll { $0.content.tab == content.tab }
+        if recentlyClosed.count == 32 { recentlyClosed.removeFirst() }
+        recentlyClosed.append((content, index))
+    }
+
     func open(_ tab: WorkspaceTabID) {
         guard !order.contains(tab) else { return }
-        order.insert(tab, at: 0)
+        // Both the explicit reopen command and opening a closed chat from Search consume its entry.
+        let index = recentlyClosed.last { $0.content.tab == tab }?.index ?? 0
+        recentlyClosed.removeAll { $0.content.tab == tab }
+        order.insert(tab, at: min(index, order.count))
         onChange?()
     }
 
@@ -259,12 +283,44 @@ extension AppState {
         switch tab.kind {
         case .agent:
             guard openWorkspaceTabs.contains(tab) else { return }
+            workspaceTabs.rememberClose(.agent(tab.id))
             removeWorkspaceTab(tab, wasSelected: primaryBrowserID == nil && selectedTaskID == tab.id)
         case .browser:
             if let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID.uuidString == tab.id }) {
+                if let saved = browserSession.restorablePage(for: page),
+                   let index = browserSession.workspaceBrowserTabs.firstIndex(where: { $0.id == page.id }) {
+                    workspaceTabs.rememberClose(.browser(saved, paneIndex: index))
+                }
                 browserSession.closeTab(page.id)
             }
         }
+    }
+
+    private var lastClosedTab: WorkspaceTabs.ClosedTab? {
+        workspaceTabs.recentlyClosed.last { record in
+            switch record.content {
+            case .agent(let id): tasks.contains { $0.id == id }
+            case .browser: true
+            }
+        }?.content
+    }
+
+    var canReopenClosedTab: Bool {
+        !approvalGateBlocksInteraction && presentedSheet == nil && lastClosedTab != nil
+    }
+
+    func reopenClosedTab() {
+        guard canReopenClosedTab, let closed = lastClosedTab else { return }
+        if case .browser(let page, let index) = closed {
+            do {
+                try browserSession.reopenWorkspacePage(page, at: index)
+            } catch {
+                // Creation failures (such as the tab limit) leave the close record available for retry.
+                presentBrowserTabOpenError(error)
+                return
+            }
+        }
+        selectWorkspaceTab(closed.tab)
     }
 
     func removeWorkspaceTab(_ tab: WorkspaceTabID, wasSelected: Bool) {
