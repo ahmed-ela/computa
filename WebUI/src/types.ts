@@ -199,6 +199,8 @@ export interface AppSnapshot {
   isTaskSidebarPeeked?: boolean;
   isBrowserPresented: boolean;
   isSettingsPresented: boolean;
+  chromeProfileImportStatus?: string;
+  importingChromeProfile?: boolean;
   isReviewPresented?: boolean;
   review?: ReviewState;
 }
@@ -240,6 +242,7 @@ export type NativeAction =
   | { action: 'reviewMutation'; taskID: string; snapshotID: string; operation: ReviewOperation; fileID?: string; hunkID?: string }
   | { action: 'openReviewFile'; taskID: string; snapshotID: string; fileID: string }
   | { action: 'showSettings' }
+  | { action: 'importChromeProfile' }
   | { action: 'dismissSettings' }
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }
   | { action: 'setDefaultModel'; modelID: string }

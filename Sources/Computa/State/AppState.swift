@@ -110,6 +110,9 @@ final class AppState {
         didSet { preferences.set(isTaskSidebarCollapsed, forKey: Self.sidebarCollapsedKey) }
     }
     var browserTabOpenError: String?
+    var chromeProfileImportStatus: String?
+    var importingChromeProfile = false
+    @ObservationIgnored var chromeImportSourceRoot = ChromeProfileLibrary.chromeRoot
     let workspaceLayout: WorkspaceLayout
     var mixesBrowserTabsInSidebar: Bool { workspaceLayout.mixesBrowserTabs }
     let workspaceTabs: WorkspaceTabs

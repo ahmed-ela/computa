@@ -17,24 +17,42 @@ struct WorkspaceTabLauncher: View {
         NotificationCenter.default.post(name: requestNotification, object: window)
     }
 
+    var library: ChromeProfileLibrary? = nil
     let launch: (NewTabDestination, String) -> Void
+    let openPage: (URL) -> Void
     let cancel: () -> Void
     @State private var text = ""
-    @State private var selection = NewTabDestination.browser
+    @State private var selection = 0
+    @State private var imported = ChromeProfileLibrary.Results()
+    private var places: [ChromeProfileLibrary.Suggestion] { imported.query == text ? imported.entries : [] }
 
     var body: some View {
         WorkspaceCommandPanel(width: 360) {
             WorkspaceCommandField(text: $text, placeholder: "Search Google or start an agent", label: "New tab",
-                                  identifier: "workspace-tab-launcher", move: { selection = $0 > 0 ? .chat : .browser },
-                                  submit: { launch(selection, $0) }, cancel: cancel)
+                                  identifier: "workspace-tab-launcher", move: { selection = min(max(0, selection + $0), 1 + places.count) },
+                                  submit: { value in
+                                      if selection == 1 { launch(.chat, value) }
+                                      else if value == text, places.indices.contains(selection - 2) { openPage(places[selection - 2].url) }
+                                      else { launch(.browser, value) }
+                                  }, cancel: cancel)
         } choices: {
             Divider()
             ForEach(NewTabDestination.allCases, id: \.self) { destination in
-                WorkspaceCommandRow(title: destination.label, symbol: destination.symbol, selected: selection == destination) {
+                WorkspaceCommandRow(title: destination.label, symbol: destination.symbol, selected: selection == (destination == .browser ? 0 : 1)) {
                     launch(destination, text)
                 }
             }
+            ForEach(Array(places.enumerated()), id: \.element.id) { index, place in
+                WorkspaceCommandRow(title: place.label, symbol: place.bookmark ? "bookmark" : "clock", selected: selection == index + 2) {
+                    openPage(place.url)
+                }
+            }
         }
+        .task(id: text) {
+            let result = await ChromeProfileLibrary.Results.search(text, in: library)
+            if !Task.isCancelled { imported = result }
+        }
+        .onChange(of: text) { _, _ in if selection > 1 { selection = 0 } }
     }
 }
 

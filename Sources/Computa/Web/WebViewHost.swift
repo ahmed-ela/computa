@@ -157,7 +157,12 @@ struct WebWorkspaceView: View {
                 }
             } else if launcherPresented && launcherAllowed {
                 Color.black.opacity(0.10).onTapGesture { launcherPresented = false }
-                WorkspaceTabLauncher(launch: launch, cancel: { launcherPresented = false })
+                WorkspaceTabLauncher(library: ChromeProfileLibrary(profile: state.browserSession.workspaceProfileID),
+                                     launch: launch, openPage: { url in
+                    guard launcherPresented, launcherAllowed else { return }
+                    launcherPresented = false
+                    state.newWorkspaceBrowserTab(url: url)
+                }, cancel: { launcherPresented = false })
             }
 
             // The web surface stays inert through approval settlement.

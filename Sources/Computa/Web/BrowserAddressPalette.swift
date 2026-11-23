@@ -17,6 +17,7 @@ struct BrowserAddressPalette: View {
     @State private var text: String
     @State private var selectedIndex = 0
     @State private var error: String?
+    @State private var imported = ChromeProfileLibrary.Results()
 
     init(state: AppState, tab: EmbeddedBrowserTab, focusRequest: Int, close: @escaping () -> Void) {
         self.state = state
@@ -27,7 +28,7 @@ struct BrowserAddressPalette: View {
     }
 
     private enum Choice: Hashable {
-        case navigate, switchTab(UUID), back, forward, reload
+        case navigate, switchTab(UUID), importedPage(URL), back, forward, reload
     }
 
     private struct Row: Identifiable {
@@ -52,6 +53,11 @@ struct BrowserAddressPalette: View {
                 rows.append(Row(id: .switchTab(other.workspaceID), title: "Switch to \(title)", symbol: "rectangle.on.rectangle"))
             }
             if rows.count >= 5 { break }
+        }
+        if imported.query == text {
+            for place in imported.entries {
+                rows.append(Row(id: .importedPage(place.url), title: place.label, symbol: place.bookmark ? "bookmark" : "clock"))
+            }
         }
         if tab.canGoBack && matches("Back") { rows.append(Row(id: .back, title: "Back", symbol: "chevron.left")) }
         if tab.canGoForward && matches("Forward") { rows.append(Row(id: .forward, title: "Forward", symbol: "chevron.right")) }
@@ -83,6 +89,10 @@ struct BrowserAddressPalette: View {
             }
             if let error { Text(error).foregroundStyle(.secondary).padding(.horizontal, 8) }
         }
+        .task(id: text) {
+            let results = await ChromeProfileLibrary.Results.search(text, in: ChromeProfileLibrary(profile: state.browserSession.workspaceProfileID))
+            if !Task.isCancelled { imported = results }
+        }
         .onChange(of: choices.count) { _, count in selectedIndex = min(selectedIndex, max(0, count - 1)) }
     }
 
@@ -93,6 +103,9 @@ struct BrowserAddressPalette: View {
         switch choice {
         case .navigate:
             do { try session.navigate(tabID: tab.id, to: EmbeddedBrowserURLPolicy.normalize(input)) }
+            catch { self.error = error.localizedDescription; return }
+        case .importedPage(let url):
+            do { try session.navigate(tabID: tab.id, to: url) }
             catch { self.error = error.localizedDescription; return }
         case .switchTab(let id): state.selectWorkspaceTab(.browser(id))
         case .back: session.goBack(tabID: tab.id)

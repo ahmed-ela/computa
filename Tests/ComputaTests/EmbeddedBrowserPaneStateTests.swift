@@ -2287,6 +2287,91 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testSettingsChromeProfileImportAndOpenBookmarkFromNewTab() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Profile 2"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Imported article opened</title>")
+        let address = try await site.start().appendingPathComponent("human/final")
+        defer { site.stop() }
+        let marks: [String: Any] = ["roots": ["bookmark_bar": ["type":"folder","children": [
+            ["type": "url","name": "Migration Example","url": address.absoluteString]
+        ]]]]
+        try JSONSerialization.data(withJSONObject: marks).write(to: root.appendingPathComponent("Profile 2/Bookmarks"))
+        let profile = UUID()
+        let library = try XCTUnwrap(ChromeProfileLibrary(profile: profile))
+        defer { try? FileManager.default.removeItem(at: library.database.deletingLastPathComponent()) }
+        let session = EmbeddedBrowserSession(profileID: profile, defaults: isolatedTestPreferences())
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
+        state.chromeImportSourceRoot = root
+        state.presentedSheet = .settings
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        await settleLayout(host)
+        let web = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }
+            .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
+        let button = "Array.from(document.querySelectorAll('button')).find(el => el.textContent.trim() === 'Import from Chrome…')"
+        let ready = await waitForScriptBool(on: web, script: "Boolean(" + button + ")")
+        XCTAssertTrue(ready)
+        _ = try await web.evaluateJavaScript(button + ".click(); true")
+        for _ in 0..<100 where window.attachedSheet == nil { try await Task.sleep(for: .milliseconds(30)) }
+        let panel = try XCTUnwrap(window.attachedSheet as? NSPanel)
+        XCTAssertTrue(state.importingChromeProfile)
+        XCTAssertEqual(panel.title, "Import from Chrome")
+        window.endSheet(panel, returnCode: .cancel)
+        for _ in 0..<100 where state.importingChromeProfile { try await Task.sleep(for: .milliseconds(30)) }
+        XCTAssertFalse(state.importingChromeProfile)
+        XCTAssertNil(state.chromeProfileImportStatus)
+        let canImportAgain = await waitForScriptBool(on: web, script: button + "?.disabled === false")
+        XCTAssertTrue(canImportAgain)
+        _ = try await web.evaluateJavaScript(button + ".click(); true")
+        for _ in 0..<100 where window.attachedSheet == nil { try await Task.sleep(for: .milliseconds(30)) }
+        let importSheet = try XCTUnwrap(window.attachedSheet)
+        let confirm = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: importSheet.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+        importSheet.sendEvent(confirm)
+        for _ in 0..<100 where state.importingChromeProfile { try await Task.sleep(for: .milliseconds(30)) }
+        XCTAssertEqual(state.chromeProfileImportStatus, "Imported or updated 0 history entries and 1 bookmark.")
+        guard window.attachedSheet == nil else { window.endSheet(importSheet); return }
+        state.presentedSheet = nil
+        await settleLayout(host)
+        WorkspaceTabLauncher.request(in: window)
+        let editor = try await launcherEditor(in: host, window: window)
+        editor.insertText("Migration Example", replacementRange: editor.selectedRange())
+        // The launcher debounces native disk lookup before presenting imported places.
+        try await Task.sleep(for: .milliseconds(350))
+        editor.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        editor.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        let browser = try XCTUnwrap(session.webView(for: XCTUnwrap(session.selectedTabID)))
+        let opened = await waitForScriptBool(on: browser, script: "document.title === 'Imported article opened'")
+        XCTAssertTrue(opened)
+        XCTAssertEqual(session.restorablePages.first?.url, address)
+
+        try session.navigate(tabID: XCTUnwrap(session.selectedTabID), to: URL(string: "about:blank")!)
+        let blank = await waitForScriptBool(on: browser, script: "location.href === 'about:blank'")
+        XCTAssertTrue(blank)
+        BrowserAddressPalette.request(in: window)
+        await settleLayout(host)
+        let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "browser-address" })
+        let addressEditor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+        addressEditor.insertText("Migration Example", replacementRange: addressEditor.selectedRange())
+        try await Task.sleep(for: .milliseconds(350))
+        addressEditor.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        addressEditor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        let reopened = await waitForScriptBool(on: browser, script: "document.title === 'Imported article opened'")
+        XCTAssertTrue(reopened)
+        XCTAssertEqual(session.workspaceBrowserTabs.count, 1)
+
+    }
+
+    @MainActor
     private func nativeViews(in root: NSView) -> [NSView] {
         var pending = [root]
         var result: [NSView] = []
