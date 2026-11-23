@@ -643,7 +643,10 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
       case 'setTaskModel':
         if (!isSelectableModel(action.modelID)) return;
         if (!snapshot.tasks.some((task) => task.id === action.taskID && task.modelSelectable)) return;
-        updateTask(action.taskID, (task) => ({ ...task, model: action.modelID }));
+        publish({
+          ...snapshot, defaultModel: action.modelID,
+          tasks: snapshot.tasks.map((task) => task.id === action.taskID ? { ...task, model: action.modelID } : task),
+        });
         return;
       case 'setShowToolPayloads':
         publish({ ...snapshot, showToolPayloads: action.value });

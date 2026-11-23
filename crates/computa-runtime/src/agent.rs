@@ -670,8 +670,9 @@ impl Runtime {
         if t.view.model != model {
             t.usage = None;
         }
-        t.view.model = model;
+        t.view.model = model.clone();
         t.view.updated_at = now();
+        s.snapshot.default_model = model;
         drop(s);
         self.publish().await;
         Ok(())
@@ -2789,6 +2790,29 @@ mod tests {
         .unwrap();
         runtime.state.lock().await.connected = true;
         (temp, runtime, d, server)
+    }
+    #[tokio::test]
+    async fn new_task_inherits_last_picked_model_and_saves_it_to_preferences() {
+        let (_temp, runtime, _dispatcher, _wire) = fixture().await;
+        let first = runtime.create_task().await;
+        let choice = ModelId::Browser(WebProvider::Claude);
+        runtime
+            .handle_action(NativeAction::SetTaskModel {
+                task_id: first,
+                model_id: choice.clone(),
+            })
+            .await
+            .unwrap();
+        let next = runtime.create_task().await;
+        let snapshot = runtime.snapshot().await;
+        assert_eq!(
+            snapshot.tasks.iter().find(|t| t.id == next).unwrap().model,
+            choice
+        );
+        assert_eq!(
+            runtime.preferences.load().unwrap().unwrap().default_model,
+            choice
+        );
     }
     #[tokio::test]
     async fn qualification_disables_upstream_command_tool_configuration() {
