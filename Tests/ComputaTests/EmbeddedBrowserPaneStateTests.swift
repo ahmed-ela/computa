@@ -890,7 +890,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let sidebar = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }
             .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
         let close = try XCTUnwrap(window.standardWindowButton(.closeButton))
-        let history = try XCTUnwrap(window.titlebarAccessoryViewControllers.last { $0.layoutAttribute == .left })
+        let toggle = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
+        let initialToggle = toggle.convert(toggle.bounds, to: nil)
+        let toggleTop = window.frame.height - initialToggle.midY
         let pill = "document.querySelector('button.sidebar-address')"
         func openAddress() async throws -> NSTextView {
             _ = try await sidebar.evaluateJavaScript("\(pill).click(); true")
@@ -920,13 +922,22 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 })()
                 """)
             XCTAssertTrue(inSidebar)
-            XCTAssertEqual(history.isHidden, collapsed)
-            if !collapsed {
-                let rect = history.view.convert(history.view.bounds, to: nil)
-                XCTAssertEqual(rect.midY, close.convert(close.bounds, to: nil).midY, accuracy: 3)
-                XCTAssertGreaterThan(rect.minX, close.convert(close.bounds, to: nil).maxX)
-                XCTAssertLessThanOrEqual(rect.maxX, CGFloat(expectedWidth))
-            }
+            XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { !$0.isHidden }.map(\.layoutAttribute), [.left])
+            let toggleFrame = toggle.convert(toggle.bounds, to: nil)
+            XCTAssertEqual(toggleFrame.midX, initialToggle.midX, accuracy: 1)
+            XCTAssertEqual(window.frame.height - toggleFrame.midY, toggleTop, accuracy: 1)
+            XCTAssertEqual(toggleFrame.midY, close.convert(close.bounds, to: nil).midY, accuracy: 3)
+            let navigationLayout = await waitForScriptBool(on: sidebar, script: """
+                (() => {
+                    const nav = document.querySelector('.sidebar-browser-navigation');
+                    if (\(collapsed)) return nav === null;
+                    if (!nav) return false;
+                    const row = nav.getBoundingClientRect(), strip = document.querySelector('.window-drag-strip').getBoundingClientRect();
+                    return row.top >= strip.bottom && row.bottom <= \(pill).getBoundingClientRect().top
+                        && Array.from(nav.querySelectorAll('button'), b => b.ariaLabel).join(',') === 'Back,Forward,Reload';
+                })()
+                """)
+            XCTAssertTrue(navigationLayout)
             let pageFrame = page.convert(page.bounds, to: nil)
             XCTAssertEqual(pageFrame.maxY, window.frame.height, accuracy: 1)
             XCTAssertEqual(pageFrame.minY, 0, accuracy: 1)
@@ -972,6 +983,23 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         command.doCommand(by: #selector(NSResponder.insertNewline(_:)))
         let returned = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/human/final')")
         XCTAssertTrue(returned, "Down and Return should execute the matching Back command")
+
+        func clickNavigation(_ label: String) async throws {
+            let control = "document.querySelector('.sidebar-browser-navigation button[aria-label=\"\(label)\"]:enabled')"
+            let enabled = await waitForScriptBool(on: sidebar, script: "!!\(control)")
+            XCTAssertTrue(enabled)
+            _ = try await sidebar.evaluateJavaScript("\(control).click(); true")
+        }
+        try await clickNavigation("Forward")
+        let wentForward = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/next')")
+        XCTAssertTrue(wentForward)
+        try await clickNavigation("Back")
+        let wentBack = await waitForScriptBool(on: page, script: "document.title === 'Address selection'")
+        XCTAssertTrue(wentBack)
+        _ = try await page.evaluateJavaScript("window.beforeReload = true")
+        try await clickNavigation("Reload")
+        let reloaded = await waitForScriptBool(on: page, script: "document.title === 'Address selection' && !window.beforeReload")
+        XCTAssertTrue(reloaded)
 
         let other = try session.createTab(url: url.appendingPathComponent("alternate"))
         let otherPage = try XCTUnwrap(session.webView(for: other))

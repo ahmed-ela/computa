@@ -25,6 +25,10 @@ struct WorkspaceBrowserSnapshot: Codable, Equatable, Sendable {
     let host: String?
     let favicon: Data?
     let isFaviconLoading: Bool
+    let canGoBack: Bool
+    let canGoForward: Bool
+    let canReload: Bool
+    let isLoading: Bool
 }
 
 struct LauncherChat: Codable, Equatable, Sendable {
@@ -77,7 +81,9 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         workspaceOrder = state.openWorkspaceTabs
         workspaceBrowsers = mixesBrowserTabsInSidebar ? state.browserSession.workspaceBrowserTabs.map {
             WorkspaceBrowserSnapshot(id: $0.workspaceID.uuidString, title: $0.title, host: $0.url?.host,
-                                     favicon: $0.favicon, isFaviconLoading: $0.isFaviconLoading)
+                                     favicon: $0.favicon, isFaviconLoading: $0.isFaviconLoading,
+                                     canGoBack: $0.canGoBack, canGoForward: $0.canGoForward,
+                                     canReload: $0.url != nil, isLoading: $0.isLoading)
         } : []
         primaryBrowserID = state.primaryBrowserID?.uuidString
         selectedTaskID = state.selectedTaskID

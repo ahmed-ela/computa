@@ -1,6 +1,7 @@
 import ArrowUp from '@octanejs/lucide/icons/arrow-up';
 import ArrowDown from '@octanejs/lucide/icons/arrow-down';
 import Check from '@octanejs/lucide/icons/check';
+import ChevronLeft from '@octanejs/lucide/icons/chevron-left';
 import ChevronRight from '@octanejs/lucide/icons/chevron-right';
 import Copy from '@octanejs/lucide/icons/copy';
 import CircleAlert from '@octanejs/lucide/icons/circle-alert';
@@ -15,6 +16,7 @@ import Pause from '@octanejs/lucide/icons/pause';
 import Pencil from '@octanejs/lucide/icons/pencil';
 import SquarePen from '@octanejs/lucide/icons/square-pen';
 import Play from '@octanejs/lucide/icons/play';
+import RotateCw from '@octanejs/lucide/icons/rotate-cw';
 import Search from '@octanejs/lucide/icons/search';
 import Settings from '@octanejs/lucide/icons/settings';
 import Sparkles from '@octanejs/lucide/icons/sparkles';
@@ -26,7 +28,9 @@ import X from '@octanejs/lucide/icons/x';
 const icons = {
   browser: Globe,
   check: Check,
+  back: ChevronLeft,
   chevron: ChevronRight,
+  reload: RotateCw,
   computer: Monitor,
   copy: Copy,
   delete: Trash2,

@@ -119,6 +119,20 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                   !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
             BrowserAddressPalette.request(in: webView?.window)
 
+        case "browserNavigation":
+            guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
+                  let id = body["id"] as? String, id == state.primaryBrowserID?.uuidString,
+                  let tabID = state.browserSession.selectedTabID, let tab = state.browserSession.humanTab(id: tabID),
+                  tab.workspaceID.uuidString == id else { return }
+            let session = state.browserSession
+            switch body["command"] as? String {
+            case "back" where tab.canGoBack: session.goBack(tabID: tabID)
+            case "forward" where tab.canGoForward: session.goForward(tabID: tabID)
+            case "reload" where !tab.isLoading: session.reload(tabID: tabID)
+            case "stop" where tab.isLoading: session.stop(tabID: tabID)
+            default: break
+            }
+
         case "openTabLauncher":
             WorkspaceTabLauncher.request(in: webView?.window)
 

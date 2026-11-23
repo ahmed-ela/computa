@@ -81,6 +81,11 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .approval-nav { min-height: 32px; color: var(--orange); font-size: 12px; }
 .count-pill { margin-left: auto; font-variant-numeric: tabular-nums; }
 .connection-dot, .status-dot, .task-row-status { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
+.sidebar-browser-navigation {
+  display: flex; flex: none; align-items: center; gap: 2px;
+  margin: 3px var(--sidebar-inset) 0; color: var(--text-secondary);
+}
+.sidebar-browser-navigation button { width: 28px; height: 26px; padding: 0; }
 .sidebar-address {
   display: flex; align-items: center; gap: 7px; flex: none; height: 28px; min-width: 0;
   margin: 2px var(--sidebar-inset); padding: 0 10px; border: 0; border-radius: 999px;
