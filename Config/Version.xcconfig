@@ -1,5 +1,5 @@
 // Canonical app release version and build number. See docs/VERSIONING.md.
-MARKETING_VERSION = 0.26.2
+MARKETING_VERSION = 0.26.3
 CURRENT_PROJECT_VERSION = 588
 // Public alpha builds add the number of new reachable commits since this release.
 COMPUTA_ALPHA_BUILD_ANCHOR = c72bcdba2a9afdaed159e63cc8d722eb91c79dea

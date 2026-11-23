@@ -4,6 +4,76 @@ import XCTest
 
 final class AppStateTests: XCTestCase {
     @MainActor
+    func testFirstRejectedMessageSurvivesRelaunchWithItsAgentTab() async throws {
+        let prefs = isolatedTestPreferences()
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let runtime = RejectingRuntime(tasks: [], firstMessageStore: .init(directory: folder))
+        let state = AppState(tasks: [], runtime: runtime, preferences: prefs)
+        state.createTask()
+        let id = try XCTUnwrap(state.selectedTaskID)
+        let accepted = await state.submit(prompt: "first delivery fixture", toTaskID: id)
+        XCTAssertFalse(accepted)
+        let expected = try XCTUnwrap(state.selectedTask).entries
+        XCTAssertEqual(expected.map(\.kind), [.user, .system])
+
+        let reopened = AppState(tasks: [], runtime: runtime, preferences: prefs)
+        await reopened.startRuntime()
+        XCTAssertEqual(reopened.selectedTaskID, id)
+        XCTAssertEqual(reopened.openWorkspaceTabs, [.agent(id)])
+        XCTAssertEqual(reopened.selectedTask?.entries, expected)
+        reopened.closeWorkspaceTab(.agent(id))
+        let closed = AppState(tasks: [], runtime: runtime, preferences: prefs)
+        await closed.startRuntime()
+        XCTAssertTrue(closed.openWorkspaceTabs.isEmpty)
+        XCTAssertNil(closed.selectedTaskID)
+        XCTAssertEqual(closed.tasks.first(where: { $0.id == id })?.entries, expected)
+    }
+
+    @MainActor
+    func testFirstMessageHandoffRequiresTheSavedThreadAndItsFirstUserMessage() async throws {
+        let prefs = isolatedTestPreferences()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = FirstMessageStore(directory: directory)
+        let state = AppState(tasks: [], runtime: StubRuntime(tasks: [], firstMessageStore: store), preferences: prefs)
+        state.createTask()
+        let local = try XCTUnwrap(state.selectedTaskID)
+        let workspaceKey = "Computa.Workspace.OpenTabs.v2"
+        let beforeBinding = try XCTUnwrap(prefs.data(forKey: workspaceKey))
+        let prompt = "identical text in two conversations"
+        let sent = await state.submit(prompt: prompt, toTaskID: local)
+        XCTAssertTrue(sent)
+        let thread = UUID().uuidString.lowercased()
+        state.apply(.taskThreadBound(taskID: local, threadID: thread))
+        func history(_ id: String, _ entries: [TimelineEntry]) -> AgentTask {
+            AgentTask(id: id, runtimeThreadID: id, title: "Saved", summary: "", status: .completed,
+                      workspace: "", model: "fixture", entries: entries)
+        }
+        let turns = [TimelineEntry(kind: .user, title: "You", body: prompt),
+                     TimelineEntry(kind: .assistant, title: "Assistant", body: "durable answer")]
+        let other = history(UUID().uuidString.lowercased(), turns)
+        // Simulate a kill after the binding reached the transcript file but before preferences caught up.
+        prefs.set(beforeBinding, forKey: workspaceKey)
+        let missing = AppState(tasks: [], runtime: StubRuntime(tasks: [other], firstMessageStore: store), preferences: prefs)
+        await missing.startRuntime()
+        XCTAssertEqual(missing.openWorkspaceTabs, [.agent(thread)])
+        XCTAssertFalse(missing.tasks.contains { $0.id == local })
+        XCTAssertEqual(missing.selectedTask?.entries.first?.body, prompt)
+        XCTAssertEqual(missing.selectedTask?.entries.last?.title, "Prompt delivery unconfirmed")
+        let misplaced = await missing.submit(prompt: "must not start a different thread", toTaskID: thread)
+        XCTAssertFalse(misplaced)
+        XCTAssertEqual(try store.load().count, 1)
+
+        let restored = AppState(tasks: [], runtime: StubRuntime(tasks: [other, history(thread, turns)],
+                                                                firstMessageStore: store), preferences: prefs)
+        await restored.startRuntime()
+        XCTAssertEqual(restored.openWorkspaceTabs, [.agent(thread)])
+        XCTAssertEqual(restored.selectedTask?.entries, turns)
+        XCTAssertTrue(try store.load().isEmpty)
+    }
+
+    @MainActor
     func testAdvancedInterfaceDetailsAreOptIn() {
         let state = AppState(tasks: [], preferences: isolatedTestPreferences())
         XCTAssertFalse(state.isInspectorPresented)
@@ -1110,6 +1180,7 @@ private final class PermissionClientRecorder: AutomationPermissionClient {
 
 private struct StubRuntime: AgentRuntimeClient {
     let tasks: [AgentTask]
+    var firstMessageStore: FirstMessageStore? = nil
     let providerName = "Stub runtime"
 
     func loadTasks() async throws -> [AgentTask] {
@@ -1193,6 +1264,7 @@ private struct RejectingRuntime: AgentRuntimeClient {
 
     let tasks: [AgentTask]
     var cancelSubmission = false
+    var firstMessageStore: FirstMessageStore? = nil
     let providerName = "Rejecting runtime"
 
     func loadTasks() async throws -> [AgentTask] { tasks }

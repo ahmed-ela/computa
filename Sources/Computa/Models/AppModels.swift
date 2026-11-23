@@ -148,6 +148,9 @@ struct TimelineEntry: Identifiable, Hashable, Codable, Sendable {
 }
 
 struct AgentTask: Identifiable, Hashable, Codable, Sendable {
+    /// Foundation and the runtime serialize the same UUID with different casing.
+    static func identityKey(_ id: String) -> String { UUID(uuidString: id)?.uuidString ?? id }
+
     let id: String
     /// Engine thread identity survives restarts; the UI's initial task UUID does not.
     var runtimeThreadID: String?

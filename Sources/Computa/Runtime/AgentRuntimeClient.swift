@@ -17,6 +17,7 @@ struct WorkspaceHistory: Sendable {
 /// leaking JSON-RPC details into SwiftUI views.
 protocol AgentRuntimeClient: Sendable {
     var providerName: String { get }
+    var firstMessageStore: FirstMessageStore? { get }
     var restartStore: AgentRestartStore? { get }
 
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption]
@@ -49,6 +50,7 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    var firstMessageStore: FirstMessageStore? { nil }
     var restartStore: AgentRestartStore? { nil }
     func loadWorkspaceHistory(including threadIDs: Set<String>) async throws -> WorkspaceHistory {
         try await WorkspaceHistory(tasks: loadTasks())

@@ -140,6 +140,15 @@ final class WorkspaceTabs {
         onChange?()
     }
 
+    /// Repair the tab reference if the process exited between saving a thread binding and saving preferences.
+    func restoreBinding(draft: String, thread: String) {
+        guard draft != thread else { return }
+        if let index = order.firstIndex(of: .agent(draft)) { order[index] = .agent(thread) }
+        if saved?.selectedAgent == draft { saved?.selectedAgent = thread }
+        saved?.drafts.removeValue(forKey: draft)
+        bindAgent(draft: draft, thread: thread)
+    }
+
     func bindAgent(draft: String, thread: String) {
         guard draft.lowercased() != thread.lowercased(), let agent = agents.removeValue(forKey: draft.lowercased()) else { return }
         agents[thread.lowercased()] = agent
@@ -174,25 +183,24 @@ final class WorkspaceTabs {
     func initialAgent(in tasks: [AgentTask]) -> String? {
         guard !tasks.isEmpty else { return nil }
         let ids = Set(tasks.map(\.id))
-        func key(_ id: String) -> String { UUID(uuidString: id)?.uuidString ?? id }
         var localForThread: [String: String] = [:]
         for task in tasks {
-            localForThread[key(task.id)] = task.id
-            if let thread = task.runtimeThreadID { localForThread[key(thread)] = task.id }
+            localForThread[AgentTask.identityKey(task.id)] = task.id
+            if let thread = task.runtimeThreadID { localForThread[AgentTask.identityKey(thread)] = task.id }
         }
         let hadOpenAgents = order.contains { $0.kind == .agent }
         var seen = Set<WorkspaceTabID>()
         order = order.compactMap { tab in
             guard tab.kind == .agent else { return tab }
             if ids.contains(tab.id) { return tab }
-            return localForThread[key(tab.id)].map(WorkspaceTabID.agent)
+            return localForThread[AgentTask.identityKey(tab.id)].map(WorkspaceTabID.agent)
         }.filter { seen.insert($0).inserted }
         if !hasSavedAgents || (hadOpenAgents && !order.contains { $0.kind == .agent }) {
             let seed = tasks.filter { $0.id == tasks.first?.id || $0.status == .running }
             order.insert(contentsOf: seed.map { .agent($0.id) }, at: 0)
         }
         if let selected = saved?.selectedAgent {
-            let local = localForThread[key(selected)] ?? selected
+            let local = localForThread[AgentTask.identityKey(selected)] ?? selected
             if order.contains(.agent(local)) { return local }
         }
         return order.first { $0.kind == .agent }?.id

@@ -6,18 +6,36 @@ import XCTest
 @testable import Computa
 
 #if DEBUG
+private struct UnboundRuntime: AgentRuntimeClient {
+    let root: URL
+    var firstMessageStore: FirstMessageStore? { .init(directory: root.appendingPathComponent("FirstMessages-v1")) }
+    let providerName = "Unbound fixture"
+    func loadTasks() async throws -> [AgentTask] { [] }
+    func events() -> AsyncStream<AgentRuntimeEvent> { AsyncStream { $0.finish() } }
+    func submit(prompt: String, toTaskID taskID: String, modelID: String) async throws {
+        try Data("once".utf8).write(to: root.appendingPathComponent("kill-ready"), options: .withoutOverwriting)
+        try await Task.sleep(for: .seconds(40))
+    }
+    func interrupt(taskID: String) async throws {}
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
+}
+
 /// Opt-in, model-free integration. Only the bundled native engine executes
 /// tools; provider inference and credentials are isolated loopback fixtures.
 @MainActor
 final class APIProviderHarnessLiveTests: XCTestCase {
     /// Each phase runs in a new host process with its own provider connection,
-    /// sharing only the task directory on disk. The installed app is untouched.
+    /// sharing the isolated task directory and workspace preference suite.
     func testAgentContinuesAcrossColdProcesses() async throws {
         try await exerciseRelaunch(firstPhase: "interrupt")
     }
 
     func testAgentContinuesOnceAfterHostSIGKILL() async throws {
         try await exerciseRelaunch(firstPhase: "crash")
+    }
+
+    func testFirstMessageSurvivesHostKillBeforeThreadBinding() async throws {
+        try await exerciseRelaunch(firstPhase: "unbound")
     }
 
     func testRecoveryWhenBothHostAndBundledEngineAreKilled() async throws {
@@ -43,7 +61,14 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         let root = URL(fileURLWithPath: String(cString: temp)).appendingPathComponent("KolmogorRelaunch-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let phases = ["command", "stopped"].contains(firstPhase) ? [firstPhase, "paused"] : [firstPhase, "resume", "reopen"]
+        let suite = "KolmogorTests." + root.lastPathComponent
+        defer { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+        let phases: [String]
+        switch firstPhase {
+        case "unbound": phases = [firstPhase, "recover-local"]
+        case "command", "stopped": phases = [firstPhase, "paused"]
+        default: phases = [firstPhase, "resume", "reopen"]
+        }
         for phase in phases {
             let child = Process()
             child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
@@ -125,6 +150,10 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             throw XCTSkip("Runs in the three child processes of the cold restart test.")
         }
         let root = URL(fileURLWithPath: path, isDirectory: true)
+        if env["KOLMOGOR_TEST_FIRST_PHASE"] == "unbound" {
+            try await verifyUnboundMessage(root: root, phase: phase)
+            return
+        }
         let home = root.appendingPathComponent("home")
         let project = root.appendingPathComponent("project")
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
@@ -176,7 +205,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         let provider = APIProviderDefinition(id: "restart", name: "Local restart fixture", baseURL: url,
             wireAPI: .chatCompletions, models: [.init(id: "restart", name: "Restart")])
         let model = APIProviderCatalog.appModelID(providerID: "restart", modelID: "restart")
-        let preferences = isolatedTestPreferences()
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: "KolmogorTests." + root.lastPathComponent))
         try APIProviderCatalog.save([provider], to: preferences)
         preferences.set(model, forKey: "LocalCodex.defaultModelID")
         preferences.set(AccessMode.fullAccess.rawValue, forKey: "HeyDash.accessMode")
@@ -188,8 +217,8 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         let runtime = SelectableCodexRuntime(configuration: config)
         let state = ComputaLaunchMode.application.makeState(runtimeFactory: { runtime }, preferencesFactory: { preferences },
             unreadCompletionStoreFactory: { nil })
-        func wait(_ condition: @MainActor () -> Bool) async throws {
-            let deadline = ContinuousClock.now.advanced(by: .seconds(12))
+        func wait(timeout: Duration = .seconds(12), _ condition: @MainActor () -> Bool) async throws {
+            let deadline = ContinuousClock.now.advanced(by: timeout)
             while !condition() && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(60)) }
             guard condition() else {
                 throw APIHarnessFailure("Timed out in " + phase + ": " + String(describing: state.connectionState)
@@ -198,16 +227,30 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         }
         do {
             state.startRuntimeIfNeeded()
-            try await wait { if case .connected = state.connectionState { true } else { false } }
+            // A cold launch validates the bundled engine on disk before opening its transport.
+            try await wait(timeout: .seconds(30)) { if case .connected = state.connectionState { true } else { false } }
             let store = try XCTUnwrap(runtime.restartStore)
+            let layout = root.appendingPathComponent("expected-workspace.json")
+            if phase != env["KOLMOGOR_TEST_FIRST_PHASE"] {
+                let expected = try JSONDecoder().decode(SavedWorkspace.self, from: Data(contentsOf: layout))
+                XCTAssertEqual(state.openWorkspaceTabs, expected.order)
+                XCTAssertEqual(state.selectedTaskID, expected.selectedAgent)
+                XCTAssertNil(state.primaryBrowserID)
+            }
             let request = "Return the marker RELAUNCH-COMPLETE when this synthetic review is finished."
             switch phase {
             case "interrupt", "crash", "host-and-engine", "command", "after-command", "stopped":
+                state.createTask()
+                _ = try state.browserSession.createTab()
                 state.createTask()
                 let id = try XCTUnwrap(state.selectedTaskID)
                 let accepted = await state.submit(prompt: request, toTaskID: id)
                 XCTAssertTrue(accepted)
                 try await wait { FileManager.default.fileExists(atPath: received.path) && state.selectedTask?.status == .running }
+                let saved = try XCTUnwrap(state.workspaceTabs.saved)
+                XCTAssertEqual(saved.order.map(\.kind), [.agent, .browser, .agent])
+                XCTAssertEqual(saved.selectedAgent, try XCTUnwrap(state.selectedTask?.runtimeThreadID))
+                try JSONEncoder().encode(saved).write(to: layout, options: .atomic)
                 if phase != "interrupt" {
                     if phase == "command" { try await wait { FileManager.default.fileExists(atPath: effect.path) } }
                     if phase == "after-command" { try await wait { FileManager.default.fileExists(atPath: root.appendingPathComponent("tool-returned").path) } }
@@ -280,6 +323,33 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             _ = await state.shutdownRuntime()
             await upstream.stop()
             throw error
+        }
+    }
+
+    private func verifyUnboundMessage(root: URL, phase: String) async throws {
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: "KolmogorTests." + root.lastPathComponent))
+        let runtime = UnboundRuntime(root: root)
+        let state = AppState(tasks: [], runtime: runtime, preferences: preferences, workspaceLayout: .mixedTabs)
+        await state.startRuntime()
+        let marker = "Keep this local message through an abrupt exit"
+        let layout = root.appendingPathComponent("workspace.json")
+        if phase == "unbound" {
+            _ = try state.browserSession.createTab()
+            state.createTask()
+            try JSONEncoder().encode(XCTUnwrap(state.workspaceTabs.saved)).write(to: layout)
+            let id = try XCTUnwrap(state.selectedTaskID)
+            _ = await state.submit(prompt: marker, toTaskID: id)
+            XCTFail("Expected the parent to kill the host during submission")
+        } else {
+            let saved = try JSONDecoder().decode(SavedWorkspace.self, from: Data(contentsOf: layout))
+            XCTAssertEqual(state.openWorkspaceTabs, saved.order)
+            XCTAssertEqual(state.selectedTaskID, saved.selectedAgent)
+            XCTAssertEqual(state.selectedTask?.entries.filter { $0.kind == .user }.map(\.body), [marker])
+            XCTAssertEqual(state.selectedTask?.entries.last?.title, "Prompt delivery unconfirmed")
+            XCTAssertFalse(state.isBusy(taskID: try XCTUnwrap(state.selectedTaskID)))
+            XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("kill-ready"), encoding: .utf8), "once")
+            _ = await state.shutdownRuntime()
+            try Data().write(to: root.appendingPathComponent(phase + ".passed"))
         }
     }
 
