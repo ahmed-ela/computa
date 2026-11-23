@@ -542,9 +542,11 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .workspace-tab-row { position: relative; width: 100%; height: var(--sidebar-row-height); }
 .workspace-tab-row .workspace-close { top: 50%; transform: translateY(-50%); opacity: 0; pointer-events: none; }
 .workspace-tab-row:hover .workspace-close, .workspace-tab-row:focus-within .workspace-close { opacity: 1; pointer-events: auto; }
-.site-favicon, .site-favicon-spinner, .site-initial, .new-browser-tab-icon { width: 16px; height: 16px; flex: 0 0 16px; }
+.site-favicon, .site-favicon-spinner, .agent-rail-spinner, .site-initial, .new-browser-tab-icon { width: 16px; height: 16px; flex: 0 0 16px; }
 .site-favicon { object-fit: contain; }
-.site-favicon-spinner { background: var(--text-tertiary); mask: url('/icons/favicon-loading.svg') center / contain no-repeat; animation: favicon-spin 1s linear infinite; }
-@keyframes favicon-spin { to { transform: rotate(1turn); } }
+.site-favicon-spinner, .agent-rail-spinner { mask: url('/icons/favicon-loading.svg') center / contain no-repeat; animation: sidebar-spinner-spin 1s linear infinite; }
+.site-favicon-spinner { background: var(--text-tertiary); }
+.agent-rail-spinner { background: currentColor; }
+@keyframes sidebar-spinner-spin { to { transform: rotate(1turn); } }
 .site-initial { display: grid; place-content: center; border-radius: 4px; background: var(--surface-selected); font-size: 11px; font-weight: 600; }
 .new-browser-tab-icon { background: currentColor; mask: url('/icons/new-browser-tab.svg') center / contain no-repeat; }

@@ -1,6 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'octane';
 import { Button } from '@octanejs/shadcn/Button';
-import { AgentStatusIcon } from './AgentStatusIcon';
 import { Icon } from './Icon';
 import { sidebarRowHeight, useSidebarWindow } from './sidebarWindow';
 import { TaskActivityIndicator } from './TaskActivityIndicator';
@@ -182,8 +181,9 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
               event.preventDefault(); const neighbor = items[start + index + (event.key === 'ArrowUp' ? -1 : 1)];
               if (neighbor?.open) post({ action: 'moveWorkspaceTab', tab: item.ref, target: neighbor.ref });
             }}>
-            {item.browser ? <SiteIcon tab={item.browser} /> : collapsed
-              ? <AgentStatusIcon taskID={item.ref.id} /> : null}
+            {/* The compact rail's <AgentStatusIcon taskID={item.ref.id} /> is disabled in favor of the loading spinner. */}
+            {item.browser ? <SiteIcon tab={item.browser} /> : collapsed && status === 'working'
+              ? <span aria-hidden="true" className="agent-rail-spinner" /> : null}
             {!collapsed && <span className="task-row-title">{item.title}</span>}
             {!collapsed && item.task && <TaskActivityIndicator task={item.task} now={now} />}
           </Button>

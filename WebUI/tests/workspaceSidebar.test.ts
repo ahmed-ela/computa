@@ -112,7 +112,7 @@ test('chat-only navigation hides browser rows and creation in either sidebar wid
   }
 });
 
-test('expanded chats have titles and activity indicators; the rail contains only active chats', () => {
+test('expanded chats keep their activity indicators; the rail shows a spinner only for working chats', () => {
   const snapshot = fixture();
   snapshot.mixesBrowserTabsInSidebar = false;
   snapshot.tasks = ['Running', 'Waiting', 'Completed', 'Failed', 'Draft'].map((status, index) => ({
@@ -127,13 +127,19 @@ test('expanded chats have titles and activity indicators; the rail contains only
   const expanded = rows();
   expect(expanded.match(/class="task-row-title"/g)).toHaveLength(6);
   expect(expanded).not.toContain('<svg');
+  expect(expanded).not.toContain('agent-rail-spinner');
   expect(expanded).toContain('task-row-unread');
   snapshot.isTaskSidebarCollapsed = true;
   const collapsed = rows();
   expect(workspaceItems(snapshot, '').map(item => item.ref.id)).toEqual(['0', '1']);
   expect(collapsed.match(/data-tab-kind="agent"/g)).toHaveLength(2);
-  expect(collapsed.match(/class="agent-status-icon"/g)).toHaveLength(2);
+  expect(collapsed.match(/<span aria-hidden="true" class="agent-rail-spinner"/g)).toHaveLength(2);
+  expect(collapsed).not.toContain('agent-status-icon');
   expect(collapsed).toContain('aria-label="Chat 1 — Working"');
+  snapshot.isTaskSidebarPeeked = true;
+  expect(rows()).not.toContain('agent-rail-spinner');
+  expect(rows()).toContain('task-row-elapsed');
+  snapshot.isTaskSidebarPeeked = false;
   snapshot.tasks = snapshot.tasks.slice(2);
   expect(rows()).not.toContain('data-tab-kind="agent"');
 });
