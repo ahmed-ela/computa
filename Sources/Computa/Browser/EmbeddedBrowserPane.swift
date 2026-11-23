@@ -29,8 +29,10 @@ struct EmbeddedBrowserPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            browserHeader
-            Divider()
+            if !usesSidebarTabs || showsNewTabButton {
+                browserHeader
+                Divider()
+            }
             if !usesSidebarTabs {
                 navigationBar
                 Divider()

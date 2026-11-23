@@ -868,7 +868,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
 
     @MainActor
     func testSidebarAddressOpensCenteredSelectsReplacesAndNavigates() async throws {
-        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Address selection</title>")
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<!doctype html><title>Address selection</title><button>Top control</button>")
         let url = try await site.start().appendingPathComponent("human/final")
         defer { site.stop() }
         let session = EmbeddedBrowserSession(persistent: false, defaults: isolatedTestPreferences())
@@ -898,14 +898,15 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
                 .first { $0.identifier?.rawValue == "browser-address" })
             XCTAssertEqual(field.convert(field.bounds, to: nil).midX, window.frame.width / 2, accuracy: 24)
+            XCTAssertEqual(field.convert(field.bounds, to: nil).midY, window.frame.height * 2 / 3, accuracy: 2)
             return try XCTUnwrap(field.currentEditor() as? NSTextView)
         }
         func selectedURL(_ editor: NSTextView, _ expected: URL, line: UInt = #line) {
             XCTAssertEqual(editor.string, expected.absoluteString, line: line)
             XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: expected.absoluteString.utf16.count), line: line)
         }
-        for (width, collapsed) in [(1100, false), (980, true), (1280, false)] {
-            window.setContentSize(NSSize(width: width, height: 740))
+        for (width, height, collapsed) in [(1100, 740, false), (980, 640, true), (1280, 820, false)] {
+            window.setContentSize(NSSize(width: width, height: height))
             state.isTaskSidebarCollapsed = collapsed
             await settleLayout(host)
             let expectedWidth = collapsed ? 44 : 230
@@ -926,6 +927,17 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 XCTAssertGreaterThan(rect.minX, close.convert(close.bounds, to: nil).maxX)
                 XCTAssertLessThanOrEqual(rect.maxX, CGFloat(expectedWidth))
             }
+            let pageFrame = page.convert(page.bounds, to: nil)
+            XCTAssertEqual(pageFrame.maxY, window.frame.height, accuracy: 1)
+            XCTAssertEqual(pageFrame.minY, 0, accuracy: 1)
+            let point = NSPoint(x: pageFrame.minX + 25, y: pageFrame.maxY - 15)
+            let root = try XCTUnwrap(host.superview)
+            let hit = root.hitTest(root.convert(point, from: nil))
+            XCTAssertTrue(hit === page || hit?.isDescendant(of: page) == true)
+            let pageFillsWindow = await waitForScriptBool(on: page, script: """
+                Math.abs(innerHeight - \(pageFrame.height)) <= 1 && document.elementFromPoint(25, 15)?.tagName === 'BUTTON'
+                """)
+            XCTAssertTrue(pageFillsWindow, "The reclaimed header is part of the interactive website viewport")
             let editor = try await openAddress()
             selectedURL(editor, url)
             editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
@@ -952,6 +964,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let command = try await openAddress()
         command.insertText("back", replacementRange: command.selectedRange())
         await settleLayout(host)
+        let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "browser-address" })
+        XCTAssertEqual(field.convert(field.bounds, to: nil).midY, window.frame.height * 2 / 3, accuracy: 2)
         command.doCommand(by: #selector(NSResponder.moveDown(_:)))
         await settleLayout(host)
         command.doCommand(by: #selector(NSResponder.insertNewline(_:)))

@@ -82,7 +82,7 @@ struct WebWorkspaceView: View {
     }
 
     private func workspace(topInset: CGFloat) -> some View {
-        // The web chat and native browser share one divider below the window controls.
+        // Align the sidebar and any visible pane controls with the native title bar.
         let rowHeight = topInset > 0 ? topInset : 32
         let browserPrimary = state.primaryBrowserID != nil && state.shouldPresentBrowserPane
         let compact = state.isTaskSidebarCollapsed && !sidebarPeeked
@@ -148,9 +148,13 @@ struct WebWorkspaceView: View {
 
             if let editingBrowserID, launcherAllowed,
                let tab = state.browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == editingBrowserID }) {
-                Color.black.opacity(0.10).onTapGesture(perform: closeBrowserAddress)
-                BrowserAddressPalette(state: state, tab: tab, focusRequest: addressFocusRequest, close: closeBrowserAddress)
-                    .id(tab.id)
+                ZStack(alignment: Alignment(horizontal: .center, vertical: .commandFieldCenter)) {
+                    Color.black.opacity(0.10)
+                        .onTapGesture(perform: closeBrowserAddress)
+                        .alignmentGuide(.commandFieldCenter) { $0.height / 3 }
+                    BrowserAddressPalette(state: state, tab: tab, focusRequest: addressFocusRequest, close: closeBrowserAddress)
+                        .id(tab.id)
+                }
             } else if launcherPresented && launcherAllowed {
                 Color.black.opacity(0.10).onTapGesture { launcherPresented = false }
                 WorkspaceTabLauncher(launch: launch, cancel: { launcherPresented = false })
