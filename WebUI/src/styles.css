@@ -295,7 +295,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .queue-warning { display: flex; align-items: flex-start; gap: 7px; padding: 8px 12px; border-bottom: 1px solid color-mix(in srgb, var(--orange) 22%, var(--border)); background: color-mix(in srgb, var(--orange) 7%, transparent); color: var(--orange); font-size: 10px; line-height: 1.5; }
 .queue-warning > .icon { margin-top: 1px; }
 .queue-list { max-height: 228px; overflow-y: auto; }
-.queue-item { display: grid; grid-template-columns: 20px minmax(0, 1fr) 28px; align-items: start; gap: 5px; min-height: 44px; padding: 8px 8px 8px 6px; border-bottom: 1px solid var(--border); background: var(--surface-raised); }
+.queue-item { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: start; gap: 5px; min-height: 44px; padding: 8px 8px 8px 6px; border-bottom: 1px solid var(--border); background: var(--surface-raised); }
 .queue-item:last-child { border-bottom: 0; }
 .queue-item:hover { background: color-mix(in srgb, var(--surface-hover) 60%, var(--surface-raised)); }
 .queue-item.is-dragging { opacity: .52; }
@@ -307,7 +307,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .queue-item-text { min-width: 0; overflow: hidden; color: var(--text); font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 .queue-item-status { color: var(--text-tertiary); font-size: 9px; line-height: 1.6; white-space: nowrap; }
 .queue-item-error { grid-column: 1 / -1; color: var(--red); font-size: 10px; line-height: 1.45; }
-.queue-menu-trigger { margin-top: 1px; }
+.queue-item-actions { display: flex; align-items: center; gap: 2px; }
 .queue-menu-content { z-index: 80; min-width: 190px; padding: 4px; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-raised); color: var(--text); box-shadow: 0 12px 32px #0003, 0 2px 8px #0002; font-size: 11px; }
 .queue-menu-content [data-slot="dropdown-menu-item"] { display: flex; min-height: 30px; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 5px; outline: 0; color: var(--text); font-size: 11px; line-height: 1.35; user-select: none; cursor: default; }
 .queue-menu-content [data-slot="dropdown-menu-item"]:where(:focus, [data-highlighted]) { background: var(--surface-hover); }

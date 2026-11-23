@@ -663,7 +663,7 @@ final class AppStateQueueTests: XCTestCase {
     }
 }
 
-private actor QueueControlledRuntime: AgentRuntimeClient {
+actor QueueControlledRuntime: AgentRuntimeClient {
     struct Call: Equatable, Sendable {
         let prompt: String
         let taskID: String

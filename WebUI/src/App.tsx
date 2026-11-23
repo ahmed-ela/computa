@@ -351,6 +351,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
       <div className="queue-list">
         {task.queuedPrompts.map((item, index) => {
           const locked = item.status === 'sending';
+          const sendNow = () => post({ action: 'steerQueuedPrompt', taskID: task.id, id: item.id });
           const editing = !locked && editDraft?.id === item.id;
           const canMoveUp = !locked && !editing && index > 0 && task.queuedPrompts[index - 1]?.status !== 'sending';
           const canMoveDown = !locked && !editing && index < task.queuedPrompts.length - 1;
@@ -406,42 +407,56 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
                 </div>
               )}
               {!editing ? (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
+                <div className="queue-item-actions">
+                  {item.status === 'queued' && (
                     <Button
                       variant="ghost"
-                      size="icon-xs"
-                      className="queue-menu-trigger"
-                      disabled={locked}
-                      aria-label={`Actions for queued message ${index + 1}`}
+                      size="xs"
+                      disabled={!task.canSteer}
+                      aria-label={`Send queued message ${index + 1} now`}
+                      title={task.canSteer ? 'Send now into the current turn' : 'The agent cannot take a message right now'}
+                      onClick={sendNow}
                     >
-                      <Icon name="more" size={15} />
+                      <Icon name="send" size={14} /> Send
                     </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="queue-menu-content">
-                    {task.canSteer && item.status === 'queued' ? (
-                      <>
-                        <DropdownMenuItem onSelect={() => post({ action: 'steerQueuedPrompt', taskID: task.id, id: item.id })}>
-                          <Icon name="steer" size={14} /> Steer into current turn
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                      </>
-                    ) : null}
-                    <DropdownMenuItem disabled={!canMoveUp} onSelect={() => move(item.id, -1)}>
-                      <Icon name="send" size={14} /> Move up
-                    </DropdownMenuItem>
-                    <DropdownMenuItem disabled={!canMoveDown} onSelect={() => move(item.id, 1)}>
-                      <Icon name="down" size={14} /> Move down
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem disabled={Boolean(editDraft && editDraft.id !== item.id)} onSelect={() => beginEdit(item)}>
-                      <Icon name="edit" size={14} /> Edit
-                    </DropdownMenuItem>
-                    <DropdownMenuItem variant="destructive" onSelect={() => post({ action: 'deleteQueuedPrompt', taskID: task.id, id: item.id })}>
-                      <Icon name="delete" size={14} /> Delete
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                  )}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        className="queue-menu-trigger"
+                        disabled={locked}
+                        aria-label={`Actions for queued message ${index + 1}`}
+                      >
+                        <Icon name="more" size={15} />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="queue-menu-content">
+                      {task.canSteer && item.status === 'queued' ? (
+                        <>
+                          <DropdownMenuItem onSelect={sendNow}>
+                            <Icon name="steer" size={14} /> Steer into current turn
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                        </>
+                      ) : null}
+                      <DropdownMenuItem disabled={!canMoveUp} onSelect={() => move(item.id, -1)}>
+                        <Icon name="send" size={14} /> Move up
+                      </DropdownMenuItem>
+                      <DropdownMenuItem disabled={!canMoveDown} onSelect={() => move(item.id, 1)}>
+                        <Icon name="down" size={14} /> Move down
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem disabled={Boolean(editDraft && editDraft.id !== item.id)} onSelect={() => beginEdit(item)}>
+                        <Icon name="edit" size={14} /> Edit
+                      </DropdownMenuItem>
+                      <DropdownMenuItem variant="destructive" onSelect={() => post({ action: 'deleteQueuedPrompt', taskID: task.id, id: item.id })}>
+                        <Icon name="delete" size={14} /> Delete
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
               ) : null}
             </div>
           );
