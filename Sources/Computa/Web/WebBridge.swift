@@ -211,7 +211,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 _ = state.acceptPrompt(prompt: prompt, taskID: taskID, requestID: requestID)
             }
 
-        case "beginQueueEdit", "editQueuedPrompt", "cancelQueueEdit", "deleteQueuedPrompt", "moveQueuedPrompt", "steerQueuedPrompt":
+        case "beginQueueEdit", "editQueuedPrompt", "cancelQueueEdit", "deleteQueuedPrompt", "moveQueuedPrompt", "sendQueuedPrompt", "steerQueuedPrompt":
             guard let taskID = body["taskID"] as? String,
                   let id = body["id"] as? String,
                   state.tasks.contains(where: { $0.id == taskID }) else { return }
@@ -228,6 +228,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             case "moveQueuedPrompt":
                 guard let before = body["beforeID"], before is String || before is NSNull else { return }
                 state.moveQueuedPrompt(taskID: taskID, id: id, beforeID: before as? String)
+            case "sendQueuedPrompt":
+                state.requestSendQueuedPrompt(taskID: taskID, id: id)
             case "steerQueuedPrompt":
                 state.requestSteerQueuedPrompt(taskID: taskID, id: id)
             default: break

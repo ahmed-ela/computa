@@ -115,6 +115,81 @@ final class AppStateQueueTests: XCTestCase {
         }
     }
 
+    func testSendOnePausedRowClaimsOnceAndLeavesSiblingsPausedAfterCompletion() async throws {
+        let (state, runtime) = fixture(running: true)
+        for prompt in ["First", "Selected", "Last"] {
+            _ = await state.submitOrQueue(prompt: prompt, toTaskID: taskID)
+        }
+        state.apply(.taskStatusChanged(taskID: taskID, status: .waiting))
+        let rows = try XCTUnwrap(state.queuedPrompts[taskID])
+        await runtime.holdNextSubmission()
+        XCTAssertTrue(state.requestSendQueuedPrompt(taskID: taskID, id: rows[1].id))
+        XCTAssertFalse(state.requestSendQueuedPrompt(taskID: taskID, id: rows[1].id))
+        XCTAssertFalse(state.requestSendQueuedPrompt(taskID: taskID, id: rows[0].id))
+        try await waitForSubmissionCount(1, runtime: runtime)
+        state.apply(.taskStatusChanged(taskID: taskID, status: .completed))
+        await runtime.finishSubmission()
+        try await waitUntil { state.queuedPrompts[self.taskID]?.count == 2 }
+        await settleScheduledWork()
+        XCTAssertEqual(queueText(state), ["First", "Last"])
+        XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+        let starts = await runtime.submissions
+        XCTAssertEqual(starts.map(\.prompt), ["Selected"])
+    }
+
+    func testSendCanRetryConfirmedNonDeliveryButCannotReplayUncertainRow() async throws {
+        for uncertain in [false, true] {
+            let (state, runtime) = fixture()
+            if uncertain { await runtime.rejectNextSubmission() }
+            else { await runtime.rejectNextSubmissionBeforeDispatch() }
+            _ = await state.submitOrQueue(prompt: "Original", toTaskID: taskID)
+            _ = await state.submitOrQueue(prompt: "Independent follow-up", toTaskID: taskID)
+            let rows = try XCTUnwrap(state.queuedPrompts[taskID])
+            XCTAssertEqual(rows[0].deliveryUncertain, uncertain)
+            XCTAssertEqual(state.requestSendQueuedPrompt(taskID: taskID, id: rows[0].id), !uncertain)
+            if uncertain {
+                XCTAssertTrue(state.beginQueueEdit(taskID: taskID, id: rows[0].id))
+                XCTAssertTrue(state.editQueuedPrompt(taskID: taskID, id: rows[0].id, prompt: "Edited"))
+                XCTAssertEqual(state.queuedPrompts[taskID]?.first?.status, .failed)
+                XCTAssertFalse(state.requestSendQueuedPrompt(taskID: taskID, id: rows[0].id))
+                XCTAssertTrue(state.requestSendQueuedPrompt(taskID: taskID, id: rows[1].id))
+            }
+            try await waitUntil { state.queuedPrompts[self.taskID]?.count == 1 }
+            let starts = await runtime.submissions
+            XCTAssertEqual(starts.map(\.prompt), ["Original", uncertain ? "Independent follow-up" : "Original"])
+            XCTAssertTrue(state.pausedQueueTaskIDs.contains(taskID))
+        }
+    }
+
+    func testSteerRejectedLocallyForEndedTurnWaitsForAnExplicitSend() async throws {
+        let (state, runtime) = fixture(running: true)
+        _ = await state.submitOrQueue(prompt: "Follow-up", toTaskID: taskID)
+        let item = try XCTUnwrap(state.queuedPrompts[taskID]?.first)
+        await runtime.rejectNextSteer(with: AppServerSteerRequest.ValidationError.noActiveTurn)
+        XCTAssertTrue(state.requestSendQueuedPrompt(taskID: taskID, id: item.id))
+        try await waitUntil { state.queuedPrompts[self.taskID]?.first?.status == .failed }
+        XCTAssertEqual(state.queuedPrompts[taskID]?.first?.deliveryUncertain, false)
+        state.apply(.taskStatusChanged(taskID: taskID, status: .completed))
+        await settleScheduledWork()
+        let before = await runtime.submissions
+        XCTAssertTrue(before.isEmpty)
+        XCTAssertTrue(state.requestSendQueuedPrompt(taskID: taskID, id: item.id))
+        try await waitForSubmissionCount(1, runtime: runtime)
+    }
+
+    func testSendCannotStartEditedOrDisconnectedRow() async throws {
+        let (state, _) = fixture(running: true)
+        _ = await state.submitOrQueue(prompt: "Keep queued", toTaskID: taskID)
+        state.apply(.taskStatusChanged(taskID: taskID, status: .failed))
+        let row = try XCTUnwrap(state.queuedPrompts[taskID]?.first)
+        XCTAssertTrue(state.beginQueueEdit(taskID: taskID, id: row.id))
+        XCTAssertFalse(state.requestSendQueuedPrompt(taskID: taskID, id: row.id))
+        XCTAssertTrue(state.cancelQueueEdit(taskID: taskID, id: row.id))
+        state.apply(.connectionChanged(.disconnected))
+        XCTAssertFalse(state.requestSendQueuedPrompt(taskID: taskID, id: row.id))
+        XCTAssertEqual(state.queuedPrompts[taskID]?.first?.status, .queued)
+    }
+
     func testStopPausesQueueEvenIfRuntimeLaterReportsCompleted() async {
         let (state, runtime) = fixture(running: true)
         _ = await state.submitOrQueue(prompt: "Keep this unsent", toTaskID: taskID)
@@ -683,7 +758,7 @@ actor QueueControlledRuntime: AgentRuntimeClient {
     private var unprovenPersistenceFailureAsRPC: Bool?
     private var validatesWebsiteSelection = false
     private var shouldHoldSteer = false
-    private var shouldRejectSteer = false
+    private var steerRejection: Error?
     private var submissionContinuation: CheckedContinuation<Void, Error>?
     private var steerContinuation: CheckedContinuation<Void, Error>?
 
@@ -698,7 +773,7 @@ actor QueueControlledRuntime: AgentRuntimeClient {
     }
     func validateWebsiteSelectionsBeforeDispatch() { validatesWebsiteSelection = true }
     func holdNextSteer() { shouldHoldSteer = true }
-    func rejectNextSteer() { shouldRejectSteer = true }
+    func rejectNextSteer(with error: Error = Failure()) { steerRejection = error }
 
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws {
         let call = Call(prompt: prompt, taskID: taskID, modelID: modelID)
@@ -731,9 +806,9 @@ actor QueueControlledRuntime: AgentRuntimeClient {
 
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws {
         steers.append(Call(prompt: prompt, taskID: taskID))
-        if shouldRejectSteer {
-            shouldRejectSteer = false
-            throw Failure()
+        if let error = steerRejection {
+            steerRejection = nil
+            throw error
         }
         if shouldHoldSteer {
             shouldHoldSteer = false

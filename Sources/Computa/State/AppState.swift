@@ -1602,13 +1602,20 @@ final class AppState {
         return activeTurnTimings[taskID]?.userEntryID
     }
 
+    func canStartQueuedTurn(taskID: String) -> Bool {
+        guard queuedPrompts[taskID]?.isEmpty == false, case .connected = connectionState else { return false }
+        return runtime != nil && !isShuttingDown && !approvalGateBlocksInteraction
+            && !isBusy(taskID: taskID) && !interruptingTaskIDs.contains(taskID)
+            && !dispatchingQueueTaskIDs.contains(taskID) && !missingRuntimeThreads.contains(taskID)
+    }
+
     func canSteer(taskID: AgentTask.ID) -> Bool {
         runtime != nil && !isShuttingDown
             && tasks.contains(where: { $0.id == taskID && $0.status == .running && ProviderCLI(modelID: $0.model) == nil })
             && activeTurnTaskIDs.contains(taskID)
             && compactionStateByTask[taskID] != .running
             && !interruptingTaskIDs.contains(taskID)
-            && !steeringTaskIDs.contains(taskID)
+            && !steeringTaskIDs.contains(taskID) && !dispatchingQueueTaskIDs.contains(taskID)
             && !pendingApprovals.contains(where: { $0.taskID == nil || $0.taskID == taskID })
             && resolvingApprovalIDs.isEmpty
     }
@@ -2901,6 +2908,11 @@ final class AppState {
               let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
         queuedDispatchProfiles.removeValue(forKey: id)
         queuedPrompts[taskID]?[index].text = text
+        if let item = queuedPrompts[taskID]?[index], item.error != nil, item.deliveryUncertain != false {
+            // Editing the text cannot establish whether the previous send arrived.
+            queuedPrompts[taskID]?[index].status = .failed
+            return true
+        }
         queuedPrompts[taskID]?[index].status = .queued
         queuedPrompts[taskID]?[index].error = nil
         scheduleQueueDrain(taskID: taskID)
@@ -2973,6 +2985,23 @@ final class AppState {
         return true
     }
 
+    /// Decide how to send from the current turn state and reserve this exact row
+    /// before yielding. A manual send leaves the rest of a paused queue alone.
+    @discardableResult
+    func requestSendQueuedPrompt(taskID: String, id: String) -> Bool {
+        guard let index = editableQueueIndex(taskID: taskID, id: id),
+              let item = queuedPrompts[taskID]?[index], item.deliveryUncertain != true else { return false }
+        if canSteer(taskID: taskID) {
+            return requestSteerQueuedPrompt(taskID: taskID, id: id)
+        }
+        guard canStartQueuedTurn(taskID: taskID),
+              item.status == .queued || (item.status == .failed && item.deliveryUncertain == false)
+        else { return false }
+        claimQueuedTurn(taskID: taskID, index: index)
+        Task { @MainActor in await deliverQueuedTurn(taskID: taskID, item: item) }
+        return true
+    }
+
     private struct SteerSubmission {
         let taskID: String
         let item: QueuedPrompt
@@ -3002,7 +3031,7 @@ final class AppState {
             retireWebsiteModelSelections()
         }
         guard let runtime, !isShuttingDown else {
-            failQueuedPrompt(taskID: taskID, id: id, message: "Steering was cancelled before delivery.")
+            failQueuedPrompt(taskID: taskID, id: id, message: "Steering was cancelled before delivery.", deliveryUncertain: false)
             return false
         }
         do {
@@ -3022,7 +3051,11 @@ final class AppState {
             }
             return true
         } catch {
-            failQueuedPrompt(taskID: taskID, id: id, message: "Steering was not confirmed. Review the conversation before resending. \(error.localizedDescription)")
+            if case AppServerSteerRequest.ValidationError.noActiveTurn = error {
+                failQueuedPrompt(taskID: taskID, id: id, message: error.localizedDescription, deliveryUncertain: false)
+            } else {
+                failQueuedPrompt(taskID: taskID, id: id, message: "Steering was not confirmed. Review the conversation before resending. \(error.localizedDescription)")
+            }
             return false
         }
     }
@@ -3053,11 +3086,20 @@ final class AppState {
               !dispatchingQueueTaskIDs.contains(taskID),
               !pausedQueueTaskIDs.contains(taskID),
               let item = queuedPrompts[taskID]?.first, item.status == .queued else { return }
+        claimQueuedTurn(taskID: taskID, index: 0)
+        await deliverQueuedTurn(taskID: taskID, item: item)
+    }
+
+    private func claimQueuedTurn(taskID: String, index: Int) {
+        dispatchingQueueTaskIDs.insert(taskID)
+        queuedPrompts[taskID]?[index].status = .sending
+        queuedPrompts[taskID]?[index].error = nil
+    }
+
+    private func deliverQueuedTurn(taskID: String, item: QueuedPrompt) async {
         let profile = queuedDispatchProfiles.removeValue(forKey: item.id)
         profile?.mark(.queueEntered)
         defer { profile?.mark(.queueExited) }
-        dispatchingQueueTaskIDs.insert(taskID)
-        queuedPrompts[taskID]?[0].status = .sending
         let delivery = await WebsiteDispatchProfile.$current.withValue(profile) {
             await submitDelivery(prompt: item.text, toTaskID: taskID)
         }

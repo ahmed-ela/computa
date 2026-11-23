@@ -340,14 +340,16 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
           <span>{hasUncertainFailure
             ? 'Delivery is uncertain and may already have happened. Review this message before resuming or resending.'
             : hasFailure
-              ? 'The message was not sent. Choose a model or fix the connection, then resume manually.'
-              : 'The queue is paused after this task stopped. Review it, then resume manually.'}</span>
+              ? 'The message was not sent. After fixing the error, send one message or resume the queue.'
+              : 'The queue is paused. Send one message or resume the queue.'}</span>
         </div>
       ) : null}
       <div className="queue-list">
         {task.queuedPrompts.map((item, index) => {
           const locked = item.status === 'sending';
-          const sendNow = () => post({ action: 'steerQueuedPrompt', taskID: task.id, id: item.id });
+          const canRetry = item.status === 'failed' && item.deliveryUncertain === false;
+          const canSend = item.deliveryUncertain !== true &&
+            (task.canStartQueuedTurn || (item.status === 'queued' && task.canSteer));
           const editing = !locked && editDraft?.id === item.id;
           const canMoveUp = !locked && !editing && index > 0 && task.queuedPrompts[index - 1]?.status !== 'sending';
           const canMoveDown = !locked && !editing && index < task.queuedPrompts.length - 1;
@@ -404,14 +406,14 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
               )}
               {!editing ? (
                 <div className="queue-item-actions">
-                  {item.status === 'queued' && (
+                  {(item.status === 'queued' || canRetry) && (
                     <Button
                       variant="ghost"
                       size="xs"
-                      disabled={!task.canSteer}
+                      disabled={!canSend}
                       aria-label={`Send queued message ${index + 1} now`}
-                      title={task.canSteer ? 'Send now into the current turn' : 'The agent cannot take a message right now'}
-                      onClick={sendNow}
+                      title={canSend ? (task.canSteer ? 'Send into the current turn' : 'Start a new turn with this message') : 'The agent cannot take a message right now'}
+                      onClick={() => post({ action: 'sendQueuedPrompt', taskID: task.id, id: item.id })}
                     >
                       <Icon name="send" size={14} /> Send
                     </Button>
@@ -431,7 +433,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
                     <DropdownMenuContent align="end" className="queue-menu-content">
                       {task.canSteer && item.status === 'queued' ? (
                         <>
-                          <DropdownMenuItem onSelect={sendNow}>
+                          <DropdownMenuItem onSelect={() => post({ action: 'steerQueuedPrompt', taskID: task.id, id: item.id })}>
                             <Icon name="steer" size={14} /> Steer into current turn
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />

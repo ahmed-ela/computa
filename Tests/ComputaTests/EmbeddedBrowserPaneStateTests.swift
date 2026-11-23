@@ -227,13 +227,27 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
 
     @MainActor
     func testSendNowInSecondQueueRowSteersOnlyThatPrompt() async throws {
+        try await verifySecondQueueRow(afterFailure: false)
+    }
+
+    @MainActor
+    func testSendNowInSecondQueueRowAfterErrorStartsOnlyThatPrompt() async throws {
+        try await verifySecondQueueRow(afterFailure: true)
+    }
+
+    @MainActor
+    private func verifySecondQueueRow(afterFailure: Bool) async throws {
         let runtime = QueueControlledRuntime()
         let task = AgentTask(title: "Queue fixture", summary: "", status: .running, workspace: "/tmp", model: "local")
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
         let state = AppState(tasks: [task], runtime: runtime, preferences: isolatedTestPreferences(), browserSession: session)
         state.activeTurnTaskIDs.insert(task.id)
+        state.connectionState = .connected(provider: runtime.providerName)
         for prompt in ["First", "Second", "Third"] { _ = await state.submitOrQueue(prompt: prompt, toTaskID: task.id) }
+        if afterFailure {
+            state.apply(.taskStatusChanged(taskID: task.id, status: .failed))
+        }
 
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680), styleMask: [.titled], backing: .buffered, defer: false)
@@ -253,22 +267,28 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                     && b.firstElementChild?.tagName.toLowerCase() === 'svg' && b.getBoundingClientRect().width > 0);
             })()
             """)
-        XCTAssertTrue(ready)
-        await runtime.holdNextSteer()
+        XCTAssertTrue(ready, "Expected an enabled Send button on each queued row")
+        guard ready else { return }
+        if afterFailure { await runtime.holdNextSubmission() }
+        else { await runtime.holdNextSteer() }
         _ = try await chat.evaluateJavaScript(buttons + "[1].click(); true")
         let awaitingDelivery = await waitForScriptBool(on: chat, script: """
             document.querySelector('.queue-item-sending .queue-item-text')?.textContent === 'Second'
                 && \(buttons).length === 2 && \(buttons).every(b => b.disabled)
             """)
-        await runtime.finishSteer()
+        if afterFailure { await runtime.finishSubmission() }
+        else { await runtime.finishSteer() }
         XCTAssertTrue(awaitingDelivery)
         let updated = await waitForScriptBool(on: chat, script: """
             Array.from(document.querySelectorAll('.queue-item-text'), row => row.textContent).join(',') === 'First,Third'
             """)
         XCTAssertTrue(updated)
         let steers = await runtime.steers
-        XCTAssertEqual(steers.map(\.prompt), ["Second"])
-        XCTAssertEqual(steers.first?.taskID, task.id)
+        let starts = await runtime.submissions
+        XCTAssertEqual(steers.map(\.prompt), afterFailure ? [] : ["Second"])
+        XCTAssertEqual(starts.map(\.prompt), afterFailure ? ["Second"] : [])
+        XCTAssertEqual((afterFailure ? starts : steers).first?.taskID, task.id)
+        XCTAssertEqual(state.pausedQueueTaskIDs.contains(task.id), afterFailure)
         XCTAssertEqual(state.selectedTask?.entries.filter { $0.kind == .user }.map(\.body), ["Second"])
     }
 
