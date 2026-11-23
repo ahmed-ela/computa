@@ -964,7 +964,6 @@ export function App() {
   function focusSearch() {
     const current = currentSnapshot.current;
     if (!current || current.isSettingsPresented || current.pendingApprovalCount) return;
-    if (nativeHost && current.nativeSidebarControls) { post({ action: 'focusSidebarSearch' }); return; }
     const field = document.getElementById('task-search');
     if (field && !current.isTaskSidebarCollapsed) { field.focus(); return; }
     focusSearchOnExpand.current = true;
@@ -977,9 +976,9 @@ export function App() {
   }
 
   useEffect(() => {
-    const receiveQuery = (event: Event) => setSearch((event as CustomEvent<string>).detail);
-    document.addEventListener('kolmogor-tab-query', receiveQuery);
-    return () => document.removeEventListener('kolmogor-tab-query', receiveQuery);
+    const clearSearch = () => setSearch('');
+    document.addEventListener('kolmogor-clear-chat-search', clearSearch);
+    return () => document.removeEventListener('kolmogor-clear-chat-search', clearSearch);
   }, []);
 
   useEffect(() => {
