@@ -2,10 +2,11 @@ import AppKit
 import SwiftUI
 
 enum NewTabDestination: CaseIterable {
-    case browser, chat
+    case browser, agent
 
-    var label: String { self == .browser ? "Browser" : "New agent" }
-    var symbol: String { self == .browser ? "globe" : "square.and.pencil" }
+    var label: String { self == .browser ? "Browser" : "Agent" }
+    @MainActor private static let agentIcon = tabIconAsset("agent", fallback: "person.crop.square").renderingMode(.template)
+    @MainActor var icon: Image { self == .browser ? Image(systemName: "globe") : Self.agentIcon }
 }
 
 /// Window-level input also works when a website currently owns the keyboard.
@@ -25,12 +26,12 @@ struct WorkspaceTabLauncher: View {
     var body: some View {
         WorkspaceCommandPanel(width: 360) {
             WorkspaceCommandField(text: $text, placeholder: "Search Google or start an agent", label: "New tab",
-                                  identifier: "workspace-tab-launcher", move: { selection = $0 > 0 ? .chat : .browser },
+                                  identifier: "workspace-tab-launcher", move: { selection = $0 > 0 ? .agent : .browser },
                                   submit: { launch(selection, $0) }, cancel: cancel)
         } choices: {
             Divider()
             ForEach(NewTabDestination.allCases, id: \.self) { destination in
-                WorkspaceCommandRow(title: destination.label, symbol: destination.symbol, selected: selection == destination) {
+                WorkspaceCommandRow(title: destination.label, icon: destination.icon, selected: selection == destination) {
                     launch(destination, text)
                 }
             }
@@ -69,14 +70,14 @@ struct WorkspaceCommandPanel<Field: View, Choices: View>: View {
 
 struct WorkspaceCommandRow: View {
     let title: String
-    let symbol: String
+    let icon: Image
     let selected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack {
-                Image(systemName: symbol).frame(width: 22)
+                icon.frame(width: 22).accessibilityHidden(true)
                 Text(title).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if selected { Image(systemName: "return").foregroundStyle(.secondary) }
@@ -86,6 +87,7 @@ struct WorkspaceCommandRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

@@ -307,6 +307,10 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
 
         _ = try await open()
+        XCTAssertEqual(NewTabDestination.allCases.map(\.label), ["Browser", "Agent"])
+        let resources = try XCTUnwrap(WebUIResourceLocator.indexURL).deletingLastPathComponent()
+        let agentIcon = try XCTUnwrap(NSImage(contentsOf: resources.appendingPathComponent("icons/agent.svg")))
+        XCTAssertEqual(agentIcon.size, NSSize(width: 20, height: 20))
         try press("\r", code: 36)
         XCTAssertEqual(browser.webView(for: try XCTUnwrap(browser.selectedTabID))?.url, EmbeddedBrowserURLPolicy.newTabURL)
         XCTAssertTrue(state.tasks.isEmpty)
