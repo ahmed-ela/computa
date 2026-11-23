@@ -28,6 +28,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private var latestContent: Data?
     private var nextRevision: UInt64 = 0
     private var pageIsReady = false
+    private let consumeLauncherChat: (String) -> Bool
     private let showAccessModeSettings: () -> Void
     private let openScreenRecordingSettings: (URL) -> Bool
 
@@ -39,9 +40,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     init(
         state: AppState,
         openScreenRecordingSettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
+        consumeLauncherChat: @escaping (String) -> Bool = { _ in false },
         showAccessModeSettings: @escaping () -> Void = {}
     ) {
         self.state = state
+        self.consumeLauncherChat = consumeLauncherChat
         self.showAccessModeSettings = showAccessModeSettings
         self.openScreenRecordingSettings = openScreenRecordingSettings
     }
@@ -110,6 +113,13 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             let kind = allowed.contains(reported) ? reported : "UnknownError"
             let line = body["line"] as? Int ?? 0
             Self.diagnostic("client failure kind=\(kind) line=\(line)")
+
+        case "openTabLauncher":
+            WorkspaceTabLauncher.request(in: webView?.window)
+
+        case "launcherChatReady":
+            guard let id = body["taskID"] as? String, consumeLauncherChat(id), let webView else { return }
+            webView.window?.makeFirstResponder(webView)
 
         case "newWorkspaceBrowserTab":
             state.newWorkspaceBrowserTab()

@@ -449,6 +449,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
 }
 
 function availableForNewPrompt(model: string, snapshot: AppSnapshot): boolean {
+  if (snapshot.selectedModelAvailableForNewPrompt !== undefined) return snapshot.selectedModelAvailableForNewPrompt;
   if (!(model.startsWith('browser/') || model.startsWith('cli/')) || !snapshot.providerSetups?.length) return true;
   return snapshot.modelOptions.some(option => option.id === model && option.available !== false && option.selectable !== false);
 }
@@ -638,6 +639,20 @@ function Conversation({ snapshot, task, draftState }: { snapshot: AppSnapshot; t
     });
     post({ action: 'submitPrompt', requestID, taskID: task.id, prompt });
   };
+  const handledLaunch = useRef<string>();
+  useEffect(() => {
+    const launch = snapshot.launcherChat;
+    if (!launch || launch.taskID !== task.id || handledLaunch.current === task.id ||
+        snapshot.pendingApprovalCount || snapshot.isSettingsPresented || snapshot.primaryBrowserID) return;
+    handledLaunch.current = task.id;
+    if (launch.unsentDraft) {
+      setDraft(launch.unsentDraft);
+      const reason = isValidPrompt(launch.unsentDraft) ? 'Choose an available model to send this draft.' : 'Shorten this draft before sending.';
+      setSubmissionErrors(current => ({ ...current, [task.id]: reason }));
+    }
+    document.getElementById('task-prompt')?.focus();
+    post({ action: 'launcherChatReady', taskID: task.id });
+  }, [snapshot.launcherChat?.taskID, task.id, snapshot.pendingApprovalCount, snapshot.isSettingsPresented, snapshot.primaryBrowserID]);
   const rows = activityTimeline(task);
   return (
     <div className={`conversation-column ${rows.length === 0 && !snapshot.isReviewPresented ? 'is-empty' : ''} ${snapshot.isReviewPresented ? 'is-reviewing' : ''}`}>
@@ -997,6 +1012,7 @@ export function App() {
     <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined} data-native-sidebar-controls={snapshot.nativeSidebarControls || undefined}
       data-browser-primary={snapshot.primaryBrowserID && !snapshot.isSettingsPresented ? (nativeHost ? "native" : "preview") : undefined}
       data-sidebar-collapsed={snapshot.isTaskSidebarCollapsed ? 'true' : undefined}
+      data-allows-side-pane={snapshot.allowsBrowserSidePane || undefined}
       data-browser-pane={nativeHost && snapshot.isBrowserPresented && !snapshot.isSettingsPresented ? 'open' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
       <WorkspaceSidebar post={post} snapshot={snapshot} search={search} setSearch={setSearch} nativeHost={nativeHost} />
@@ -1004,13 +1020,13 @@ export function App() {
         <Icon name="browser" /><strong>{snapshot.workspaceBrowsers?.find(tab => tab.id === snapshot.primaryBrowserID)?.title}</strong>
         <span>Pages open in the desktop browser.</span></main>}
       <main className="workspace">
-        {!nativeHost && <Button variant="ghost" size="icon" className="preview-browser-toggle"
+        {snapshot.allowsBrowserSidePane && !nativeHost && <Button variant="ghost" size="icon" className="preview-browser-toggle"
           aria-label="Toggle browser" aria-pressed={snapshot.isBrowserPresented}
           title={snapshot.isBrowserPresented ? 'Hide browser' : 'Show browser'}
           onClick={() => post({ action: 'toggleBrowser' })}>
           <Icon name="browser" size={18} />
         </Button>}
-        <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} onNewChat={snapshot.nativeSidebarControls ? undefined : createChat} />
+        <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} onNewChat={snapshot.allowsBrowserSidePane && !snapshot.nativeSidebarControls ? createChat : undefined} />
         {snapshot.savedChatSelection ? (
           <div className="no-task-view" role={snapshot.savedChatSelection.error ? 'alert' : 'status'}>
             {snapshot.savedChatSelection.error ? <>

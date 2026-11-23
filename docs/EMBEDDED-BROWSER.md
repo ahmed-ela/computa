@@ -2,8 +2,8 @@
 
 ## Scope
 
-Kolmogor owns a native WKWebView tab pane beside the chat. People can browse in
-the pane; fresh agent chats receive the nine typed
+Kolmogor opens native WKWebView browser tabs from the workspace sidebar. People can browse in
+these tabs; fresh agent chats receive the nine typed
 [built-in browser tools](BUILT-IN-BROWSER-TOOLS.md) for bounded page observation
 and actions. The Swift app's adapters use separate owned Temporary Chat or
 Incognito pages. ChatGPT creates a fresh private store for each inference,
@@ -17,17 +17,21 @@ external Chrome connection code and controls have been removed.
 Installed Qwen tasks, arbitrary public sites and sustained concurrent human use
 retain their [separate qualification gates](../TODO.md#embedded-browser-agent-control).
 
-## Using the browser pane
+## Using browser tabs
 
-Press **⌘T** from a chat or browser tab to open Google. The sidebar’s **New browser tab**
-button and the browser toolbar’s square-and-arrow button also open a browser tab.
+Press **⌘T** or click **New tab** in the mixed sidebar. **Browser** is selected first.
+Press **Return** to open Google, or type a query and press **Return** to search.
+Press **↓** to select **Chat**. **Return** opens a new chat with the cursor in the
+composer. If you entered text, Kolmogor sends it as the first message using your
+selected default model. **↑** moves back to Browser and **Esc** dismisses the launcher.
 Use **⇧⌘N** for a new agent chat or **⌘N** for a new window. Press **⌘⇧[** for the
 previous open tab and **⌘⇧]** for the next. Both follow the sidebar order across
 agent and browser tabs and wrap at either end.
 
-To visit another site, enter a web address or search term in the address field and press **Return**.
-Each tab has its own history and reload control. Drag the divider to resize
-the pane. Hiding the pane keeps its tabs open.
+Click the address bar once to select the entire URL. Type a web address or search term to replace it,
+then press **Return**. Click again within the selected URL to place the cursor and edit it.
+Each tab has its own history and reload control. Select a chat in the sidebar to return
+to the conversation. The browser tab keeps its place and page.
 
 ## Inspecting a tab during development
 

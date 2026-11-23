@@ -107,10 +107,18 @@ final class AppState {
     var isTaskSidebarCollapsed: Bool {
         didSet { preferences.set(isTaskSidebarCollapsed, forKey: Self.sidebarCollapsedKey) }
     }
-    let mixesBrowserTabsInSidebar: Bool
+    var browserTabOpenError: String?
+    let workspaceLayout: WorkspaceLayout
+    var mixesBrowserTabsInSidebar: Bool { workspaceLayout.mixesBrowserTabs }
     let workspaceTabs: WorkspaceTabs
-    var isBrowserPresented = false {
-        didSet { if isBrowserPresented != oldValue { workspaceTabs.onChange?() } }
+    private var browserSidePaneOpen = false
+    var isBrowserPresented: Bool {
+        get { browserSidePaneOpen }
+        set {
+            guard workspaceLayout.allowsBrowserSidePane, newValue != browserSidePaneOpen else { return }
+            browserSidePaneOpen = newValue
+            workspaceTabs.onChange?()
+        }
     }
     @ObservationIgnored private var waitingForWorkspaceHistory = false
     @ObservationIgnored private var restoredWorkspaceDraftIDs = Set<String>()
@@ -193,7 +201,7 @@ final class AppState {
         preferences: UserDefaults = .standard,
         unreadCompletionStore: ChatUnreadCompletionStore? = nil,
         browserSession: EmbeddedBrowserSession? = nil,
-        mixesBrowserTabsInSidebar: Bool = false,
+        workspaceLayout: WorkspaceLayout = .chatListWithSidePane,
         websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])? = nil,
         websiteModeDiscovery: (@MainActor (String) async throws -> [WebsiteModeChoice])? = nil,
         cookieMaintenanceOnlyLaunch: Bool? = nil,
@@ -204,7 +212,7 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
-        self.mixesBrowserTabsInSidebar = mixesBrowserTabsInSidebar
+        self.workspaceLayout = workspaceLayout
         workspaceTabs = WorkspaceTabs(defaults: preferences)
         isTaskSidebarCollapsed = preferences.bool(forKey: Self.sidebarCollapsedKey)
         self.unreadCompletionStore = unreadCompletionStore
@@ -443,9 +451,17 @@ final class AppState {
               let provider = EmbeddedWebModelTransport.Provider(rawValue: String(route.dropFirst("browser/".count))),
               WebsiteModelCatalog.discoveryProviders.contains(provider.rawValue) else { return }
         presentedSheet = nil
-        isBrowserPresented = true
-        do { try browserSession.openProviderSignIn(provider) }
-        catch { websiteModelsError = error.localizedDescription }
+        do {
+            try browserSession.openProviderSignIn(provider)
+            if workspaceLayout.allowsBrowserSidePane {
+                isBrowserPresented = true
+            } else if let tab = browserSession.setupTab(for: provider) {
+                selectWorkspaceTab(.browser(tab.workspaceID))
+            }
+        } catch {
+            websiteModelsError = error.localizedDescription
+            presentBrowserTabOpenError(error)
+        }
     }
 
     func recheckPendingCLIInstallations() {

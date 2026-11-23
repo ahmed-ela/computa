@@ -154,8 +154,10 @@ export interface WorkspaceTab { kind: 'agent' | 'browser'; id: string }
 export interface WorkspaceBrowser { id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean }
 
 export interface AppSnapshot {
+  launcherChat?: { taskID: string; unsentDraft?: string };
   nativeSidebarControls?: boolean;
   revision: number;
+  allowsBrowserSidePane?: boolean;
   mixesBrowserTabsInSidebar?: boolean;
   workspaceOrder?: WorkspaceTab[];
   savedChats?: { id: string; title: string; workspace: string; updatedAt: number }[];
@@ -176,6 +178,7 @@ export interface AppSnapshot {
   modelOptions: ModelOption[];
   providerSetups: ModelProviderSetup[];
   websiteModelsRefreshing?: boolean;
+  selectedModelAvailableForNewPrompt?: boolean;
   canRefreshWebsiteModels?: boolean;
   websiteModelsError?: string;
   showToolPayloads: boolean;
@@ -192,11 +195,12 @@ export type NativeAction =
   | { action: 'selectTask'; id: string }
   | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }
-  | { action: 'createTask' | 'newWorkspaceBrowserTab' }
+  | { action: 'createTask' | 'newWorkspaceBrowserTab' | 'openTabLauncher' }
   | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab'; tab: WorkspaceTab }
   | { action: 'moveWorkspaceTab'; tab: WorkspaceTab; target: WorkspaceTab }
   | { action: 'chooseTaskWorkspace'; taskID: string }
   | { action: 'prepareWebsiteModel'; taskID: string }
+  | { action: 'launcherChatReady'; taskID: string }
   | { action: 'submitPrompt'; requestID: string; taskID: string; prompt: string }
   | { action: 'interruptTask'; taskID: string }
   | { action: 'retryWebsiteSessionCleanup'; taskID: string }

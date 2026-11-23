@@ -9,6 +9,7 @@ struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
     var tabRowHeight: CGFloat = 32
     var usesSidebarTabs = false
+    var showsNewTabButton = true
     var titlebarLeadingInset: CGFloat = 0
     var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
@@ -102,7 +103,6 @@ struct EmbeddedBrowserPane: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityIdentifier("embedded-browser-pane")
         .focusedValue(\.browserPaneFocused, true)
-        .focusedSceneValue(\.newBrowserTabInPane, { createTab() })
         .focusedSceneValue(\.focusBrowserAddress, { addressFocused = true })
         .onAppear { synchronizeAddress() }
         .onChange(of: session.selectedTabID) { _, _ in
@@ -111,7 +111,7 @@ struct EmbeddedBrowserPane: View {
         }
         .onChange(of: selectedTab?.url) { _, _ in synchronizeAddress() }
         .onChange(of: addressFocused) { _, focused in
-            if !focused { synchronizeAddress() }
+            if focused { selectAddressOnFirstClick() } else { synchronizeAddress() }
         }
         .onChange(of: isInteractionBlocked) { _, blocked in
             if blocked { addressFocused = false }
@@ -129,18 +129,20 @@ struct EmbeddedBrowserPane: View {
                 tabPicker
             }
 
-            Button { createTab() } label: {
-                Self.newTabIcon.renderingMode(.template).resizable()
-                    .frame(width: 16, height: 16)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+            if showsNewTabButton {
+                Button { createTab() } label: {
+                    Self.newTabIcon.renderingMode(.template).resizable()
+                        .frame(width: 16, height: 16)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .contextMenu {
+                    Button("New Mobile Tab") { createTab(requestsMobileSite: true) }
+                }
+                .help("New browser tab. Control-click for a mobile tab.")
+                .accessibilityLabel("New browser tab")
+                .accessibilityIdentifier("browser-new-tab")
             }
-            .contextMenu {
-                Button("New Mobile Tab") { createTab(requestsMobileSite: true) }
-            }
-            .help("New browser tab (⌘T). Control-click for a mobile tab.")
-            .accessibilityLabel("New browser tab")
-            .accessibilityIdentifier("browser-new-tab")
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
@@ -252,6 +254,26 @@ struct EmbeddedBrowserPane: View {
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func selectAddressOnFirstClick() {
+        // Preserve native drag/word selections and focus restored by an agent's background page.
+        guard let click = NSApp.currentEvent, click.type == .leftMouseUp || click.type == .leftMouseDown,
+              click.clickCount == 1, click.modifierFlags.isDisjoint(with: [.shift, .command, .option, .control]),
+              let tab = selectedTab, let window = session.webView(for: tab.id)?.window, window === click.window,
+              let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+              let field = editor.delegate as? NSTextField,
+              editor.bounds.contains(editor.convert(click.locationInWindow, from: nil))
+        else { return }
+        // AppKit places the caret during mouse tracking, sometimes after SwiftUI reports focus.
+        let addressAtClick = editor.string
+        RunLoop.main.perform(inModes: [.default, .modalPanel]) { [weak editor, weak field] in
+            MainActor.assumeIsolated {
+                guard let editor, let field, field.currentEditor() === editor, editor.window?.firstResponder === editor,
+                      editor.string == addressAtClick, editor.selectedRange().length == 0, !editor.hasMarkedText() else { return }
+                editor.selectAll(nil)
+            }
+        }
     }
 
     private func synchronizeAddress() {

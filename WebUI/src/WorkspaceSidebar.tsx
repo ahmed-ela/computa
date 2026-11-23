@@ -95,10 +95,10 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       }
     </div>
     {(snapshot.mixesBrowserTabsInSidebar || snapshot.pendingApprovalCount > 0) && <nav className="primary-nav" aria-label="Primary">
-      {snapshot.mixesBrowserTabsInSidebar && <Button variant="outline" className="nav-button new-task-button" aria-label="New browser tab" title="New browser tab"
-        onClick={() => { setSearch(''); post({ action: 'newWorkspaceBrowserTab' }); }}>
+      {snapshot.mixesBrowserTabsInSidebar && <Button variant="outline" className="nav-button new-task-button" aria-label="New tab" title="New tab"
+        onClick={() => { setSearch(''); post({ action: nativeHost ? 'openTabLauncher' : 'newWorkspaceBrowserTab' }); }}>
         <span className="new-browser-tab-icon" aria-hidden="true" />
-        <span className={collapsed ? 'sr-only' : undefined}>New browser tab</span></Button>}
+        <span className={collapsed ? 'sr-only' : undefined}>New tab</span></Button>}
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
     </nav>}

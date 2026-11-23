@@ -37,7 +37,7 @@ enum ComputaLaunchMode: Equatable {
             let browser = EmbeddedBrowserSession(defaults: preferences)
             return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferences,
                             unreadCompletionStore: unreadCompletionStoreFactory(),
-                            browserSession: browser)
+                            browserSession: browser, workspaceLayout: .mixedTabs)
         case .testHost:
             // A unique suite prevents even incidental test-host state changes
             // from reading or writing the application's saved access choice.
@@ -59,7 +59,6 @@ private struct InertTestHostPermissions: AutomationPermissionClient {
 
 extension FocusedValues {
     @Entry var focusBrowserAddress: (() -> Void)?
-    @Entry var newBrowserTabInPane: (() -> Void)?
     @Entry var browserPaneFocused: Bool?
     @Entry var tabWorkspace: AppState?
 }
@@ -67,7 +66,6 @@ extension FocusedValues {
 private struct WorkspaceCommands: Commands {
     let state: AppState
     let isTestHost: Bool
-    @FocusedValue(\.newBrowserTabInPane) private var newBrowserTabInPane
     @FocusedValue(\.focusBrowserAddress) private var focusBrowserAddress
     @FocusedValue(\.tabWorkspace) private var tabWorkspace
 
@@ -87,12 +85,9 @@ private struct WorkspaceCommands: Commands {
             Button("New Chat") { state.createTask() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(workspaceUnavailable)
-            Button("New Browser Tab") {
-                if let newBrowserTabInPane { newBrowserTabInPane() }
-                else { state.newWorkspaceBrowserTab() }
-            }
-            .keyboardShortcut("t", modifiers: .command)
-            .disabled(workspaceUnavailable)
+            Button("New Tab") { WorkspaceTabLauncher.request(in: NSApp.keyWindow) }
+                .keyboardShortcut("t", modifiers: .command)
+                .disabled(workspaceUnavailable)
         }
         CommandGroup(replacing: .saveItem) {
             if let tabWorkspace {

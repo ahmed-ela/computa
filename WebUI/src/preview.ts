@@ -283,6 +283,8 @@ return {
   ],
   showToolPayloads: false,
   isInspectorPresented: false,
+  mixesBrowserTabsInSidebar: true,
+  allowsBrowserSidePane: false,
   isBrowserPresented: false,
   isSettingsPresented: false,
   isReviewPresented: false,
@@ -615,6 +617,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         publish({ ...snapshot, isTaskSidebarCollapsed: action.collapsed });
         return;
       case 'toggleBrowser':
+        if (!snapshot.allowsBrowserSidePane) return;
         // The actual browser is a native sibling, not an iframe in this preview.
         publish({ ...snapshot, isBrowserPresented: !snapshot.isBrowserPresented });
         return;

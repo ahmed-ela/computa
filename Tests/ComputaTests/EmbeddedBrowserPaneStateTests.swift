@@ -53,7 +53,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let tasks = ["First", "Second", "History"].map {
             AgentTask(title: $0, summary: "", status: .draft, workspace: "", model: "local")
         }
-        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session, mixesBrowserTabsInSidebar: true)
+        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
         let first = WorkspaceTabID.agent(tasks[0].id)
         let second = WorkspaceTabID.agent(tasks[1].id)
         state.selectTask(tasks[1].id)
@@ -192,6 +192,187 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    private func launcherEditor(in host: NSView, window: NSWindow) async throws -> NSTextView {
+        for _ in 0..<100 {
+            host.layoutSubtreeIfNeeded()
+            if let field = nativeViews(in: host).compactMap({ $0 as? NSTextField })
+                .first(where: { $0.identifier?.rawValue == "workspace-tab-launcher" }),
+               let editor = field.currentEditor() as? NSTextView, editor === window.firstResponder {
+                return editor
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("The new-tab field did not receive keyboard focus")
+        throw CocoaError(.coderInvalidValue)
+    }
+
+    @MainActor
+    func testMixedTabsHideSidePaneControlsAndOpenProviderSetupAsATab() async throws {
+        let prefs = isolatedTestPreferences()
+        let task = AgentTask(title: "First chat", summary: "", status: .draft, workspace: "", model: "local")
+        WorkspaceTabs(defaults: prefs).save(SavedWorkspace(order: [.agent(task.id)], selectedAgent: task.id,
+            drafts: [:], pages: [], browserIsPrimary: false, showsBrowserPane: true))
+        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 1, defaults: prefs)
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 680),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close(); session.shutdown() }
+        await settleLayout(host)
+        let web = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let fullChat = """
+            !!document.querySelector('#task-prompt') && innerWidth > 1000 &&
+              !document.querySelector('[data-browser-primary], [data-browser-pane], [aria-label="New chat"], [aria-label="Toggle browser"]')
+            """
+        let restored = await waitForScriptBool(on: web, script: fullChat)
+        XCTAssertTrue(restored)
+        XCTAssertFalse(state.isBrowserPresented)
+        XCTAssertEqual(window.titlebarAccessoryViewControllers.map(\.layoutAttribute), [.left])
+        XCTAssertFalse(nativeViews(in: host).contains { $0.identifier?.rawValue == "chat-new" })
+
+        state.connectModelProvider(route: "browser/chatgpt")
+        let setup = try XCTUnwrap(session.setupTab(for: .chatgpt))
+        let showingSetup = await waitForScriptBool(on: web, script:
+            "!!document.querySelector('[data-browser-primary=native] [data-tab-kind=browser][aria-current=page]') && innerWidth < 300")
+        XCTAssertTrue(showingSetup)
+        XCTAssertEqual(state.primaryBrowserID, setup.workspaceID)
+        XCTAssertFalse(state.isBrowserPresented)
+        let page = try XCTUnwrap(session.webView(for: setup.id))
+        XCTAssertTrue(page.isDescendant(of: host))
+        state.toggleWorkspaceBrowser()
+        XCTAssertEqual(state.primaryBrowserID, setup.workspaceID)
+
+        state.selectTask(task.id)
+        let switched = await waitForScriptBool(on: web, script: fullChat)
+        XCTAssertTrue(switched)
+        XCTAssertFalse(state.shouldPresentBrowserPane)
+        XCTAssertTrue(session.webView(for: setup.id) === page)
+
+        state.newWorkspaceBrowserTab()
+        XCTAssertEqual(state.browserTabOpenError, EmbeddedBrowserSession.Failure.tabLimit(1).localizedDescription)
+        XCTAssertEqual(state.selectedWorkspaceTab, .agent(task.id))
+        state.browserTabOpenError = nil
+    }
+
+    @MainActor
+    func testNewTabRoutesKeyboardInputToGoogleOrTheNewChatsComposer() async throws {
+        let prefs = isolatedTestPreferences()
+        let browser = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        let runtime = TabLauncherRuntime()
+        let state = AppState(tasks: [], runtime: runtime, preferences: prefs,
+                             browserSession: browser, workspaceLayout: .mixedTabs)
+        state.connectionState = .connected(provider: runtime.providerName)
+        state.defaultModel = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1050, height: 680),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close(); browser.shutdown() }
+        await settleLayout(host)
+        let web = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        func open() async throws -> NSTextView {
+            let ready = await waitForScriptBool(on: web, script: "!!document.querySelector('button[aria-label=\"New tab\"]')")
+            XCTAssertTrue(ready)
+            _ = try await web.evaluateJavaScript("document.querySelector('button[aria-label=\"New tab\"]').click(); true")
+            return try await launcherEditor(in: host, window: window)
+        }
+        func press(_ char: String, code: UInt16) throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                characters: char, charactersIgnoringModifiers: char, isARepeat: false, keyCode: code))
+            window.sendEvent(event)
+        }
+
+        _ = try await open()
+        try press("\r", code: 36)
+        XCTAssertEqual(browser.webView(for: try XCTUnwrap(browser.selectedTabID))?.url, EmbeddedBrowserURLPolicy.newTabURL)
+        XCTAssertTrue(state.tasks.isEmpty)
+
+        let search = "C++ & coffee"
+        let address = try await open()
+        address.insertText(search, replacementRange: address.selectedRange())
+        try press("\u{f701}", code: 125)
+        try press("\u{f700}", code: 126)
+        try press("\r", code: 36)
+        let url = try XCTUnwrap(browser.webView(for: XCTUnwrap(browser.selectedTabID))?.url)
+        XCTAssertEqual(url.host, "www.google.com")
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "q", value: search)])
+        XCTAssertTrue(state.tasks.isEmpty)
+
+        _ = try await open()
+        try press("\u{f701}", code: 125)
+        try press("\r", code: 36)
+        let empty = try XCTUnwrap(state.selectedTaskID)
+        let focused = await waitForScriptBool(on: web, script: "document.activeElement?.id === 'task-prompt'")
+        XCTAssertTrue(focused)
+        try press("z", code: 6)
+        let typed = await waitForScriptBool(on: web, script: "document.querySelector('#task-prompt')?.value === 'z'")
+        XCTAssertTrue(typed)
+
+        let message = "Compare the two train routes"
+        let input = try await open()
+        input.insertText(message, replacementRange: input.selectedRange())
+        try press("\u{f701}", code: 125)
+        try press("\r", code: 36)
+        let sent = try XCTUnwrap(state.selectedTaskID)
+        XCTAssertNotEqual(sent, empty)
+        let received = await waitForScriptBool(on: web, script: "document.querySelector('.user-message')?.textContent.includes('Compare the two train routes') === true")
+        XCTAssertTrue(received)
+        let calls = await runtime.submissions
+        XCTAssertEqual(calls.map(\.id), [sent])
+        XCTAssertEqual(calls.map(\.prompt), [message])
+        XCTAssertEqual(state.tasks.count, 2)
+        XCTAssertEqual(browser.workspaceBrowserTabs.count, 2)
+        state.selectTask(empty)
+        let preserved = await waitForScriptBool(on: web, script: "document.querySelector('#task-prompt')?.value === 'z'")
+        XCTAssertTrue(preserved)
+        _ = try await open()
+        try press("\u{1b}", code: 53)
+        XCTAssertEqual(state.selectedTaskID, empty)
+        XCTAssertEqual(state.tasks.count, 2)
+        XCTAssertEqual(browser.workspaceBrowserTabs.count, 2)
+
+        await settleLayout(host)
+        XCTAssertFalse(nativeViews(in: host).contains { $0.identifier?.rawValue == "workspace-tab-launcher" })
+
+        // Leave the new chat before WebKit paints it. Submission is already bound to its ID.
+        let quick = try await open()
+        quick.insertText("Keep working", replacementRange: quick.selectedRange())
+        try press("\u{f701}", code: 125)
+        try press("\r", code: 36)
+        let background = try XCTUnwrap(state.selectedTaskID)
+        state.selectTask(empty)
+        for _ in 0..<100 where await runtime.submissions.count < 2 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let completed = await runtime.submissions
+        XCTAssertEqual(completed.map(\.id), [sent, background])
+        XCTAssertEqual(completed.map(\.prompt), [message, "Keep working"])
+
+        state.defaultModel = "browser/unavailable-fixture"
+        let disconnected = try await open()
+        disconnected.insertText("Save this draft", replacementRange: disconnected.selectedRange())
+        try press("\u{f701}", code: 125)
+        try press("\r", code: 36)
+        let draftKept = await waitForScriptBool(on: web, script: """
+            document.activeElement?.id === 'task-prompt' && document.activeElement.value === 'Save this draft'
+                && document.querySelector('.composer-submit-status')?.textContent.includes('available model') === true
+            """)
+        XCTAssertTrue(draftKept)
+        let finalCalls = await runtime.submissions
+        XCTAssertEqual(finalCalls.count, 2)
+    }
+
+    @MainActor
     func testMixedSidebarFaviconSwitchingReorderAndHistory() async throws {
         let html = """
         <title>Cedar rail</title>
@@ -206,7 +387,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         defer { session.shutdown() }
         let task = AgentTask(title: "Trip agent", summary: "", status: .draft, workspace: "", model: "local")
-        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, mixesBrowserTabsInSidebar: true)
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabsWithSidePane)
         let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1110, height: 720),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -228,15 +409,17 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             .appendingPathComponent("icons/new-browser-tab.svg"))
         XCTAssertNotNil(NSImage(contentsOf: iconURL))
         try await requireDOM("""
-        (() => { const icon = document.querySelector('button[aria-label="New browser tab"] .new-browser-tab-icon');
+        (() => { const icon = document.querySelector('button[aria-label="New tab"] .new-browser-tab-icon');
           return icon && getComputedStyle(icon).maskImage.includes('/icons/new-browser-tab.svg')
             && icon.getBoundingClientRect().width === 16; })()
         """)
         _ = try await chat.evaluateJavaScript("""
         const draft = document.querySelector('.composer-shell textarea'); draft.value='Return ticket';
         draft.dispatchEvent(new Event('input', { bubbles:true }));
-        document.querySelector('button[aria-label="New browser tab"]').click(); true
+        document.querySelector('button[aria-label="New tab"]').click(); true
         """)
+        let field = try await launcherEditor(in: hosting, window: window)
+        field.doCommand(by: #selector(NSResponder.insertNewline(_:)))
         try await requireDOM("!!document.querySelector('[data-browser-primary=native]') && innerWidth < 300 && getComputedStyle(document.querySelector('.workspace')).display === 'none'")
         let ref = try XCTUnwrap(state.primaryBrowserID)
         let id = try XCTUnwrap(session.selectedTabID)
@@ -368,7 +551,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let prefs = isolatedTestPreferences(), profile = UUID()
         let session = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         let task = AgentTask(title: "Review", summary: "", status: .completed, workspace: "", model: "test")
-        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, mixesBrowserTabsInSidebar: true)
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabsWithSidePane)
         let thread = UUID().uuidString.lowercased()
         state.apply(.taskThreadBound(taskID: task.id, threadID: thread))
         let id = try session.createTab(url: address, requestsMobileSite: true)
@@ -401,7 +584,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
 
         let newSession = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         defer { newSession.shutdown() }
-        let restored = AppState(tasks: [], preferences: prefs, browserSession: newSession, mixesBrowserTabsInSidebar: true)
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: newSession, workspaceLayout: .mixedTabsWithSidePane)
         // Simulate browser callbacks while the app server is still reading history.
         let reopened = try XCTUnwrap(newSession.workspaceBrowserTabs.first { $0.workspaceID == page.workspaceID })
         newSession.selectTab(reopened.id)
@@ -424,7 +607,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         restored.selectWorkspaceTab(.browser(blank))
         let next = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         defer { next.shutdown() }
-        let nextState = AppState(tasks: [history], preferences: prefs, browserSession: next, mixesBrowserTabsInSidebar: true)
+        let nextState = AppState(tasks: [history], preferences: prefs, browserSession: next, workspaceLayout: .mixedTabsWithSidePane)
         XCTAssertEqual(nextState.primaryBrowserID, blank)
         XCTAssertEqual(nextState.openWorkspaceTabs, expectedOrder)
 
@@ -567,7 +750,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                         && sidebar.querySelector('.task-search').getBoundingClientRect().height === 32
                         && strip.getBoundingClientRect().bottom <= sidebar.querySelector('.task-search').getBoundingClientRect().top
                         && sidebar.querySelector('.task-search').getBoundingClientRect().bottom <= list.getBoundingClientRect().top
-                        && !sidebar.querySelector('[aria-label="New browser tab"], [data-tab-kind=browser]')
+                        && !sidebar.querySelector('[aria-label="New tab"], [data-tab-kind=browser]')
                         && document.documentElement.dataset.appearance === '\(state.appearance.rawValue)'
                         && sidebar && document.elementFromPoint(120, 12)?.closest('.sidebar') === sidebar
                         && sidebar.getBoundingClientRect().top === 0;
@@ -653,6 +836,50 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 XCTAssertTrue(navigated, "Return in the address pill should navigate the selected browser tab")
             }
         }
+    }
+
+    @MainActor
+    func testClickingUnfocusedAddressSelectsTheWholeURLAndTypingReplacesIt() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Address selection</title>")
+        let url = try await site.start().appendingPathComponent("human/final")
+        defer { site.stop() }
+        let session = EmbeddedBrowserSession(persistent: false, defaults: isolatedTestPreferences())
+        let tab = try session.createTab(url: url)
+        let page = try XCTUnwrap(session.webView(for: tab))
+        let host = NSHostingView(rootView: EmbeddedBrowserPane(session: session, onClose: {}))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 540),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close(); session.shutdown() }
+        let loaded = await waitForScriptBool(on: page, script: "document.title === 'Address selection'")
+        XCTAssertTrue(loaded)
+        window.makeFirstResponder(page)
+        await settleLayout(host)
+        let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
+            .first { $0.placeholderString == "Search or enter a website address" })
+        func clickAddress(line: UInt = #line) async throws -> NSTextView {
+            let point = field.convert(NSPoint(x: 30, y: field.bounds.midY), to: nil)
+            try await clickInWindow(at: point, window: window, throughApplication: true)
+            return try XCTUnwrap(field.currentEditor() as? NSTextView,
+                                 "Expected the address field to own focus. Responder: \(String(describing: window.firstResponder))", line: line)
+        }
+        let full = NSRange(location: 0, length: url.absoluteString.utf16.count)
+        let first = try await clickAddress()
+        XCTAssertEqual(first.string, url.absoluteString)
+        XCTAssertEqual(first.selectedRange(), full)
+
+        window.makeFirstResponder(page)
+        await settleLayout(host)
+        let replacement = try await clickAddress()
+        XCTAssertEqual(replacement.selectedRange(), full)
+        let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6))
+        window.sendEvent(key)
+        XCTAssertEqual(replacement.string, "z")
+        XCTAssertEqual(page.url, url)
     }
 
     @MainActor
@@ -840,7 +1067,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
-    private func clickInWindow(at point: NSPoint, window: NSWindow) async throws {
+    private func clickInWindow(at point: NSPoint, window: NSWindow, throughApplication: Bool = false) async throws {
         let events = try [NSEvent.EventType.leftMouseDown, .leftMouseUp].map { type in
             try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
@@ -848,7 +1075,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
         // A native control can consume mouseUp in a tracking loop during mouseDown.
         NSApp.postEvent(events[1], atStart: true)
-        window.sendEvent(events[0])
+        if throughApplication {
+            // Install the down event as NSApp.currentEvent, as in a running Mac application.
+            NSApp.postEvent(events[0], atStart: true)
+            let down = try XCTUnwrap(NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast, inMode: .default, dequeue: true))
+            NSApp.sendEvent(down)
+        } else {
+            window.sendEvent(events[0])
+        }
         if let queued = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: false),
            queued.windowNumber == window.windowNumber {
             _ = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true)
@@ -1700,11 +1934,13 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     func testSnapshotCarriesDisplayHandleWithoutNativeTabIDOrBrowserContents() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
-        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, mixesBrowserTabsInSidebar: true)
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
         let tabID = try session.createTab()
-        state.isBrowserPresented = true
+        let tab = try XCTUnwrap(session.humanTab(id: tabID))
+        state.selectWorkspaceTab(.browser(tab.workspaceID))
         let snapshot = WebUISnapshot(state: state)
-        XCTAssertTrue(snapshot.isBrowserPresented)
+        XCTAssertEqual(snapshot.primaryBrowserID, tab.workspaceID.uuidString)
+        XCTAssertFalse(snapshot.isBrowserPresented)
         let encoded = try JSONEncoder().encode(snapshot)
         let body = try XCTUnwrap(String(data: encoded, encoding: .utf8))
         XCTAssertEqual(snapshot.workspaceBrowsers.map(\.id), [try XCTUnwrap(session.humanTab(id: tabID)).workspaceID.uuidString])
@@ -1770,4 +2006,16 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertGreaterThan(png.count, 3_000)
         try png.write(to: URL(fileURLWithPath: path), options: .withoutOverwriting)
     }
+}
+
+private actor TabLauncherRuntime: AgentRuntimeClient {
+    nonisolated let providerName = "Keyboard test"
+    private(set) var submissions: [(id: String, prompt: String)] = []
+    func loadTasks() async throws -> [AgentTask] { [] }
+    nonisolated func events() -> AsyncStream<AgentRuntimeEvent> { AsyncStream { $0.finish() } }
+    func submit(prompt: String, toTaskID taskID: String, modelID: String) async throws {
+        submissions.append((taskID, prompt))
+    }
+    func interrupt(taskID: String) async throws {}
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
 }

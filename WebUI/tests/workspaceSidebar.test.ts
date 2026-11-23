@@ -77,7 +77,7 @@ test('chat-only navigation hides browser rows and creation in either sidebar wid
     expect(html).toContain('data-tab-kind="agent"');
     if (!isTaskSidebarCollapsed) expect(html).toContain('aria-current="page"');
     expect(html).not.toContain('data-tab-kind="browser"');
-    expect(html).not.toContain('aria-label="New browser tab"');
+    expect(html).not.toContain('aria-label="New tab"');
     expect(workspaceItems(snapshot, 'rail.example')).toEqual([]);
   }
 });

@@ -111,7 +111,7 @@ enum EmbeddedBrowserURLPolicy {
         return url
     }
 
-    private static func searchURL(for query: String) throws -> URL {
+    static func searchURL(for query: String) throws -> URL {
         var components = URLComponents(string: "https://www.google.com/search")!
         components.queryItems = [URLQueryItem(name: "q", value: query)]
         // Search engines interpret a literal plus as a space in query parameters.

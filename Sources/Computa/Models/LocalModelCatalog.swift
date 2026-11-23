@@ -7,6 +7,11 @@ struct LocalModelOption: Codable, Equatable, Sendable {
     let highMemory: Bool
     var available: Bool? = nil
     var selectable: Bool? = nil
+
+    static func availableForNewPrompt(_ model: String, in options: [Self]) -> Bool {
+        guard model.hasPrefix("browser/") || model.hasPrefix("cli/") else { return true }
+        return options.contains { $0.id == model && $0.available != false && $0.selectable != false }
+    }
 }
 
 enum LocalModelCatalog {
