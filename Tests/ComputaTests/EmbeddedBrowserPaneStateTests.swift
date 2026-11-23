@@ -53,7 +53,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let tasks = ["First", "Second", "History"].map {
             AgentTask(title: $0, summary: "", status: .draft, workspace: "", model: "local")
         }
-        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session, mixesBrowserTabsInSidebar: true)
+        let state = AppState(tasks: tasks, preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
         let first = WorkspaceTabID.agent(tasks[0].id)
         let second = WorkspaceTabID.agent(tasks[1].id)
         state.selectTask(tasks[1].id)
@@ -207,12 +207,65 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testMixedTabsHideSidePaneControlsAndOpenProviderSetupAsATab() async throws {
+        let prefs = isolatedTestPreferences()
+        let task = AgentTask(title: "First chat", summary: "", status: .draft, workspace: "", model: "local")
+        WorkspaceTabs(defaults: prefs).save(SavedWorkspace(order: [.agent(task.id)], selectedAgent: task.id,
+            drafts: [:], pages: [], browserIsPrimary: false, showsBrowserPane: true))
+        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 1, defaults: prefs)
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 680),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close(); session.shutdown() }
+        await settleLayout(host)
+        let web = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let fullChat = """
+            !!document.querySelector('#task-prompt') && innerWidth > 1000 &&
+              !document.querySelector('[data-browser-primary], [data-browser-pane], [aria-label="New chat"], [aria-label="Toggle browser"]')
+            """
+        let restored = await waitForScriptBool(on: web, script: fullChat)
+        XCTAssertTrue(restored)
+        XCTAssertFalse(state.isBrowserPresented)
+        XCTAssertEqual(window.titlebarAccessoryViewControllers.map(\.layoutAttribute), [.left])
+        XCTAssertFalse(nativeViews(in: host).contains { $0.identifier?.rawValue == "chat-new" })
+
+        state.connectModelProvider(route: "browser/chatgpt")
+        let setup = try XCTUnwrap(session.setupTab(for: .chatgpt))
+        let showingSetup = await waitForScriptBool(on: web, script:
+            "!!document.querySelector('[data-browser-primary=native] [data-tab-kind=browser][aria-current=page]') && innerWidth < 300")
+        XCTAssertTrue(showingSetup)
+        XCTAssertEqual(state.primaryBrowserID, setup.workspaceID)
+        XCTAssertFalse(state.isBrowserPresented)
+        let page = try XCTUnwrap(session.webView(for: setup.id))
+        XCTAssertTrue(page.isDescendant(of: host))
+        state.toggleWorkspaceBrowser()
+        XCTAssertEqual(state.primaryBrowserID, setup.workspaceID)
+
+        state.selectTask(task.id)
+        let switched = await waitForScriptBool(on: web, script: fullChat)
+        XCTAssertTrue(switched)
+        XCTAssertFalse(state.shouldPresentBrowserPane)
+        XCTAssertTrue(session.webView(for: setup.id) === page)
+
+        state.newWorkspaceBrowserTab()
+        XCTAssertEqual(state.browserTabOpenError, EmbeddedBrowserSession.Failure.tabLimit(1).localizedDescription)
+        XCTAssertEqual(state.selectedWorkspaceTab, .agent(task.id))
+        state.browserTabOpenError = nil
+    }
+
+    @MainActor
     func testNewTabRoutesKeyboardInputToGoogleOrTheNewChatsComposer() async throws {
         let prefs = isolatedTestPreferences()
         let browser = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         let runtime = TabLauncherRuntime()
         let state = AppState(tasks: [], runtime: runtime, preferences: prefs,
-                             browserSession: browser, mixesBrowserTabsInSidebar: true)
+                             browserSession: browser, workspaceLayout: .mixedTabs)
         state.connectionState = .connected(provider: runtime.providerName)
         state.defaultModel = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
@@ -334,7 +387,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         defer { session.shutdown() }
         let task = AgentTask(title: "Trip agent", summary: "", status: .draft, workspace: "", model: "local")
-        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, mixesBrowserTabsInSidebar: true)
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabsWithSidePane)
         let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1110, height: 720),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -498,7 +551,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let prefs = isolatedTestPreferences(), profile = UUID()
         let session = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         let task = AgentTask(title: "Review", summary: "", status: .completed, workspace: "", model: "test")
-        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, mixesBrowserTabsInSidebar: true)
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabsWithSidePane)
         let thread = UUID().uuidString.lowercased()
         state.apply(.taskThreadBound(taskID: task.id, threadID: thread))
         let id = try session.createTab(url: address, requestsMobileSite: true)
@@ -531,7 +584,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
 
         let newSession = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         defer { newSession.shutdown() }
-        let restored = AppState(tasks: [], preferences: prefs, browserSession: newSession, mixesBrowserTabsInSidebar: true)
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: newSession, workspaceLayout: .mixedTabsWithSidePane)
         // Simulate browser callbacks while the app server is still reading history.
         let reopened = try XCTUnwrap(newSession.workspaceBrowserTabs.first { $0.workspaceID == page.workspaceID })
         newSession.selectTab(reopened.id)
@@ -554,7 +607,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         restored.selectWorkspaceTab(.browser(blank))
         let next = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
         defer { next.shutdown() }
-        let nextState = AppState(tasks: [history], preferences: prefs, browserSession: next, mixesBrowserTabsInSidebar: true)
+        let nextState = AppState(tasks: [history], preferences: prefs, browserSession: next, workspaceLayout: .mixedTabsWithSidePane)
         XCTAssertEqual(nextState.primaryBrowserID, blank)
         XCTAssertEqual(nextState.openWorkspaceTabs, expectedOrder)
 
@@ -1830,11 +1883,13 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     func testSnapshotCarriesDisplayHandleWithoutNativeTabIDOrBrowserContents() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
-        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, mixesBrowserTabsInSidebar: true)
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
         let tabID = try session.createTab()
-        state.isBrowserPresented = true
+        let tab = try XCTUnwrap(session.humanTab(id: tabID))
+        state.selectWorkspaceTab(.browser(tab.workspaceID))
         let snapshot = WebUISnapshot(state: state)
-        XCTAssertTrue(snapshot.isBrowserPresented)
+        XCTAssertEqual(snapshot.primaryBrowserID, tab.workspaceID.uuidString)
+        XCTAssertFalse(snapshot.isBrowserPresented)
         let encoded = try JSONEncoder().encode(snapshot)
         let body = try XCTUnwrap(String(data: encoded, encoding: .utf8))
         XCTAssertEqual(snapshot.workspaceBrowsers.map(\.id), [try XCTUnwrap(session.humanTab(id: tabID)).workspaceID.uuidString])

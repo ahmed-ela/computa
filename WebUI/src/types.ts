@@ -157,6 +157,7 @@ export interface AppSnapshot {
   launcherChat?: { taskID: string; unsentDraft?: string };
   nativeSidebarControls?: boolean;
   revision: number;
+  allowsBrowserSidePane?: boolean;
   mixesBrowserTabsInSidebar?: boolean;
   workspaceOrder?: WorkspaceTab[];
   savedChats?: { id: string; title: string; workspace: string; updatedAt: number }[];

@@ -37,6 +37,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     var nativeSidebarControls = false
     var launcherChat: LauncherChat?
     let titlebarHeight: CGFloat?
+    let allowsBrowserSidePane: Bool
     let mixesBrowserTabsInSidebar: Bool
     let workspaceOrder: [WorkspaceTabID]
     let workspaceBrowsers: [WorkspaceBrowserSnapshot]
@@ -70,6 +71,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     @MainActor
     init(state: AppState, titlebarHeight: CGFloat? = nil) {
         self.titlebarHeight = titlebarHeight
+        allowsBrowserSidePane = state.workspaceLayout.allowsBrowserSidePane
         mixesBrowserTabsInSidebar = state.mixesBrowserTabsInSidebar
         workspaceOrder = state.openWorkspaceTabs
         workspaceBrowsers = mixesBrowserTabsInSidebar ? state.browserSession.workspaceBrowserTabs.map {

@@ -143,10 +143,10 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .task-toolbar { display: flex; box-sizing: content-box; height: 32px; flex: none; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--border); }
 .preview-browser-toggle { position: absolute; top: 2px; right: 6px; }
 .preview-browser-toggle[aria-pressed="true"] { color: var(--blue); }
-.app-shell:not([data-browser-pane]) .task-toolbar { padding-right: 48px; }
+.app-shell[data-allows-side-pane]:not([data-browser-pane]) .task-toolbar { padding-right: 48px; }
 /* The native compose button belongs to the chat pane. The globe takes the outer corner when the browser is closed. */
-.app-shell[data-native-sidebar-controls] .task-toolbar { padding-right: 40px; }
-.app-shell[data-native-sidebar-controls]:not([data-browser-pane]) .task-toolbar { padding-right: 74px; }
+.app-shell[data-allows-side-pane][data-native-sidebar-controls] .task-toolbar { padding-right: 40px; }
+.app-shell[data-allows-side-pane][data-native-sidebar-controls]:not([data-browser-pane]) .task-toolbar { padding-right: 74px; }
 .toolbar-title-block { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .toolbar-title-block strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .toolbar-workspace { display: block; max-width: 40%; color: var(--text-tertiary); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

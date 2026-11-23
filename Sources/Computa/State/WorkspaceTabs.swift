@@ -1,6 +1,15 @@
 import Foundation
 import Observation
 
+enum WorkspaceLayout {
+    case chatListWithSidePane
+    case mixedTabsWithSidePane
+    case mixedTabs
+
+    var mixesBrowserTabs: Bool { self != .chatListWithSidePane }
+    var allowsBrowserSidePane: Bool { self != .mixedTabs }
+}
+
 /// A tab is a reference. Conversations and WebKit pages retain their own lifetimes.
 struct WorkspaceTabID: Codable, Hashable, Sendable {
     enum Kind: String, Codable { case agent, browser }
@@ -192,8 +201,7 @@ extension AppState {
             let id = try browserSession.createTab(url: url)
             if let page = browserSession.humanTab(id: id) { selectWorkspaceTab(.browser(page.workspaceID)) }
         } catch {
-            // The browser pane displays the session's creation error, including its tab limit.
-            isBrowserPresented = true
+            presentBrowserTabOpenError(error)
         }
     }
 
@@ -229,7 +237,16 @@ extension AppState {
         if let next { selectWorkspaceTab(next) }
     }
 
+    func presentBrowserTabOpenError(_ error: Error) {
+        if workspaceLayout.allowsBrowserSidePane {
+            isBrowserPresented = true  // This layout displays session errors inside the browser pane.
+        } else {
+            browserTabOpenError = error.localizedDescription
+        }
+    }
+
     func toggleWorkspaceBrowser() {
+        guard workspaceLayout.allowsBrowserSidePane else { return }
         if primaryBrowserID != nil {
             workspaceTabs.browserIsPrimary = false
             isBrowserPresented = selectedTaskID != nil

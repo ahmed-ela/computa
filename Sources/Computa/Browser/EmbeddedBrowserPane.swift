@@ -9,6 +9,7 @@ struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
     var tabRowHeight: CGFloat = 32
     var usesSidebarTabs = false
+    var showsNewTabButton = true
     var titlebarLeadingInset: CGFloat = 0
     var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
@@ -128,18 +129,20 @@ struct EmbeddedBrowserPane: View {
                 tabPicker
             }
 
-            Button { createTab() } label: {
-                Self.newTabIcon.renderingMode(.template).resizable()
-                    .frame(width: 16, height: 16)
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
+            if showsNewTabButton {
+                Button { createTab() } label: {
+                    Self.newTabIcon.renderingMode(.template).resizable()
+                        .frame(width: 16, height: 16)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .contextMenu {
+                    Button("New Mobile Tab") { createTab(requestsMobileSite: true) }
+                }
+                .help("New browser tab. Control-click for a mobile tab.")
+                .accessibilityLabel("New browser tab")
+                .accessibilityIdentifier("browser-new-tab")
             }
-            .contextMenu {
-                Button("New Mobile Tab") { createTab(requestsMobileSite: true) }
-            }
-            .help("New browser tab. Control-click for a mobile tab.")
-            .accessibilityLabel("New browser tab")
-            .accessibilityIdentifier("browser-new-tab")
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)

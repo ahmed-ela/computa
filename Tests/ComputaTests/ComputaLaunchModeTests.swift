@@ -65,6 +65,7 @@ final class ComputaLaunchModeTests: XCTestCase {
             unreadCompletionStoreFactory: { unreadStoreConstructions += 1; return nil }
         )
         XCTAssertTrue(state.mixesBrowserTabsInSidebar)
+        XCTAssertFalse(state.workspaceLayout.allowsBrowserSidePane)
         XCTAssertEqual(runtimeConstructions, 1)
         XCTAssertEqual(preferenceReads, 1)
         XCTAssertEqual(unreadStoreConstructions, 1)

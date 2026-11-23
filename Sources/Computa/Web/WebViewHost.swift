@@ -87,8 +87,9 @@ struct WebWorkspaceView: View {
                         session: state.browserSession,
                         tabRowHeight: rowHeight,
                         usesSidebarTabs: browserPrimary,
+                        showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
                         titlebarLeadingInset: browserPrimary && state.isTaskSidebarCollapsed && topInset > 0 ? 36 : 0,
-                        titlebarTrailingInset: topInset > 0 ? BrowserTitlebarToggle.width : 0,
+                        titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
                         modelSetupStatus: state.websiteModelSetupStatus(for:),
@@ -96,6 +97,7 @@ struct WebWorkspaceView: View {
                         canConfigureKimiProfile: state.canConfigureKimiProfile,
                         onSwitchKimiProfile: state.switchKimiSignInProfile(from:),
                         onClose: {
+                            guard state.workspaceLayout.allowsBrowserSidePane else { return }
                             state.workspaceTabs.browserIsPrimary = false
                             state.isBrowserPresented = false
                         }
@@ -156,6 +158,11 @@ struct WebWorkspaceView: View {
         .onAppear { state.browserSession.enableWorkspaceFavicons() }
         .onChange(of: state.presentedSheet) { _, sheet in
             if sheet != .settings { showsAccessModeSettings = false }
+        }
+        .alert("Couldn’t open a browser tab", isPresented: Binding(
+            get: { state.browserTabOpenError != nil }, set: { if !$0 { state.browserTabOpenError = nil } }
+        )) { Button("OK") { state.browserTabOpenError = nil } } message: {
+            Text(state.browserTabOpenError ?? "")
         }
         .sheet(isPresented: $showsAccessModeSettings) {
             NativeAccessModeSettings(state: state)
@@ -257,10 +264,9 @@ private final class WindowConfiguredWebView: WKWebView {
 
     func configureTitlebarControls(state: AppState) {
         self.state = state
-        titlebarControls = [
-            accessory(.left, SidebarTitlebarToggle(state: state)),
-            accessory(.right, BrowserTitlebarToggle(state: state))
-        ]
+        titlebarControls = [accessory(.left, SidebarTitlebarToggle(state: state))]
+        guard state.workspaceLayout.allowsBrowserSidePane else { return }
+        titlebarControls.append(accessory(.right, BrowserTitlebarToggle(state: state)))
         compose.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
         compose.imagePosition = .imageOnly
         compose.bezelStyle = .accessoryBarAction
@@ -276,7 +282,7 @@ private final class WindowConfiguredWebView: WKWebView {
 
     override func layout() {
         super.layout()
-        guard let window, let state else { return }
+        guard let window, let state, compose.superview != nil else { return }
         compose.isHidden = !window.styleMask.contains(.titled) || state.presentedSheet != nil
             || (state.primaryBrowserID != nil && state.shouldPresentBrowserPane)
         compose.isEnabled = !state.approvalGateBlocksInteraction
@@ -307,7 +313,7 @@ private final class WindowConfiguredWebView: WKWebView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         // Route only the compose control through the chat pane; the rest of the title bar stays draggable.
-        if !compose.isHidden, let superview, compose.frame.contains(convert(point, from: superview)) { return compose }
+        if compose.superview != nil, !compose.isHidden, let superview, compose.frame.contains(convert(point, from: superview)) { return compose }
         if let window, let superview, superview.convert(point, to: nil).y >= window.contentLayoutRect.maxY {
             return nil
         }
