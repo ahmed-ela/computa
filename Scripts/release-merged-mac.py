@@ -114,6 +114,7 @@ def package(state, tag, job):
     run("cargo", "test", "--locked", "--target-dir", state / "contracts-target",
         "-p", "computa-contracts", "--bin", "browser-tool-catalog")
     run(sys.executable, "Scripts/merge-release-worker.test.py")
+    run(sys.executable, "Scripts/sign_browser_passkeys_test.py")
     run("bun", "test", "Scripts/version.test.ts", "Scripts/release-policy.test.ts", "Scripts/sign-release.test.ts",
         "Scripts/package-release.test.ts", "Scripts/sparkle-appcast.test.ts", "Scripts/publish-alpha.test.ts",
         "Website/download-worker.test.ts")
@@ -131,8 +132,9 @@ def package(state, tag, job):
         "DEVELOPMENT_TEAM=", "SWIFT_ACTIVE_COMPILATION_CONDITIONS=", "CURRENT_PROJECT_VERSION=" + tag.split(".")[-1], "build")
     app = stage / "signed/Kolmogor.app"
     identity = os.environ["COMPUTA_SIGN_IDENTITY"]
-    run("bun", "Scripts/sign-release.ts", "--app", product,
-        "--output", app, "--identity", identity)
+    profile = os.environ.get("COMPUTA_BROWSER_PASSKEY_PROFILE")
+    run("bun", "Scripts/sign-release.ts", "--app", product, "--output", app, "--identity", identity,
+        *(["--browser-passkey-profile", profile] if profile else []))
     archive = stage / "submission.zip"
     run("ditto", "-c", "-k", "--keepParent", app, archive)
     notarize(archive)

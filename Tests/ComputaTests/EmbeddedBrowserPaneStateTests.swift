@@ -19,6 +19,26 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testExternalWebLinksOpenInSelectedHumanTabsOnly() throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+
+        for invalid in ["file:///tmp/private", "localcodex-app://ui/index.html", "about:blank", "https://user@example.test/"] {
+            state.openExternalWebsite(try XCTUnwrap(URL(string: invalid)))
+        }
+        XCTAssertTrue(session.workspaceBrowserTabs.isEmpty)
+        let links = ["http://example.test/path", "https://example.test/sign-in?next=%2Fdocs#start"]
+        for link in links {
+            state.openExternalWebsite(try XCTUnwrap(URL(string: link)))
+            let page = try XCTUnwrap(session.humanTab(id: XCTUnwrap(session.selectedTabID)))
+            XCTAssertEqual(state.selectedWorkspaceTab, .browser(page.workspaceID))
+        }
+        XCTAssertEqual(session.restorablePages.map { $0.url?.absoluteString }, links)
+    }
+
+    @MainActor
     func testNewWorkspaceTabOpensGoogleAndExplicitLinkOpensItsDestination() throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)

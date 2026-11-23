@@ -5,23 +5,25 @@ import { rejectRetiredBundleResources } from "./retired-bundle-resources";
 import { lstat, mkdir, readFile, readdir, readlink, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
-export interface SignOptions { app: string; output: string; identity: string }
+export interface SignOptions { app: string; output: string; identity: string; browserPasskeyProfile?: string }
 export type SignRunner = (command: string[]) => Promise<string>;
 const bundleID = "com.ahmedelamin.LocalCodex";
 const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
-const help = "Usage: bun Scripts/sign-release.ts --app BUILD.app --output NEW.app --identity 'Developer ID Application: …'";
+const help = "Usage: bun Scripts/sign-release.ts --app BUILD.app --output NEW.app --identity 'Developer ID Application: …' [--browser-passkey-profile FILE]";
 
 export function parseSignOptions(args: string[]): SignOptions {
   const values: Record<string, string> = {};
+  const required = ["--app", "--output", "--identity"];
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i];
-    if (!["--app", "--output", "--identity"].includes(key) || values[key] !== undefined) throw new Error(help);
+    if (![...required, "--browser-passkey-profile"].includes(key) || values[key] !== undefined) throw new Error(help);
     const value = args[i + 1];
     if (!value || value.startsWith("-") || /[\x00-\x1f\x7f]/.test(value)) throw new Error(help);
     values[key] = value;
   }
-  if (Object.keys(values).length !== 3) throw new Error(help);
-  return { app: resolve(values["--app"]), output: resolve(values["--output"]), identity: values["--identity"] };
+  if (required.some(key => !values[key])) throw new Error(help);
+  return { app: resolve(values["--app"]), output: resolve(values["--output"]), identity: values["--identity"],
+    browserPasskeyProfile: values["--browser-passkey-profile"] ? resolve(values["--browser-passkey-profile"]) : undefined };
 }
 
 async function regular(path: string, directory = false): Promise<void> {
@@ -130,7 +132,15 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   manifest.binarySHA256 = digest(signedRuntime);
   manifest.binarySize = signedRuntime.length;
   await writeFile(join(output, manifestPath), JSON.stringify(manifest, null, 2) + "\n");
-  await run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, output]);
+  if (options.browserPasskeyProfile) {
+    await run(["/usr/bin/python3", join(import.meta.dir, "sign_browser_passkeys.py"),
+      output, options.browserPasskeyProfile, identity]);
+  } else {
+    if (await Bun.file(join(output, "Contents/embedded.provisionprofile")).exists()) {
+      throw new Error("An embedded profile requires explicit provisioning when re-signing Kolmogor.");
+    }
+    await run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, output]);
+  }
   await run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists", output]);
   return { app: output, mainSHA256: digest(await readFile(join(output, "Contents/MacOS/Kolmogor"))), runtimeSHA256: manifest.binarySHA256 };
 }
