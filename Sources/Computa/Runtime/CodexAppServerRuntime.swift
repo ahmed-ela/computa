@@ -443,6 +443,23 @@ enum AppServerThreadHistoryContract {
         })
     }
 
+    static func restartInterruptedTurnID(from data: Data, rejectedTurns: Set<String>) throws -> String? {
+        guard let turn = try savedTurns(data).last, let id = turn["id"] as? String,
+              turn["status"] as? String == "interrupted", !hasSavedError(turn), !rejectedTurns.contains(id),
+              let items = turn["items"] as? [[String: Any]],
+              items.contains(where: { $0["type"] as? String == "userMessage" }) else { return nil }
+        for item in items {
+            switch item["type"] as? String {
+            case "userMessage", "reasoning", "plan", "contextCompaction": continue
+            case "agentMessage" where item["phase"] as? String == "commentary": continue
+            case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall":
+                guard item["status"] as? String == "completed" else { return nil }
+            default: return nil
+            }
+        }
+        return id
+    }
+
     static func latestUserTurnID(from data: Data) throws -> String? {
         guard let turn = try savedTurns(data).last(where: { ($0["items"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "userMessage" } }),
               let id = turn["id"] as? String, !id.isEmpty, id.utf8.count <= 512 else { return nil }
@@ -1888,6 +1905,22 @@ private extension CodexAppServerRuntime {
 
         func shutdown() async -> RuntimeShutdownReport {
             if let shutdownTask { return await shutdownTask.value }
+            // Snapshot before cancellation removes tool and approval ownership.
+            let candidates = threadForTask.compactMap { taskID, threadID -> AgentRestartStore.Turn? in
+                guard let turn = turnIdentity.activeTurnID(for: taskID),
+                      nativeStoppedTurns[taskID] != turn, commandStoppedTurns[taskID] != turn,
+                      contextStoppedTurns[taskID] != turn, computerFinalDiagnostics[taskID] != turn,
+                      fileChangeTranscripts[taskID]?.hasUnsettledChange(turnID: turn) != true,
+                      turnSubmissionClaims[taskID] == nil, !compactionReservations.contains(taskID),
+                      !compactionTracker.isRunning(taskID: taskID), managedCompactions[taskID] == nil,
+                      ownedCommandItems[taskID, default: []].isEmpty, !commandCleanupTasks.contains(taskID),
+                      computerActiveOperation[taskID] == nil, computerV2InFlight[taskID] == nil,
+                      computerEvidence[taskID]?.completionDiagnostic == nil,
+                      !dynamicToolTasks.values.contains(where: { $0.taskID == taskID }),
+                      !pendingServerApprovals.values.contains(where: { $0.request.taskID == taskID }),
+                      !computerApprovalTask.values.contains(taskID) else { return nil }
+                return .init(taskID: taskID, threadID: threadID, turnID: turn)
+            }
             isPreparingCommandShutdown = true
             #if DEBUG
             for waiter in websiteCleanupShutdownWaiters { waiter.resume() }
@@ -1902,7 +1935,9 @@ private extension CodexAppServerRuntime {
                 await self.prepareCommandShutdown()
                 self.isShuttingDown = true
                 self.serverFailed(RuntimeError.serverStopped)
-                return await self.finishShutdown()
+                var report = await self.finishShutdown()
+                if report.succeeded { report.interruptedTurns = candidates }
+                return report
             }
             shutdownTask = task
             return await task.value
@@ -2350,13 +2385,14 @@ private extension CodexAppServerRuntime {
             discardComputerV2Session(taskID: taskID)
             computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
 
-            computerTaskScopes[taskID] = ComputerTaskScope(userPrompt: prompt)
+            let authorizedRequest = AgentRestartStore.originalRequest ?? prompt
+            computerTaskScopes[taskID] = ComputerTaskScope(userPrompt: authorizedRequest)
             computerAttempts[taskID] = ComputerUnchangedAttemptGuard()
             computerEvidence.removeValue(forKey: taskID)
             computerReadEvidence.removeValue(forKey: taskID)
             computerActiveOperation.removeValue(forKey: taskID)
             computerSearchEvidence[taskID] = ComputerSearchEvidence()
-            nativeMessageEvidence[taskID] = NativeMessageEvidence(prompt: prompt)
+            nativeMessageEvidence[taskID] = NativeMessageEvidence(prompt: authorizedRequest)
             computerRegisteredObservations.removeValue(forKey: taskID)
             computerFinalDiagnostics.removeValue(forKey: taskID)
 
@@ -3535,9 +3571,13 @@ private extension CodexAppServerRuntime {
                     } catch { unavailable.append(InstalledCodexCLI.unavailableTask(threadID: id, modelID: model, error: error)) }
                 }
             } else { (records, savedChats) = try await bundledThreadRecords(including: openThreadIDs) }
-            let tasks = try await restoreTasks(records, histories: histories)
+            var tasks = try await restoreTasks(records, histories: histories)
             for receipt in await webModelServer.latestCleanupReceipts() {
                 events.yield(.websiteSessionCleanupUpdated(receipt))
+                if receipt.outcome == .unconfirmed, let thread = receipt.threadID,
+                   let index = tasks.firstIndex(where: { $0.runtimeThreadID == thread }) {
+                    tasks[index].restartInterruptedTurnID = nil
+                }
             }
             return WorkspaceHistory(tasks: tasks + unavailable, savedChats: savedChats)
         }
@@ -3627,6 +3667,11 @@ private extension CodexAppServerRuntime {
                        let restoredStatus = try AppServerThreadHistoryContract.latestUserTurnStatus(from: history,
                             rejectedTurns: rejectedTurns, failedTurns: Set(websiteFailures.map(\.turnID))) {
                         tasks[index].status = restoredStatus
+                    }
+                    if tasks[index].status == .waiting, let interrupted = try AppServerThreadHistoryContract.restartInterruptedTurnID(
+                        from: history, rejectedTurns: rejectedTurns) {
+                        tasks[index].restartInterruptedTurnID = interrupted
+                        tasks[index].restartModelFromReceipt = tasksWithUnknownPersistedModel.contains(taskID)
                     }
                     do {
                         tasks[index].turnDiffs = try AppServerThreadHistoryContract.turnDiffs(from: history,

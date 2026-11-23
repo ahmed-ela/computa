@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import Network
@@ -9,6 +10,162 @@ import XCTest
 /// tools; provider inference and credentials are isolated loopback fixtures.
 @MainActor
 final class APIProviderHarnessLiveTests: XCTestCase {
+    /// Each phase runs in a new host process with its own provider connection,
+    /// sharing only the task directory on disk. The installed app is untouched.
+    func testAgentContinuesAcrossColdProcesses() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1")
+        guard let temp = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        defer { free(temp) }
+        let root = URL(fileURLWithPath: String(cString: temp)).appendingPathComponent("KolmogorRelaunch-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for phase in ["interrupt", "resume", "reopen"] {
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            child.arguments = ["xctest", "-XCTest", "ComputaTests.APIProviderHarnessLiveTests/testAgentRelaunchPhase",
+                               Bundle(for: Self.self).bundleURL.path]
+            var env = ProcessInfo.processInfo.environment
+            env["KOLMOGOR_TEST_PHASE"] = phase
+            env["KOLMOGOR_TEST_RELAUNCH_HOME"] = root.path
+            child.environment = env
+            let output = root.appendingPathComponent(phase + ".log")
+            FileManager.default.createFile(atPath: output.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: output)
+            child.standardOutput = handle
+            child.standardError = handle
+            try child.run()
+            let deadline = ContinuousClock.now.advanced(by: .seconds(50))
+            while child.isRunning && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
+            if child.isRunning {
+                child.terminate()
+                try await Task.sleep(for: .milliseconds(250))
+                if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+            }
+            child.waitUntilExit()
+            try handle.close()
+            let log = try String(contentsOf: output, encoding: .utf8)
+            let succeeded: Bool
+            if phase == "interrupt" {
+                // AppKit can exit the host before XCTest prints its summary.
+                let saved = try AgentRestartStore(directory: root.appendingPathComponent("home/InterruptedAgents-v1")).pending()
+                succeeded = saved.count == 1 && FileManager.default.fileExists(atPath: root.appendingPathComponent("quit-requested").path)
+            } else {
+                succeeded = log.contains("Executed 1 test") && FileManager.default.fileExists(atPath: root.appendingPathComponent(phase + ".passed").path)
+            }
+            guard child.terminationStatus == 0, succeeded else {
+                XCTFail("Cold restart phase " + phase + " failed. " + log.suffix(6500))
+                return
+            }
+        }
+    }
+
+    func testAgentRelaunchPhase() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let phase = env["KOLMOGOR_TEST_PHASE"], let path = env["KOLMOGOR_TEST_RELAUNCH_HOME"] else {
+            throw XCTSkip("Runs in the three child processes of the cold restart test.")
+        }
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        let home = root.appendingPathComponent("home")
+        let project = root.appendingPathComponent("project")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let received = root.appendingPathComponent(phase + ".received")
+        let upstream = try APIHarnessHTTPFixture { request in
+            do {
+                try request.body.write(to: received)
+                if phase == "interrupt" { try await Task.sleep(for: .seconds(35)) }
+                let frames: [[String: Any]] = [
+                    ["choices": [["index": 0, "delta": ["role": "assistant", "content": "RELAUNCH-COMPLETE"], "finish_reason": NSNull()]]],
+                    ["choices": [["index": 0, "delta": [:], "finish_reason": "stop"]]],
+                    ["choices": [], "usage": ["prompt_tokens": 80, "completion_tokens": 12, "total_tokens": 92]],
+                ]
+                var data = Data()
+                for frame in frames {
+                    let chunk = frame.merging(["id": "chatcmpl-restart", "object": "chat.completion.chunk", "model": "restart"]) { a, _ in a }
+                    data.append(Data("data: ".utf8))
+                    data.append(try JSONSerialization.data(withJSONObject: chunk))
+                    data.append(Data("\n\n".utf8))
+                }
+                data.append(Data("data: [DONE]\n\n".utf8))
+                return .init(status: "200 OK", body: data)
+            } catch { return .init(status: "503 Service Unavailable", body: Data()) }
+        }
+        let url = try await upstream.start()
+        let provider = APIProviderDefinition(id: "restart", name: "Local restart fixture", baseURL: url,
+            wireAPI: .chatCompletions, models: [.init(id: "restart", name: "Restart")])
+        let model = APIProviderCatalog.appModelID(providerID: "restart", modelID: "restart")
+        let preferences = isolatedTestPreferences()
+        try APIProviderCatalog.save([provider], to: preferences)
+        preferences.set(model, forKey: "LocalCodex.defaultModelID")
+        var config = CodexAppServerRuntime.Configuration.externalLocalQwen
+        config.codexHomePath = home.path
+        config.workspacePath = project.path
+        config.apiModelServerForTesting = APIModelServer(credentials: APIHarnessCredentials(providerID: "restart", value: "synthetic"),
+            capsules: try APIReasoningCapsules(key: Data(repeating: 5, count: 32)), toolNamingDirectory: home.appendingPathComponent("APIToolNaming-v1"))
+        let runtime = SelectableCodexRuntime(configuration: config)
+        let state = ComputaLaunchMode.application.makeState(runtimeFactory: { runtime }, preferencesFactory: { preferences },
+            unreadCompletionStoreFactory: { nil })
+        func wait(_ condition: @MainActor () -> Bool) async throws {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(12))
+            while !condition() && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(60)) }
+            guard condition() else {
+                throw APIHarnessFailure("Timed out in " + phase + ": " + String(describing: state.connectionState)
+                    + " " + state.tasks.map { String(describing: $0.status) + " " + ($0.entries.last?.body ?? "") }.joined(separator: ", "))
+            }
+        }
+        do {
+            state.startRuntimeIfNeeded()
+            try await wait { if case .connected = state.connectionState { true } else { false } }
+            let store = try XCTUnwrap(runtime.restartStore)
+            let request = "Return the marker RELAUNCH-COMPLETE when this synthetic review is finished."
+            switch phase {
+            case "interrupt":
+                state.createTask()
+                let id = try XCTUnwrap(state.selectedTaskID)
+                let accepted = await state.submit(prompt: request, toTaskID: id)
+                XCTAssertTrue(accepted)
+                try await wait { FileManager.default.fileExists(atPath: received.path) && state.selectedTask?.status == .running }
+                let app = NSApplication.shared
+                let delegate = ComputaAppDelegate()
+                delegate.state = state
+                app.delegate = delegate
+                defer { withExtendedLifetime(delegate) {} }
+                try Data().write(to: root.appendingPathComponent("quit-requested"))
+                // Deliver Quit as an AppKit event, outside the XCTest MainActor job.
+                RunLoop.main.perform { MainActor.assumeIsolated { app.terminate(nil) } }
+                try await wait { (try? store.pending().count) == 1 }
+            case "resume", "reopen":
+                try await wait { state.tasks.contains { $0.status == .completed && $0.entries.last?.body == "RELAUNCH-COMPLETE" } }
+                let task = try XCTUnwrap(state.tasks.first(where: { $0.status == .completed }))
+                XCTAssertEqual(task.model, model)
+                XCTAssertEqual(task.entries.filter { $0.kind == .user && $0.body == request }.count, 1)
+                XCTAssertEqual(task.entries.filter { $0.body == AgentRestartStore.continuation }.count, 1)
+                XCTAssertEqual(try store.pending().count, 0)
+                XCTAssertEqual(FileManager.default.fileExists(atPath: received.path), phase == "resume")
+                if phase == "resume" {
+                    let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: received)) as? [String: Any])
+                    XCTAssertEqual(sent["model"] as? String, "restart")
+                    let messages = try XCTUnwrap(sent["messages"] as? [[String: Any]])
+                    let userTexts = messages.filter { $0["role"] as? String == "user" }.map { message in
+                        message["content"] as? String ?? (message["content"] as? [[String: Any]] ?? [])
+                            .compactMap { $0["text"] as? String }.joined(separator: "\n")
+                    }
+                    let original = try XCTUnwrap(userTexts.firstIndex(of: request), "Provider lost the interrupted request")
+                    let continuation = try XCTUnwrap(userTexts.lastIndex(of: AgentRestartStore.continuation))
+                    XCTAssertLessThan(original, continuation)
+                }
+            default: XCTFail("Unexpected test phase")
+            }
+            let report = await state.shutdownRuntime()
+            XCTAssertTrue(report.succeeded, report.issues.description)
+            await upstream.stop()
+            try Data().write(to: root.appendingPathComponent(phase + ".passed"))
+        } catch {
+            _ = await state.shutdownRuntime()
+            await upstream.stop()
+            throw error
+        }
+    }
+
     func testBundledEngineRetainsLifecycleObservationsAcrossCompactionAndColdResume() async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1",
             "Enable the isolated bundled API harness qualification.")

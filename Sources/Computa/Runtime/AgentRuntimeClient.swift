@@ -17,6 +17,7 @@ struct WorkspaceHistory: Sendable {
 /// leaking JSON-RPC details into SwiftUI views.
 protocol AgentRuntimeClient: Sendable {
     var providerName: String { get }
+    var restartStore: AgentRestartStore? { get }
 
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption]
     func installedCLIModels() async throws -> [LocalModelOption]
@@ -42,10 +43,12 @@ protocol AgentRuntimeClient: Sendable {
 /// An empty issue list means the runtime observed its owned cleanup complete.
 struct RuntimeShutdownReport: Equatable, Sendable {
     let issues: [String]
+    var interruptedTurns: [AgentRestartStore.Turn] = []
     var succeeded: Bool { issues.isEmpty }
 }
 
 extension AgentRuntimeClient {
+    var restartStore: AgentRestartStore? { nil }
     func loadWorkspaceHistory(including threadIDs: Set<String>) async throws -> WorkspaceHistory {
         try await WorkspaceHistory(tasks: loadTasks())
     }
