@@ -38,6 +38,13 @@ struct WorkspaceTabLauncher: View {
     }
 }
 
+extension VerticalAlignment {
+    private enum CommandFieldCenter: AlignmentID {
+        static func defaultValue(in dimensions: ViewDimensions) -> CGFloat { dimensions[VerticalAlignment.center] }
+    }
+    static let commandFieldCenter = VerticalAlignment(CommandFieldCenter.self)
+}
+
 struct WorkspaceCommandPanel<Field: View, Choices: View>: View {
     let width: CGFloat
     @ViewBuilder let field: () -> Field
@@ -50,6 +57,7 @@ struct WorkspaceCommandPanel<Field: View, Choices: View>: View {
                 field().frame(height: 32)
             }
             .padding(.horizontal, 8)
+            .alignmentGuide(.commandFieldCenter) { $0[VerticalAlignment.center] }
             choices()
         }
         .padding(10)
