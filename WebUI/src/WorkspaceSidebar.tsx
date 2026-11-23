@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'octane';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'octane';
 import { Button } from '@octanejs/shadcn/Button';
 import { AgentStatusIcon } from './AgentStatusIcon';
 import { Icon } from './Icon';
+import { sidebarRowHeight, useSidebarWindow } from './sidebarWindow';
 import { TaskActivityIndicator } from './TaskActivityIndicator';
 import { isTaskActive, sidebarAgentStatus, startSidebarClock } from './sidebarActivity';
 import type { AppSnapshot, NativeAction, TaskSnapshot, WorkspaceBrowser, WorkspaceTab } from './types';
@@ -70,9 +71,6 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
   const [now, setNow] = useState(() => Date.now() / 1000);
   const dragging = useRef<WorkspaceTab | null>(null);
   const tabList = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    tabList.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }, [snapshot.selectedTaskID, snapshot.primaryBrowserID, snapshot.isTaskSidebarCollapsed, snapshot.isTaskSidebarPeeked]);
   const active = snapshot.tasks.some(isTaskActive);
   const collapsed = sidebarIsCompact(snapshot);
   useEffect(() => {
@@ -81,7 +79,26 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       const timer = window.setInterval(tick, 1000); return () => window.clearInterval(timer);
     } });
   }, [active, collapsed]);
-  const items = workspaceItems(snapshot, search);
+  const items = useMemo(() => workspaceItems(snapshot, search), [snapshot, search]);
+  const { start, end } = useSidebarWindow(tabList, items.length);
+  const selectedTab = snapshot.primaryBrowserID
+    ? 'browser:' + snapshot.primaryBrowserID
+    : 'agent:' + (snapshot.savedChatSelection?.id ?? snapshot.selectedTaskID);
+  useLayoutEffect(() => {
+    if (tabList.current) tabList.current.scrollTop = 0;
+  }, [search]);
+  useLayoutEffect(() => {
+    const list = tabList.current;
+    if (!list) return;
+    const selected = list.querySelector('[aria-current="page"]');
+    if (selected) {
+      selected.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } else {
+      // A shortcut can select a tab outside the mounted rows.
+      const index = items.findIndex(item => keyOf(item.ref) === selectedTab);
+      if (index >= 0) list.scrollTop = index * sidebarRowHeight;
+    }
+  }, [selectedTab, snapshot.isTaskSidebarCollapsed, snapshot.isTaskSidebarPeeked]);
   const noun = snapshot.mixesBrowserTabsInSidebar ? 'tabs' : 'chats';
   const searchLabel = 'Search ' + noun;
   const select = (item: Item) => {
@@ -146,10 +163,11 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
     </nav>}
-    <nav ref={tabList} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats'}>
-      {items.map((item,index) => {
+    <nav ref={tabList} style={{ '--sidebar-row-height': sidebarRowHeight + 'px' }} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats'}>
+      {start > 0 && <div aria-hidden="true" style={{ height: start * sidebarRowHeight + 'px' }} />}
+      {items.slice(start, end).map((item,index) => {
         const status = item.task && sidebarAgentStatus(item.task);
-        const selected = item.browser ? snapshot.primaryBrowserID === item.ref.id : !snapshot.primaryBrowserID && (snapshot.savedChatSelection?.id ?? snapshot.selectedTaskID) === item.ref.id;
+        const selected = keyOf(item.ref) === selectedTab;
         const label = status ? item.title + (status === 'working' ? ' — Working' : ' — Ready to read') : item.title;
         return <div key={keyOf(item.ref)} className="workspace-tab-row" draggable={item.open}
           onDragStart={event => { if (!item.open) return; dragging.current = item.ref; event.dataTransfer?.setData('text/plain', keyOf(item.ref)); }}
@@ -161,7 +179,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
             data-tab-kind={item.ref.kind} aria-current={selected ? 'page' : undefined} onClick={() => select(item)}
             onKeyDown={event => {
               if (!item.open || !event.altKey || !['ArrowUp','ArrowDown'].includes(event.key)) return;
-              event.preventDefault(); const neighbor = items[index + (event.key === 'ArrowUp' ? -1 : 1)];
+              event.preventDefault(); const neighbor = items[start + index + (event.key === 'ArrowUp' ? -1 : 1)];
               if (neighbor?.open) post({ action: 'moveWorkspaceTab', tab: item.ref, target: neighbor.ref });
             }}>
             {item.browser ? <SiteIcon tab={item.browser} /> : collapsed
@@ -173,6 +191,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
             title="Close tab" onClick={() => post({ action: 'closeWorkspaceTab', tab: item.ref })}><Icon name="x" size={12} /></Button>}
         </div>;
       })}
+      {end < items.length && <div aria-hidden="true" style={{ height: (items.length - end) * sidebarRowHeight + 'px' }} />}
       {!items.length && !collapsed && <div className="sidebar-empty">{search ? 'No matching ' + noun : 'No ' + noun}</div>}
     </nav>
   </aside>;
