@@ -352,8 +352,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .setting-row > .model-selector-trigger { flex-shrink: 0; }
 .composer-shell select { border: 0; background: transparent; color: var(--text-secondary); font-size: 11px; }
 .composer-shell [data-slot="native-select-icon"] { width: 13px; height: 13px; }
-.send-button { flex: 0 0 auto; }
-.queue-send-button, .stop-button { flex: 0 0 auto; }
+.composer-action { flex: 0 0 auto; }
 .composer-submit-status { display: block; margin-top: 7px; color: var(--text-tertiary); font-size: 10px; line-height: 1.45; }
 .composer-memory-warning { display: block; margin-top: 8px; color: var(--orange); font-size: 11px; line-height: 1.5; }
 

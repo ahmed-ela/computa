@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  composerPrimaryAction,
   dropQueuedPrompt,
   isValidPrompt,
   moveQueuedPrompt,
@@ -35,6 +36,26 @@ describe('prompt keyboard behavior', () => {
     expect(isValidPrompt('   ')).toBe(false);
     expect(isValidPrompt('a'.repeat(200_000))).toBe(true);
     expect(isValidPrompt('é'.repeat(100_001))).toBe(false);
+  });
+});
+
+describe('composer primary action', () => {
+  test('a running turn shows Stop until the user has a draft to queue', () => {
+    expect(composerPrimaryAction(true, '', true)).toBe('stop');
+    expect(composerPrimaryAction(true, 'Follow-up', true)).toBe('queue');
+    // A nonempty draft shows the arrow even while the draft is invalid.
+    expect(composerPrimaryAction(true, ' ', true)).toBe('queue');
+  });
+
+  test('an accepted follow-up restores Stop only if the draft clears and the turn is still running', () => {
+    const pending = { requestID: 'request-1', draft: 'Follow-up' };
+    const receipts = [{ id: 'request-1', accepted: true }];
+    const accepted = resolvePromptReceipt(pending.draft, pending, receipts)!;
+    expect(composerPrimaryAction(true, accepted.draft, true)).toBe('stop');
+    expect(composerPrimaryAction(false, accepted.draft, false)).toBe('send');
+    expect(composerPrimaryAction(false, accepted.draft, true)).toBe('queue');
+    const edited = resolvePromptReceipt('Different draft', pending, receipts)!;
+    expect(composerPrimaryAction(true, edited.draft, true)).toBe('queue');
   });
 });
 
