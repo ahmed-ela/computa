@@ -47,7 +47,7 @@ struct WebWorkspaceView: View {
         case .browser:
             guard let url = query.isEmpty ? EmbeddedBrowserURLPolicy.newTabURL : try? EmbeddedBrowserURLPolicy.searchURL(for: query) else { return }
             state.newWorkspaceBrowserTab(url: url)
-        case .chat:
+        case .agent:
             if state.isReviewPresented { state.toggleReview() }
             state.createTask()
             guard let task = state.selectedTask else { return }

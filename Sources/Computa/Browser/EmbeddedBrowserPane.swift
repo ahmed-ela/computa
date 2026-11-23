@@ -285,7 +285,7 @@ struct EmbeddedBrowserPane: View {
 }
 
 @MainActor
-private func tabIconAsset(_ name: String, fallback: String) -> Image {
+func tabIconAsset(_ name: String, fallback: String) -> Image {
     guard let url = WebUIResourceLocator.indexURL?.deletingLastPathComponent().appendingPathComponent("icons/\(name).svg"),
           let image = NSImage(contentsOf: url) else { return Image(systemName: fallback) }
     return Image(nsImage: image)

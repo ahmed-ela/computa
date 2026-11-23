@@ -83,7 +83,7 @@ struct BrowserAddressPalette: View {
         } choices: {
             if !choices.isEmpty { Divider() }
             ForEach(Array(choices.enumerated()), id: \.element.id) { index, row in
-                WorkspaceCommandRow(title: row.title, symbol: row.symbol, selected: selectedIndex == index) {
+                WorkspaceCommandRow(title: row.title, icon: Image(systemName: row.symbol), selected: selectedIndex == index) {
                     perform(row.id, text)
                 }
             }
