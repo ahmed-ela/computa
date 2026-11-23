@@ -30,10 +30,12 @@ struct EmbeddedBrowserPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            tabStrip
+            browserHeader
             Divider()
-            navigationBar
-            Divider()
+            if !usesSidebarTabs {
+                navigationBar
+                Divider()
+            }
 
             if let tab = selectedTab, let provider = tab.setupProvider,
                session.setupTab(for: provider)?.id == tab.id {
@@ -120,11 +122,10 @@ struct EmbeddedBrowserPane: View {
 
     private static let newTabIcon = tabIconAsset("new-browser-tab", fallback: "arrow.up.right.square")
 
-    private var tabStrip: some View {
+    private var browserHeader: some View {
         HStack(spacing: 4) {
             if usesSidebarTabs {
-                Text(selectedTab?.title ?? "New tab").font(.system(size: 12, weight: .medium)).lineLimit(1)
-                Spacer()
+                navigationBar
             } else {
                 tabPicker
             }
@@ -226,13 +227,13 @@ struct EmbeddedBrowserPane: View {
                 }
             }
             .padding(.horizontal, 12)
-            .frame(height: 34)
+            .frame(height: usesSidebarTabs ? max(18, min(28, tabRowHeight - 4)) : 34)
             .background(.primary.opacity(0.055), in: Capsule())
             .overlay { Capsule().strokeBorder(Color.secondary.opacity(addressFocused ? 0.7 : 0), lineWidth: 1.5).allowsHitTesting(false) }
         }
         .buttonStyle(.borderless)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
+        .padding(.horizontal, usesSidebarTabs ? 0 : 10)
+        .padding(.vertical, usesSidebarTabs ? 0 : 5)
     }
 
     private func emptyPage(hasTab: Bool) -> some View {

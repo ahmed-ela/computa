@@ -99,9 +99,11 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           aria-expanded={!snapshot.isTaskSidebarCollapsed} onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !snapshot.isTaskSidebarCollapsed })}>
           <Icon name="sidebar" size={16} /></Button>
       }
-      {collapsed && !nativeControls && <Button variant="ghost" size="icon-xs" aria-label={searchLabel}
+    </div>
+    <div className="sidebar-search-row">
+      {collapsed && <Button variant="ghost" size="icon-xs" className="sidebar-search-icon" aria-label={searchLabel}
         onClick={() => document.dispatchEvent(new Event('kolmogor-focus-tab-search'))}><Icon name="search" size={15} /></Button>}
-      {!collapsed && !nativeControls && <div className="task-search">
+      {!collapsed && <div className="task-search">
         <Icon name="search" size={15} />
         <input ref={searchField} type="text" id="task-search" aria-label={searchLabel} placeholder="Search"
           value={search} autoComplete="off" spellCheck={false}
@@ -114,7 +116,6 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     {(snapshot.mixesBrowserTabsInSidebar || snapshot.pendingApprovalCount > 0) && <nav className="primary-nav" aria-label="Primary">
       {snapshot.mixesBrowserTabsInSidebar && <Button variant="ghost" className="nav-button new-task-button" aria-label="New tab" title="New tab"
         onClick={() => {
-          if (nativeControls) post({ action: 'clearSidebarSearch' });
           setSearch('');
           post({ action: nativeHost ? 'openTabLauncher' : 'newWorkspaceBrowserTab' });
         }}>

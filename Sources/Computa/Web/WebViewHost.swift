@@ -98,7 +98,7 @@ struct WebWorkspaceView: View {
                         tabRowHeight: rowHeight,
                         usesSidebarTabs: browserPrimary,
                         showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
-                        titlebarLeadingInset: browserPrimary && compact && topInset > 0 ? 92 : 0,
+                        titlebarLeadingInset: browserPrimary && compact && topInset > 0 ? 64 : 0,
                         titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
@@ -229,7 +229,6 @@ private struct CodexWebView: NSViewRepresentable {
 #if DEBUG
         webView.isInspectable = true
 #endif
-        context.coordinator.sidebarSearch = webView.sidebarSearch
         webView.rail.onHover = setSidebarPeeked
         context.coordinator.attach(webView: webView)
         context.coordinator.update(snapshot: snapshot)
@@ -248,7 +247,6 @@ private struct CodexWebView: NSViewRepresentable {
         let compact = snapshot.isTaskSidebarCollapsed && !snapshot.isTaskSidebarPeeked
         let railWidth = compact ? SidebarRail.compactWidth : SidebarRail.expandedWidth
         shell?.trackSidebar(width: snapshot.isTaskSidebarCollapsed && sidebarControlsEnabled ? railWidth : 0)
-        shell?.sidebarSearch?.update(compact: compact, enabled: sidebarControlsEnabled)
         webView.needsLayout = true
         context.coordinator.update(snapshot: snapshot)
     }
@@ -275,7 +273,6 @@ private struct CodexWebView: NSViewRepresentable {
 
 @MainActor
 private final class WindowConfiguredWebView: WKWebView {
-    private(set) var sidebarSearch: SidebarTitlebarSearch?
     var openTabLauncher: (() -> Void)?
     let rail = SidebarRail()
     private var trackedWidth: CGFloat = 0
@@ -287,16 +284,7 @@ private final class WindowConfiguredWebView: WKWebView {
 
     func configureTitlebarControls(state: AppState) {
         self.state = state
-        let search = SidebarTitlebarSearch(state: state) { [weak self] query in
-            guard let self, WebUIResourceLocator.contains(self.url) else { return }
-            self.callAsyncJavaScript("document.dispatchEvent(new CustomEvent('kolmogor-tab-query', {detail: query}))",
-                                     arguments: ["query": query], in: nil, in: .page, completionHandler: nil)
-        }
-        sidebarSearch = search
-        let left = NSTitlebarAccessoryViewController()
-        left.layoutAttribute = .left
-        left.view = search
-        titlebarControls = [left]
+        titlebarControls = [accessory(.left, SidebarTitlebarToggle(state: state))]
         guard state.workspaceLayout.allowsBrowserSidePane else { return }
         titlebarControls.append(accessory(.right, BrowserTitlebarToggle(state: state)))
         compose.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
@@ -352,7 +340,7 @@ private final class WindowConfiguredWebView: WKWebView {
         guard let state, !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
         state.createTask()
         guard WebUIResourceLocator.contains(url) else { return }
-        sidebarSearch?.clear()
+        evaluateJavaScript("document.dispatchEvent(new Event('kolmogor-clear-chat-search'))")
     }
 
     private func accessory(_ edge: NSLayoutConstraint.Attribute, _ content: some View) -> NSTitlebarAccessoryViewController {

@@ -108,7 +108,7 @@ test('expanded chats have titles and activity indicators; the rail contains only
   expect(rows()).not.toContain('data-tab-kind="agent"');
 });
 
-test('search lives in the title bar and the compact fallback keeps an accessible search icon', () => {
+test('tab filtering lives below the title bar and keeps a compact search button', () => {
   const render = (nativeSidebarControls: boolean, isTaskSidebarCollapsed = false, search = '') =>
     renderToStaticMarkup(h(WorkspaceSidebar, {
       snapshot: { ...fixture(), mixesBrowserTabsInSidebar: false, nativeSidebarControls, isTaskSidebarCollapsed },
@@ -117,12 +117,13 @@ test('search lives in the title bar and the compact fallback keeps an accessible
   for (const nativeControls of [false, true]) {
     const html = render(nativeControls);
     const titlebar = html.split('class="window-drag-strip"')[1].split('</div>')[0];
-    expect(titlebar.includes('id="task-search"')).toBe(!nativeControls);
+    expect(titlebar).not.toContain('id="task-search"');
+    expect(html.indexOf('class="sidebar-search-row"')).toBeGreaterThan(html.indexOf('class="window-drag-strip"'));
     expect(titlebar.includes('aria-label="Collapse chat sidebar"')).toBe(!nativeControls);
-    if (!nativeControls) expect(render(false, true)).toContain('aria-label="Search chats"');
-    expect(html.match(/id="task-search"/g) ?? []).toHaveLength(nativeControls ? 0 : 1);
+    expect(render(nativeControls, true)).toContain('aria-label="Search chats"');
+    expect(html.match(/id="task-search"/g) ?? []).toHaveLength(1);
     expect(html).not.toContain('aria-label="Clear search"');
-    expect(render(nativeControls, false, 'Trip').includes('aria-label="Clear search"')).toBe(!nativeControls);
+    expect(render(nativeControls, false, 'Trip')).toContain('aria-label="Clear search"');
     expect(render(nativeControls, true)).not.toContain('id="task-search"');
   }
 });
