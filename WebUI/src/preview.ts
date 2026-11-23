@@ -44,7 +44,7 @@ const previewTasks: TaskSnapshot[] = [
     status: 'Completed', statusTone: 'green', updatedAt: now - 100,
     unreadCompletionID: 'preview-completion-formatting',
     workspace: previewWorkspace, model: modelCerebras, modelSelectable: true,
-    queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false, hasUnreadCompletion: true,
+    queuedPrompts: [], queuePaused: false, canStartQueuedTurn: true, canSteer: false, isBusy: false, hasUnreadCompletion: true,
     entries: [{
       id: 'preview-formatted-answer', kind: 'assistant', title: 'Kolmogor', timestamp: now - 100,
       workedForSeconds: 65,
@@ -77,7 +77,7 @@ const previewTasks: TaskSnapshot[] = [
     modelSelectable: true,
     queuedPrompts: [],
     queuePaused: false,
-    canSteer: false,
+    canStartQueuedTurn: true, canSteer: false,
     isBusy: false, hasUnreadCompletion: false,
     branch: 'design/dashboard-pass',
     entries: [
@@ -124,7 +124,7 @@ const previewTasks: TaskSnapshot[] = [
     modelSelectable: true,
     queuedPrompts: [],
     queuePaused: false,
-    canSteer: false,
+    canStartQueuedTurn: true, canSteer: false,
     isBusy: false, hasUnreadCompletion: false,
     entries: [],
   },
@@ -144,7 +144,7 @@ const previewTasks: TaskSnapshot[] = [
       { id: 'preview-queue-2', text: 'Then summarize the result in three concise bullets.', status: 'queued' },
     ],
     queuePaused: false,
-    canSteer: true,
+    canStartQueuedTurn: false, canSteer: true,
     isBusy: true, hasUnreadCompletion: false,
     entries: [
       {
@@ -185,7 +185,7 @@ const previewTasks: TaskSnapshot[] = [
       error: 'The local model disconnected before this prompt could start.',
     }],
     queuePaused: true,
-    canSteer: false,
+    canStartQueuedTurn: true, canSteer: false,
     isBusy: false, hasUnreadCompletion: false,
     entries: [
       {
@@ -212,7 +212,7 @@ const previewTasks: TaskSnapshot[] = [
     modelSelectable: true,
     queuedPrompts: [],
     queuePaused: false,
-    canSteer: false,
+    canStartQueuedTurn: true, canSteer: false,
     isBusy: false, hasUnreadCompletion: false,
     entries: [
       {
@@ -431,7 +431,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           summary: 'Draft task in the browser preview.', status: 'Draft', statusTone: 'neutral',
           updatedAt: Math.floor(Date.now() / 1000), workspace: previous?.workspace ?? previewWorkspace,
           model: previous?.model ?? snapshot.defaultModel, modelSelectable: true, entries: [],
-          queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false, hasUnreadCompletion: false,
+          queuedPrompts: [], queuePaused: false, canStartQueuedTurn: true, canSteer: false, isBusy: false, hasUnreadCompletion: false,
         };
         const order = snapshot.workspaceOrder ?? [];
         if (previous) {
@@ -528,7 +528,8 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         updateTask(task.id, (candidate) => ({
           ...candidate,
           queuedPrompts: candidate.queuedPrompts.map((item) => item.id === action.id ? {
-            ...item, text: prompt, status: 'queued', error: undefined,
+            ...item, text: prompt,
+            ...(item.error && item.deliveryUncertain !== false ? { status: 'failed' as const } : { status: 'queued' as const, error: undefined }),
           } : item),
         }));
         return;
@@ -566,13 +567,18 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         return;
       }
 
+      case 'sendQueuedPrompt':
       case 'steerQueuedPrompt': {
         const task = snapshot.tasks.find((candidate) => candidate.id === action.taskID);
         const queued = task?.queuedPrompts.find((item) => item.id === action.id);
-        if (!task?.canSteer || !queued || queued.status !== 'queued') return;
+        if (!task || !queued || queued.deliveryUncertain === true) return;
+        const steer = task.canSteer && queued.status === 'queued';
+        const start = action.action === 'sendQueuedPrompt' && task.canStartQueuedTurn &&
+          (queued.status === 'queued' || (queued.status === 'failed' && queued.deliveryUncertain === false));
+        if (!steer && !start) return;
         const timestamp = Math.floor(Date.now() / 1000);
         const entry: EntrySnapshot = {
-          id: issueID(), kind: 'user', title: 'You · steered', body: queued.text, timestamp,
+          id: issueID(), kind: 'user', title: steer ? 'You · steered' : 'You', body: queued.text, timestamp,
         };
         publish({
           ...snapshot,
@@ -615,7 +621,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           tasks: snapshot.tasks.map((candidate) => candidate.id === task.id ? {
             ...candidate, status: 'Waiting', statusTone: 'orange', modelSelectable: true,
             updatedAt: timestamp, entries: [...candidate.entries, entry],
-            queuePaused: true, canSteer: false, isBusy: false, hasUnreadCompletion: false,
+            queuePaused: true, canStartQueuedTurn: true, canSteer: false, isBusy: false, hasUnreadCompletion: false,
           } : candidate),
         });
         return;

@@ -123,6 +123,7 @@ export interface TaskSnapshot {
   entries: EntrySnapshot[];
   queuedPrompts: QueuedPromptSnapshot[];
   queuePaused: boolean;
+  canStartQueuedTurn: boolean;
   canSteer: boolean;
   isBusy: boolean;
   hasUnreadCompletion: boolean;
@@ -246,7 +247,7 @@ export type NativeAction =
   | { action: 'cancelQueueEdit'; taskID: string; id: string }
   | { action: 'deleteQueuedPrompt'; taskID: string; id: string }
   | { action: 'moveQueuedPrompt'; taskID: string; id: string; beforeID: string | null }
-  | { action: 'steerQueuedPrompt'; taskID: string; id: string }
+  | { action: 'sendQueuedPrompt' | 'steerQueuedPrompt'; taskID: string; id: string }
   | { action: 'resumeQueue'; taskID: string }
   | { action: 'toggleInspector' }
   | { action: 'setTaskSidebarPeeked'; peeked: boolean }

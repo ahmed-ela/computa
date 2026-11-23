@@ -113,6 +113,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
                 modelSelectable: state.canChangeModel(for: task.id),
                 queuedPrompts: task.id == state.selectedTaskID ? state.queuedPrompts[task.id, default: []] : [],
                 queuePaused: state.pausedQueueTaskIDs.contains(task.id),
+                canStartQueuedTurn: state.canStartQueuedTurn(taskID: task.id),
                 canSteer: state.canSteer(taskID: task.id),
                 isBusy: state.isBusy(taskID: task.id),
                 websiteSessionCleanupAvailable: state.canRetryWebsiteSessionCleanup(taskID: task.id),
@@ -183,6 +184,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
     let modelSelectable: Bool
     let queuedPrompts: [QueuedPrompt]
     let queuePaused: Bool
+    let canStartQueuedTurn: Bool
     let canSteer: Bool
     let isBusy: Bool
     let websiteSessionCleanupAvailable: Bool
@@ -203,6 +205,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         modelSelectable: Bool = true,
         queuedPrompts: [QueuedPrompt] = [],
         queuePaused: Bool = false,
+        canStartQueuedTurn: Bool = false,
         canSteer: Bool = false,
         isBusy: Bool = false,
         websiteSessionCleanupAvailable: Bool = false,
@@ -226,6 +229,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         self.modelSelectable = modelSelectable
         self.queuedPrompts = queuedPrompts
         self.queuePaused = queuePaused
+        self.canStartQueuedTurn = canStartQueuedTurn
         self.canSteer = canSteer
         self.isBusy = isBusy
         self.websiteSessionCleanupAvailable = websiteSessionCleanupAvailable
@@ -244,7 +248,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, summary, status, statusTone, updatedAt, workspace, model, modelSelectable, hasBoundThread
-        case queuedPrompts, queuePaused, canSteer, isBusy, websiteSessionCleanupAvailable
+        case queuedPrompts, queuePaused, canStartQueuedTurn, canSteer, isBusy, websiteSessionCleanupAvailable
         case websiteSessionCleanupInProgress, websiteSessionCleanupOutcome, websiteSessionCleanupReceiptSaved
         case activeTurnStartedAt, activeActivityGroupID, hasUnreadCompletion, unreadCompletionID, branch, entries
     }
@@ -263,6 +267,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         modelSelectable = try values.decode(Bool.self, forKey: .modelSelectable)
         queuedPrompts = try values.decode([QueuedPrompt].self, forKey: .queuedPrompts)
         queuePaused = try values.decode(Bool.self, forKey: .queuePaused)
+        canStartQueuedTurn = try values.decodeIfPresent(Bool.self, forKey: .canStartQueuedTurn) ?? false
         canSteer = try values.decode(Bool.self, forKey: .canSteer)
         isBusy = try values.decode(Bool.self, forKey: .isBusy)
         websiteSessionCleanupAvailable = try values.decode(Bool.self, forKey: .websiteSessionCleanupAvailable)
