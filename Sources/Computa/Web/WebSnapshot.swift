@@ -34,6 +34,7 @@ struct LauncherChat: Codable, Equatable, Sendable {
 
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
+    var isTaskSidebarPeeked = false
     var nativeSidebarControls = false
     var launcherChat: LauncherChat?
     let titlebarHeight: CGFloat?

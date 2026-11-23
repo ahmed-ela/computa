@@ -613,8 +613,11 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         if (!snapshot.review || snapshot.review.snapshot?.id !== action.snapshotID) return;
         publish({ ...snapshot, review: { ...snapshot.review, error: 'Preview only. No files or Git index were changed, and no external editor was opened.' } });
         return;
+      case 'setTaskSidebarPeeked':
+        if (snapshot.isTaskSidebarCollapsed) publish({ ...snapshot, isTaskSidebarPeeked: action.peeked });
+        return;
       case 'setTaskSidebarCollapsed':
-        publish({ ...snapshot, isTaskSidebarCollapsed: action.collapsed });
+        publish({ ...snapshot, isTaskSidebarCollapsed: action.collapsed, isTaskSidebarPeeked: false });
         return;
       case 'toggleBrowser':
         if (!snapshot.allowsBrowserSidePane) return;

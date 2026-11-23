@@ -28,6 +28,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private var latestContent: Data?
     private var nextRevision: UInt64 = 0
     private var pageIsReady = false
+    weak var sidebarSearch: SidebarTitlebarSearch?
     private let consumeLauncherChat: (String) -> Bool
     private let showAccessModeSettings: () -> Void
     private let openScreenRecordingSettings: (URL) -> Bool
@@ -104,6 +105,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 Self.diagnostic("client ready frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
             }
             pushLatestSnapshotIfReady()
+            sidebarSearch?.restoreQuery()
             state.refreshWebsiteModelsIfNeeded()
 
         case "webClientFailure":
@@ -229,6 +231,12 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "toggleInspector":
             state.isInspectorPresented.toggle()
 #endif
+
+        case "focusSidebarSearch":
+            sidebarSearch?.focusSearch()
+
+        case "clearSidebarSearch":
+            sidebarSearch?.clear()
 
         case "setTaskSidebarCollapsed":
             guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,

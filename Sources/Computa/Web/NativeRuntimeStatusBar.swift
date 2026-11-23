@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 struct NativeRuntimeStatusBar: View {
     @Bindable var state: AppState
+    var compact = false
     @State private var approvalErrorPresented = false
 
     var body: some View {
@@ -35,7 +36,7 @@ struct NativeRuntimeStatusBar: View {
             if state.accessMode == .askEveryTime, !state.resolvingApprovalIDs.isEmpty {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.mini)
-                    if !state.isTaskSidebarCollapsed { Text("Resolving approval…").font(.system(size: 11)) }
+                    if !compact { Text("Resolving approval…").font(.system(size: 11)) }
                 }
                 .foregroundStyle(.secondary)
                 .accessibilityElement(children: .ignore)
@@ -48,7 +49,7 @@ struct NativeRuntimeStatusBar: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "exclamationmark.triangle")
-                        if !state.isTaskSidebarCollapsed { Text("Action paused") }
+                        if !compact { Text("Action paused") }
                     }
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
@@ -73,8 +74,8 @@ struct NativeRuntimeStatusBar: View {
             // Temporarily hide context usage from the status bar.
             // ContextUsageIndicator(state: state)
         }
-        // Center the 22-point gear on the sidebar’s fixed 32-point icon column.
-        .padding(.leading, 21)
+        // Center the 22-point gear on the sidebar’s fixed 22-point icon column.
+        .padding(.leading, 11)
         .frame(maxWidth: .infinity, alignment: .leading)
         .lineLimit(1)
         .disabled(state.presentedSheet != nil)
