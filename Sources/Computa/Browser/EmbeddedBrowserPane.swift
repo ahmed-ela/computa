@@ -10,7 +10,6 @@ struct EmbeddedBrowserPane: View {
     var tabRowHeight: CGFloat = 32
     var usesSidebarTabs = false
     var showsNewTabButton = true
-    var titlebarLeadingInset: CGFloat = 0
     var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
     var canLoadModels = false
@@ -124,11 +123,7 @@ struct EmbeddedBrowserPane: View {
 
     private var browserHeader: some View {
         HStack(spacing: 4) {
-            if usesSidebarTabs {
-                navigationBar
-            } else {
-                tabPicker
-            }
+            if !usesSidebarTabs { tabPicker }
 
             if showsNewTabButton {
                 Button { createTab() } label: {
@@ -148,7 +143,6 @@ struct EmbeddedBrowserPane: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
         // The globe is a native accessory at the trailing edge of this row.
-        .padding(.leading, titlebarLeadingInset)
         .padding(.trailing, titlebarTrailingInset)
         .frame(height: tabRowHeight)
     }
@@ -182,31 +176,7 @@ struct EmbeddedBrowserPane: View {
 
     private var navigationBar: some View {
         HStack(spacing: 8) {
-            Button {
-                if let id = selectedTab?.id { session.goBack(tabID: id) }
-            } label: { Image(systemName: "chevron.left") }
-            .disabled(selectedTab?.canGoBack != true)
-            .help("Back")
-            .accessibilityLabel("Back")
-
-            Button {
-                if let id = selectedTab?.id { session.goForward(tabID: id) }
-            } label: { Image(systemName: "chevron.right") }
-            .disabled(selectedTab?.canGoForward != true)
-            .help("Forward")
-            .accessibilityLabel("Forward")
-
-            Button {
-                guard let tab = selectedTab else { return }
-                if tab.isLoading { session.stop(tabID: tab.id) }
-                else { session.reload(tabID: tab.id) }
-            } label: {
-                Image(systemName: selectedTab?.isLoading == true ? "xmark" : "arrow.clockwise")
-                    .frame(width: 16)
-            }
-            .disabled(selectedTab == nil || (selectedTab?.url == nil && selectedTab?.isLoading != true))
-            .help(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
-            .accessibilityLabel(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
+            BrowserHistoryButtons(session: session)
 
             HStack(spacing: 7) {
                 Image(systemName: addressFocused || address.isEmpty ? "magnifyingglass" : "globe")
@@ -227,13 +197,13 @@ struct EmbeddedBrowserPane: View {
                 }
             }
             .padding(.horizontal, 12)
-            .frame(height: usesSidebarTabs ? max(18, min(28, tabRowHeight - 4)) : 34)
+            .frame(height: 34)
             .background(.primary.opacity(0.055), in: Capsule())
             .overlay { Capsule().strokeBorder(Color.secondary.opacity(addressFocused ? 0.7 : 0), lineWidth: 1.5).allowsHitTesting(false) }
         }
         .buttonStyle(.borderless)
-        .padding(.horizontal, usesSidebarTabs ? 0 : 10)
-        .padding(.vertical, usesSidebarTabs ? 0 : 5)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
     }
 
     private func emptyPage(hasTab: Bool) -> some View {

@@ -90,6 +90,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
   };
   const searchField = useRef<HTMLInputElement | null>(null);
   const nativeControls = nativeHost && snapshot.nativeSidebarControls;
+  const currentPage = snapshot.workspaceBrowsers?.find(tab => tab.id === snapshot.primaryBrowserID);
   return <aside className="sidebar" aria-label="Workspace navigation"
     onMouseEnter={() => { if (!nativeHost && snapshot.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarPeeked', peeked: true }); }}
     onMouseLeave={() => { if (!nativeHost && snapshot.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarPeeked', peeked: false }); }}>
@@ -100,6 +101,11 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           <Icon name="sidebar" size={16} /></Button>
       }
     </div>
+    {nativeHost && currentPage && <button type="button" className="sidebar-address" aria-label="Website address" title="Edit website address (⌘L)"
+      onClick={() => post({ action: 'openBrowserAddress', id: currentPage.id })}>
+      <Icon name="browser" size={15} />
+      {!collapsed && <span>{currentPage.host || 'Search or enter URL'}</span>}
+    </button>}
     <div className="sidebar-search-row">
       {collapsed && <Button variant="ghost" size="icon-xs" className="sidebar-search-icon" aria-label={searchLabel}
         onClick={() => document.dispatchEvent(new Event('kolmogor-focus-tab-search'))}><Icon name="search" size={15} /></Button>}
