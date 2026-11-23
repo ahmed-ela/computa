@@ -17,6 +17,12 @@ Computa-owned website-data profile. Hiding the pane preserves tabs; open tabs
 are not restored after quitting. See [usage](docs/EMBEDDED-BROWSER.md#using-the-browser-pane) and
 [implementation](docs/EMBEDDED-BROWSER.md).
 
+- [ ] **Deferred: passkeys for third-party websites.** Revisit only if signing in
+  with passkeys inside Kolmogor becomes a priority. At that point, revisit
+  Apple Developer Organization enrollment, obtain the browser passkeys entitlement
+  and Developer ID profile, and verify a real website sign-in in the signed app.
+  [Draft implementation and test history](https://github.com/ahmed-ela/kolmogor/pull/73)
+
 ### Embedded-browser agent control
 
 - [x] Implement bounded isolated reading and typed semantic actions without
