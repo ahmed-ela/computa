@@ -29,7 +29,6 @@ struct SidebarTitlebarToggle: View {
     }
 }
 
-/// The same session controls serve the sidebar title bar and the split browser pane.
 struct BrowserHistoryButtons: View {
     let session: EmbeddedBrowserSession
 

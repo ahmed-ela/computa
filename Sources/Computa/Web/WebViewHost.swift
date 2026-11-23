@@ -280,7 +280,6 @@ private struct CodexWebView: NSViewRepresentable {
         let shell = webView as? WindowConfiguredWebView
         let compact = snapshot.isTaskSidebarCollapsed && !snapshot.isTaskSidebarPeeked
         let railWidth = compact ? SidebarRail.compactWidth : SidebarRail.expandedWidth
-        shell?.setBrowserHistoryVisible(snapshot.primaryBrowserID != nil && !compact && sidebarControlsEnabled)
         shell?.trackSidebar(width: snapshot.isTaskSidebarCollapsed && sidebarControlsEnabled ? railWidth : 0)
         webView.needsLayout = true
         context.coordinator.update(snapshot: snapshot)
@@ -310,7 +309,6 @@ private struct CodexWebView: NSViewRepresentable {
 private final class WindowConfiguredWebView: WKWebView {
     var openTabLauncher: (() -> Void)?
     var openBrowserAddress: (() -> Void)?
-    private var browserHistory: NSTitlebarAccessoryViewController?
     let rail = SidebarRail()
     private var trackedWidth: CGFloat = 0
     private var railArea: NSTrackingArea?
@@ -322,13 +320,6 @@ private final class WindowConfiguredWebView: WKWebView {
     func configureTitlebarControls(state: AppState) {
         self.state = state
         titlebarControls = [accessory(.left, SidebarTitlebarToggle(state: state))]
-        if state.mixesBrowserTabsInSidebar {
-            let history = accessory(.left, BrowserHistoryButtons(session: state.browserSession)
-                .padding(.horizontal, 4).frame(height: 22))
-            history.isHidden = true
-            browserHistory = history
-            titlebarControls.append(history)
-        }
         guard state.workspaceLayout.allowsBrowserSidePane else { return }
         titlebarControls.append(accessory(.right, BrowserTitlebarToggle(state: state)))
         compose.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
@@ -342,11 +333,6 @@ private final class WindowConfiguredWebView: WKWebView {
         compose.action = #selector(createChat)
         compose.isHidden = true
         addSubview(compose)
-    }
-
-    func setBrowserHistoryVisible(_ visible: Bool) {
-        let hidden = !visible
-        if let browserHistory, browserHistory.isHidden != hidden { browserHistory.isHidden = hidden }
     }
 
     func trackSidebar(width: CGFloat) {

@@ -70,8 +70,14 @@ test('the browser address is separate from the tab filter and follows the active
   expect(expanded).toContain('www.rail.example');
   snapshot.isTaskSidebarCollapsed = true;
   expect(render()).toContain('aria-label="Website address"');
+  expect(render()).not.toContain('aria-label="Browser navigation"');
+  snapshot.isTaskSidebarPeeked = true;
+  expect(render()).toContain('aria-label="Browser navigation"');
+  Object.assign(snapshot.workspaceBrowsers![0], { isLoading: true });
+  expect(render()).toContain('aria-label="Stop loading"');
   snapshot.primaryBrowserID = undefined;
   expect(render()).not.toContain('aria-label="Website address"');
+  expect(render()).not.toContain('aria-label="Browser navigation"');
 });
 
 test('a browser in the main pane does not acknowledge the previously selected agent', () => {

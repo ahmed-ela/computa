@@ -101,6 +101,18 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           <Icon name="sidebar" size={16} /></Button>
       }
     </div>
+    {nativeHost && currentPage && !collapsed && <div className="sidebar-browser-navigation" role="group" aria-label="Browser navigation">
+      <Button variant="ghost" size="icon-xs" aria-label="Back" title="Back" disabled={!currentPage.canGoBack}
+        onClick={() => post({ action: 'browserNavigation', id: currentPage.id, command: 'back' })}>
+        <Icon name="back" size={16} /></Button>
+      <Button variant="ghost" size="icon-xs" aria-label="Forward" title="Forward" disabled={!currentPage.canGoForward}
+        onClick={() => post({ action: 'browserNavigation', id: currentPage.id, command: 'forward' })}>
+        <Icon name="chevron" size={16} /></Button>
+      <Button variant="ghost" size="icon-xs" aria-label={currentPage.isLoading ? 'Stop loading' : 'Reload'}
+        title={currentPage.isLoading ? 'Stop loading' : 'Reload'} disabled={!currentPage.isLoading && !currentPage.canReload}
+        onClick={() => post({ action: 'browserNavigation', id: currentPage.id, command: currentPage.isLoading ? 'stop' : 'reload' })}>
+        <Icon name={currentPage.isLoading ? 'x' : 'reload'} size={15} /></Button>
+    </div>}
     {nativeHost && currentPage && <button type="button" className="sidebar-address" aria-label="Website address" title="Edit website address (⌘L)"
       onClick={() => post({ action: 'openBrowserAddress', id: currentPage.id })}>
       <Icon name="browser" size={15} />
