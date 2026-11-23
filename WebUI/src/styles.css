@@ -86,6 +86,9 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
   margin: 3px var(--sidebar-inset) 0; color: var(--text-secondary);
 }
 .sidebar-controls-row #task-sidebar-toggle { width: var(--sidebar-icon-track); height: 26px; padding: 0; }
+#task-sidebar-toggle { background: transparent; color: var(--text-secondary); }
+#task-sidebar-toggle:is(:hover, :focus-visible) { background: var(--surface-hover); color: var(--text); }
+#task-sidebar-toggle .icon { stroke-width: 1.65; }
 .sidebar-browser-navigation { display: flex; align-items: center; gap: 2px; }
 .sidebar-browser-navigation button { width: 28px; height: 26px; padding: 0; }
 .sidebar-address {

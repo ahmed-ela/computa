@@ -112,7 +112,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
   const sidebarToggle = <Button variant="ghost" size="icon-xs" id="task-sidebar-toggle"
     aria-label={toggleLabel} title={toggleLabel} aria-expanded={!snapshot.isTaskSidebarCollapsed}
     onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !snapshot.isTaskSidebarCollapsed })}>
-    <Icon name="sidebar" size={16} /></Button>;
+    <Icon name={snapshot.isTaskSidebarCollapsed ? 'sidebarOpen' : 'sidebarClose'} size={16} /></Button>;
   return <aside className="sidebar" aria-label="Workspace navigation"
     onMouseEnter={() => { if (!nativeHost && snapshot.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarPeeked', peeked: true }); }}
     onMouseLeave={() => { if (!nativeHost && snapshot.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarPeeked', peeked: false }); }}>
