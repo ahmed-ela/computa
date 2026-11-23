@@ -247,9 +247,12 @@ final class AppState {
         automationPermissions = permissionClient.current()
         let snapshot = workspaceTabs.saved
         let existingIDs = Set(tasks.map(\.id))
-        let drafts = workspaceTabs.order.compactMap { tab -> AgentTask? in
-            guard tab.kind == .agent, !existingIDs.contains(tab.id) else { return nil }
-            return snapshot?.drafts[tab.id]?.task(id: tab.id)
+        let savedDrafts = snapshot?.drafts ?? [:]
+        let openIDs = workspaceTabs.order.filter { $0.kind == .agent }.map(\.id)
+        let closedIDs = Set(savedDrafts.keys).subtracting(openIDs).sorted()
+        let drafts = (openIDs + closedIDs).compactMap { id -> AgentTask? in
+            guard !existingIDs.contains(id), let draft = savedDrafts[id] else { return nil }
+            return draft.task(id: id)
         }
         restoredWorkspaceDraftIDs = Set(drafts.map(\.id))
         self.tasks = tasks + drafts
@@ -308,7 +311,11 @@ final class AppState {
         let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
         let pages = browserSession.restorablePages
         let pageIDs = Set(pages.map { $0.id.uuidString })
-        var drafts: [String: SavedWorkspace.Draft] = [:]
+        var drafts = waitingForWorkspaceHistory ? (previous?.drafts ?? [:]).filter { byID[$0.key] == nil } : [:]
+        for task in tasks where task.status == .draft && task.runtimeThreadID == nil && task.entries.isEmpty
+            && workspaceTabs.agent(for: task) != nil {
+            drafts[task.id] = SavedWorkspace.Draft(task)
+        }
         let order = workspaceTabs.order.compactMap { tab -> WorkspaceTabID? in
             if tab.kind == .browser { return pageIDs.contains(tab.id) ? tab : nil }
             guard let task = byID[tab.id] else {
@@ -324,7 +331,7 @@ final class AppState {
             ?? (waitingForWorkspaceHistory && taskSelectionRevision == 0 ? previous?.selectedAgent : nil)
         let selectedPage = browserSession.workspaceBrowserTabs.first { $0.id == browserSession.selectedTabID }
             .flatMap { pageIDs.contains($0.workspaceID.uuidString) ? $0.workspaceID : nil }
-        workspaceTabs.save(SavedWorkspace(order: order, selectedAgent: selected, drafts: drafts,
+        workspaceTabs.save(SavedWorkspace(agents: workspaceTabs.agents.isEmpty ? nil : workspaceTabs.agents, order: order, selectedAgent: selected, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
             pages: pages, selectedPage: selectedPage, browserIsPrimary: workspaceTabs.browserIsPrimary && selectedPage != nil,
             showsBrowserPane: isBrowserPresented))
@@ -1157,6 +1164,7 @@ final class AppState {
               let index = tasks.firstIndex(where: { $0.id == taskID }),
               tasks[index].runtimeThreadID == nil
                 || ChatUnreadCompletionStore.identity(tasks[index].runtimeThreadID) == stable else { return false }
+        workspaceTabs.bindAgent(draft: taskID, thread: stable)
         tasks[index].runtimeThreadID = stable
         saveWorkspace()
         return true
@@ -1198,6 +1206,40 @@ final class AppState {
             presentedSheet = nil
             isAPIProvidersPresented = false
         }
+    }
+
+    func canStartFresh(_ task: AgentTask) -> Bool {
+        task.id == selectedTaskID && primaryBrowserID == nil && !isShuttingDown && !approvalGateBlocksInteraction
+            && presentedSheet == nil && task.runtimeThreadID != nil && !isBusy(taskID: task.id)
+            && workspaceTabs.order.contains(.agent(task.id)) && queuedPrompts[task.id, default: []].isEmpty
+            && currentWebsiteSessionCleanupReceipt(taskID: task.id)?.outcome != .unconfirmed
+    }
+
+    func startFresh(taskID: String) {
+        guard let old = selectedTask, old.id == taskID, canStartFresh(old) else { return }
+        let fresh = AgentTask(title: "Untitled task", summary: "", status: .draft, workspace: old.workspace, model: old.model)
+        tasks.insert(fresh, at: 0)
+        workspaceTabs.startConversation(after: old, newID: fresh.id)
+        updateSelectedConversation(fresh.id, acknowledging: false)
+    }
+
+    func saveAgentSettings(taskID: String, name: String, instructions: String) {
+        guard !isShuttingDown, !approvalGateBlocksInteraction, primaryBrowserID == nil,
+              let task = selectedTask, task.id == taskID, name.utf8.count <= 256, instructions.utf8.count <= 4096 else { return }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !name.contains(where: { $0.isNewline }) else { return }
+        var agent = workspaceTabs.agent(for: task) ?? .init(name: name)
+        agent.name = name
+        agent.instructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        workspaceTabs.setAgent(agent, for: task)
+    }
+
+    func openAgentHistory(taskID: String, conversationID: String) {
+        guard let task = selectedTask, task.id == taskID, primaryBrowserID == nil,
+              workspaceTabs.agent(for: task)?.history.contains(where: { $0.id == conversationID }) == true else { return }
+        let local = tasks.first { $0.runtimeThreadID?.lowercased() == conversationID.lowercased() }?.id
+        let saved = savedChats.first { $0.id.lowercased() == conversationID.lowercased() }?.id
+        if let id = local ?? saved { selectSidebarChat(id) }
     }
 
     func createTask() {
@@ -2153,6 +2195,9 @@ final class AppState {
             if let index = tasks.firstIndex(where: { $0.id == task.id }) {
                 var replacement = task
                 if replacement.runtimeThreadID == nil { replacement.runtimeThreadID = tasks[index].runtimeThreadID }
+                if tasks[index].runtimeThreadID == nil, let thread = replacement.runtimeThreadID {
+                    workspaceTabs.bindAgent(draft: task.id, thread: thread)
+                }
                 tasks[index] = replacement
             } else {
                 tasks.insert(task, at: 0)
@@ -2494,8 +2539,8 @@ final class AppState {
         profile?.mark(.appCleanupFinished, since: cleanupStarted)
         guard !Task.isCancelled else { return .notDelivered("Submission was cancelled before delivery.") }
         retireWebsiteModelSelections()
-        let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty,
+        let userText = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !userText.isEmpty,
               !isShuttingDown,
               let index = tasks.firstIndex(where: { $0.id == taskID }),
               !isBusy(taskID: taskID)
@@ -2503,6 +2548,11 @@ final class AppState {
             return .notDelivered("Submission was rejected before delivery.")
         }
 
+        let task = tasks[index]
+        let newThread = task.runtimeThreadID == nil
+        let instructions = newThread ? workspaceTabs.agent(for: task)?.instructions ?? "" : ""
+        // Persist exactly what is sent as user input so a resumed turn keeps the same scope and digest.
+        let prompt = instructions.isEmpty ? userText : userText + "\n\nSaved agent instructions\n" + instructions
         var entry = TimelineEntry(
             kind: .user,
             title: "You",
@@ -2511,7 +2561,7 @@ final class AppState {
         websiteSessionCleanupReceipts.removeValue(forKey: taskID)
         entry.activityGroupID = entry.id
         tasks[index].entries.append(entry)
-        if AgentRestartStore.originalRequest == nil { tasks[index].summary = prompt }
+        if AgentRestartStore.originalRequest == nil { tasks[index].summary = userText }
         tasks[index].status = .waiting
         tasks[index].updatedAt = .now
         if selectedTaskID == taskID {
@@ -2529,6 +2579,9 @@ final class AppState {
             do {
                 // Bind the persisted native choice to this submission, rather
                 // than racing a global mode update against another task.
+                if newThread, workspaceTabs.agent(for: task)?.history.isEmpty == false, task.workspace.hasPrefix("/") {
+                    try await runtime.configureWorkspace(path: task.workspace, forTaskID: taskID)
+                }
                 profile?.mark(.runtimeSubmitRequested)
                 try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode)
                 profile?.mark(.runtimeSubmitFinished)

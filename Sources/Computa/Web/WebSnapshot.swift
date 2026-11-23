@@ -49,6 +49,9 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let primaryBrowserID: String?
     let selectedTaskID: String?
     let selectedEntryID: String?
+    let selectedAgentProfile: SavedWorkspace.Agent?
+    let agentNames: [String: String]
+    let canStartFresh: Bool
     let savedChats: [SavedChatSummary]
     let savedChatSelection: AppState.SavedChatSelection?
     let tasks: [WebTaskSnapshot]
@@ -88,6 +91,13 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         primaryBrowserID = state.primaryBrowserID?.uuidString
         selectedTaskID = state.selectedTaskID
         selectedEntryID = state.selectedEntryID
+        selectedAgentProfile = state.selectedTask.flatMap { state.workspaceTabs.agent(for: $0) }
+        canStartFresh = state.selectedTask.map(state.canStartFresh) ?? false
+        var names = state.workspaceTabs.agents.mapValues(\.name)
+        for task in state.tasks {
+            if let agent = state.workspaceTabs.agent(for: task) { names[task.id] = agent.name }
+        }
+        agentNames = names
         savedChats = state.savedChats
         savedChatSelection = state.savedChatSelection
         tasks = state.tasks.map { task in

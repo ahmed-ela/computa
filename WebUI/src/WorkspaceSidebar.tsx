@@ -19,19 +19,20 @@ export function sidebarIsCompact(snapshot: AppSnapshot): boolean {
 }
 
 export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
-  const collapsed = sidebarIsCompact(snapshot);
+  const needle = search.trim().toLocaleLowerCase();
   const available = new Map<string, Item>();
   for (const task of snapshot.tasks) {
-    if (collapsed && !isTaskActive(task)) continue;
+    const title = snapshot.agentNames?.[task.id] || (task.title === 'Untitled task' ? 'New agent' : task.title);
     const ref: WorkspaceTab = { kind: 'agent', id: task.id };
-    available.set(keyOf(ref), { ref, task, title: task.title, open: false, updatedAt: task.updatedAt,
-      searchText: [task.title, task.summary, task.workspace].join(' ') });
+    available.set(keyOf(ref), { ref, task, title, open: false, updatedAt: task.updatedAt,
+      searchText: [title, task.title, task.summary, task.workspace].join(' ') });
   }
-  if (!collapsed) {
+  if (needle) {
     for (const chat of snapshot.savedChats ?? []) {
       const ref: WorkspaceTab = { kind: 'agent', id: chat.id };
+      const title = snapshot.agentNames?.[chat.id.toLowerCase()] || chat.title;
       if (!available.has(keyOf(ref))) available.set(keyOf(ref), {
-        ref, title: chat.title, open: false, updatedAt: chat.updatedAt, searchText: [chat.title, chat.workspace].join(' '),
+        ref, title, open: false, updatedAt: chat.updatedAt, searchText: [title, chat.title, chat.workspace].join(' '),
       });
     }
   }
@@ -52,10 +53,10 @@ export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
       available.delete(key);
     }
   }
+  if (!needle) return open;
   const closed = Array.from(available.values()).filter(item => item.ref.kind === 'agent');
   const items = open.concat(closed.sort((a, b) => b.updatedAt - a.updatedAt));
-  const needle = search.trim().toLocaleLowerCase();
-  return needle ? items.filter(item => item.searchText.toLocaleLowerCase().includes(needle)) : items;
+  return items.filter(item => item.searchText.toLocaleLowerCase().includes(needle));
 }
 
 function SiteIcon({ tab }: { tab: WorkspaceBrowser }) {
@@ -98,7 +99,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       const index = items.findIndex(item => keyOf(item.ref) === selectedTab);
       if (index >= 0) list.scrollTop = index * sidebarRowHeight;
     }
-  }, [selectedTab, snapshot.isTaskSidebarCollapsed, snapshot.isTaskSidebarPeeked]);
+  }, [selectedTab]);
   const noun = snapshot.mixesBrowserTabsInSidebar ? 'tabs' : 'chats';
   const searchLabel = 'Search ' + noun;
   const select = (item: Item) => {
@@ -175,15 +176,14 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           onDragOver={event => { if (item.open && dragging.current) event.preventDefault(); }}
           onDrop={event => { event.preventDefault(); if (item.open && dragging.current) post({ action: 'moveWorkspaceTab', tab: dragging.current, target: item.ref }); dragging.current = null; }}>
           <Button variant="ghost" className={'task-row' + (collapsed ? ' agent-rail-button' : '') + (selected ? ' selected' : '')}
-            aria-label={label} title={label} data-agent-status={collapsed ? status : undefined}
+            aria-label={label} title={label} data-agent-status={status}
             data-tab-kind={item.ref.kind} aria-current={selected ? 'page' : undefined} onClick={() => select(item)}
             onKeyDown={event => {
               if (!item.open || !event.altKey || !['ArrowUp','ArrowDown'].includes(event.key)) return;
               event.preventDefault(); const neighbor = items[start + index + (event.key === 'ArrowUp' ? -1 : 1)];
               if (neighbor?.open) post({ action: 'moveWorkspaceTab', tab: item.ref, target: neighbor.ref });
             }}>
-            {item.browser ? <SiteIcon tab={item.browser} /> : collapsed
-              ? <AgentStatusIcon taskID={item.ref.id} /> : null}
+            {item.browser ? <SiteIcon tab={item.browser} /> : <AgentStatusIcon taskID={item.ref.id} />}
             {!collapsed && <span className="task-row-title">{item.title}</span>}
             {!collapsed && item.task && <TaskActivityIndicator task={item.task} now={now} />}
           </Button>

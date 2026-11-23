@@ -46,6 +46,19 @@ struct SavedWorkspace: Codable, Equatable {
         }
     }
 
+    struct Agent: Codable, Equatable {
+        struct Conversation: Codable, Equatable {
+            let id: String
+            let title: String
+        }
+        var id = UUID()
+        var name: String
+        var instructions: String = ""
+        var history: [Conversation] = []
+    }
+
+    // Keyed by the current conversation, initially the draft ID and then the bound thread ID.
+    var agents: [String: Agent]? = nil
     var order: [WorkspaceTabID]
     var selectedAgent: String?
     var drafts: [String: Draft]
@@ -64,6 +77,7 @@ final class WorkspaceTabs {
     @ObservationIgnored private(set) var saved: SavedWorkspace?
     @ObservationIgnored var onChange: (() -> Void)?
     private(set) var order: [WorkspaceTabID]
+    private(set) var agents: [String: SavedWorkspace.Agent]
     private var hasSavedAgents: Bool
     var browserIsPrimary = false {
         didSet { if oldValue != browserIsPrimary { onChange?() } }
@@ -73,6 +87,7 @@ final class WorkspaceTabs {
         self.defaults = defaults
         let snapshot = defaults.data(forKey: Self.snapshotKey).flatMap { try? JSONDecoder().decode(SavedWorkspace.self, from: $0) }
         saved = snapshot
+        agents = snapshot?.agents ?? [:]
         let legacy = defaults.stringArray(forKey: Self.legacyKey)
         hasSavedAgents = snapshot != nil || legacy != nil
         var seen = Set<WorkspaceTabID>()
@@ -90,6 +105,32 @@ final class WorkspaceTabs {
         guard !order.contains(tab) else { return }
         order.insert(tab, at: 0)
         onChange?()
+    }
+
+    func agent(for task: AgentTask) -> SavedWorkspace.Agent? {
+        agents[(task.runtimeThreadID ?? task.id).lowercased()] ?? agents[task.id.lowercased()]
+    }
+
+    func setAgent(_ agent: SavedWorkspace.Agent, for task: AgentTask) {
+        agents[(task.runtimeThreadID ?? task.id).lowercased()] = agent
+        onChange?()
+    }
+
+    func bindAgent(draft: String, thread: String) {
+        guard draft.lowercased() != thread.lowercased(), let agent = agents.removeValue(forKey: draft.lowercased()) else { return }
+        agents[thread.lowercased()] = agent
+    }
+
+    func startConversation(after task: AgentTask, newID: String) {
+        guard let index = order.firstIndex(of: .agent(task.id)) else { return }
+        let previous = task.runtimeThreadID ?? task.id
+        var agent = self.agent(for: task) ?? .init(name: task.title)
+        agent.history.insert(.init(id: previous, title: task.title), at: 0)
+        agents.removeValue(forKey: previous.lowercased())
+        agents.removeValue(forKey: task.id.lowercased())
+        agents[newID.lowercased()] = agent
+        order[index] = .agent(newID)
+        // AppState publishes selection and saves the complete replacement together.
     }
 
     func close(_ tab: WorkspaceTabID) {

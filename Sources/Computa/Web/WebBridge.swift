@@ -172,6 +172,19 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             else { return }
             state.selectedEntryID = id
 
+        case "startFresh":
+            guard let id = body["taskID"] as? String else { return }
+            state.startFresh(taskID: id)
+
+        case "saveAgentSettings":
+            guard let id = body["taskID"] as? String, let name = body["name"] as? String,
+                  let instructions = body["instructions"] as? String else { return }
+            state.saveAgentSettings(taskID: id, name: name, instructions: instructions)
+
+        case "openAgentHistory":
+            guard let id = body["taskID"] as? String, let conversation = body["conversationID"] as? String else { return }
+            state.openAgentHistory(taskID: id, conversationID: conversation)
+
         case "createTask":
             state.createTask()
 
