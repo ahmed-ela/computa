@@ -13,8 +13,12 @@ type Item = {
 type Action = (action: NativeAction) => void;
 const keyOf = (ref: WorkspaceTab) => ref.kind + ':' + ref.id;
 
+export function sidebarIsCompact(snapshot: AppSnapshot): boolean {
+  return Boolean(snapshot.isTaskSidebarCollapsed && !snapshot.isTaskSidebarPeeked);
+}
+
 export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
-  const collapsed = snapshot.isTaskSidebarCollapsed;
+  const collapsed = sidebarIsCompact(snapshot);
   const available = new Map<string, Item>();
   for (const task of snapshot.tasks) {
     if (collapsed && !isTaskActive(task)) continue;
@@ -68,9 +72,9 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
   const tabList = useRef<HTMLElement | null>(null);
   useEffect(() => {
     tabList.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-  }, [snapshot.selectedTaskID, snapshot.primaryBrowserID, snapshot.isTaskSidebarCollapsed]);
+  }, [snapshot.selectedTaskID, snapshot.primaryBrowserID, snapshot.isTaskSidebarCollapsed, snapshot.isTaskSidebarPeeked]);
   const active = snapshot.tasks.some(isTaskActive);
-  const collapsed = Boolean(snapshot.isTaskSidebarCollapsed);
+  const collapsed = sidebarIsCompact(snapshot);
   useEffect(() => {
     if (collapsed || !active) return;
     return startSidebarClock(setNow, { now: () => Date.now() / 1000, everySecond: (tick) => {
@@ -86,31 +90,39 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
   };
   const searchField = useRef<HTMLInputElement | null>(null);
   const nativeControls = nativeHost && snapshot.nativeSidebarControls;
-  return <aside className="sidebar" aria-label="Workspace navigation">
+  return <aside className="sidebar" aria-label="Workspace navigation"
+    onMouseEnter={() => { if (!nativeHost && snapshot.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarPeeked', peeked: true }); }}
+    onMouseLeave={() => { if (!nativeHost && snapshot.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarPeeked', peeked: false }); }}>
     <div className="window-drag-strip" style={snapshot.titlebarHeight ? { height: snapshot.titlebarHeight + 'px' } : undefined}>
       {!nativeControls &&
-        <Button variant="ghost" size="icon-xs" aria-label={collapsed ? 'Expand chat sidebar' : 'Collapse chat sidebar'}
-          aria-expanded={!collapsed} onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !collapsed })}>
+        <Button variant="ghost" size="icon-xs" aria-label={snapshot.isTaskSidebarCollapsed ? 'Expand chat sidebar' : 'Collapse chat sidebar'}
+          aria-expanded={!snapshot.isTaskSidebarCollapsed} onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !snapshot.isTaskSidebarCollapsed })}>
           <Icon name="sidebar" size={16} /></Button>
       }
+      {collapsed && !nativeControls && <Button variant="ghost" size="icon-xs" aria-label={searchLabel}
+        onClick={() => document.dispatchEvent(new Event('kolmogor-focus-tab-search'))}><Icon name="search" size={15} /></Button>}
+      {!collapsed && !nativeControls && <div className="task-search">
+        <Icon name="search" size={15} />
+        <input ref={searchField} type="text" id="task-search" aria-label={searchLabel} placeholder="Search"
+          value={search} autoComplete="off" spellCheck={false}
+          onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setSearch(''); } }}
+          onInput={event => setSearch((event.currentTarget as HTMLInputElement).value)} />
+        {search && <Button variant="ghost" size="icon-xs" className="clear-search" aria-label="Clear search" title="Clear search"
+          onClick={() => { setSearch(''); searchField.current?.focus(); }}><Icon name="x" size={13} /></Button>}
+      </div>}
     </div>
     {(snapshot.mixesBrowserTabsInSidebar || snapshot.pendingApprovalCount > 0) && <nav className="primary-nav" aria-label="Primary">
-      {snapshot.mixesBrowserTabsInSidebar && <Button variant="outline" className="nav-button new-task-button" aria-label="New tab" title="New tab"
-        onClick={() => { setSearch(''); post({ action: nativeHost ? 'openTabLauncher' : 'newWorkspaceBrowserTab' }); }}>
+      {snapshot.mixesBrowserTabsInSidebar && <Button variant="ghost" className="nav-button new-task-button" aria-label="New tab" title="New tab"
+        onClick={() => {
+          if (nativeControls) post({ action: 'clearSidebarSearch' });
+          setSearch('');
+          post({ action: nativeHost ? 'openTabLauncher' : 'newWorkspaceBrowserTab' });
+        }}>
         <span className="new-browser-tab-icon" aria-hidden="true" />
         <span className={collapsed ? 'sr-only' : undefined}>New tab</span></Button>}
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
     </nav>}
-    {!collapsed && <div className="task-search">
-      <Icon name="search" size={15} />
-      <input ref={searchField} type="text" id="task-search" aria-label={searchLabel} placeholder={searchLabel}
-        value={search} autoComplete="off" spellCheck={false}
-        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setSearch(''); } }}
-        onInput={event => setSearch((event.currentTarget as HTMLInputElement).value)} />
-      {search && <Button variant="ghost" size="icon-xs" className="clear-search" aria-label="Clear search" title="Clear search"
-        onClick={() => { setSearch(''); searchField.current?.focus(); }}><Icon name="x" size={13} /></Button>}
-    </div>}
     <nav ref={tabList} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats'}>
       {items.map((item,index) => {
         const status = item.task && sidebarAgentStatus(item.task);
@@ -134,7 +146,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
             {!collapsed && <span className="task-row-title">{item.title}</span>}
             {!collapsed && item.task && <TaskActivityIndicator task={item.task} now={now} />}
           </Button>
-          {item.open && <Button variant="ghost" size="icon-xs" className="workspace-close" aria-label={'Close tab: ' + item.title}
+          {item.open && !collapsed && <Button variant="ghost" size="icon-xs" className="workspace-close" aria-label={'Close tab: ' + item.title}
             title="Close tab" onClick={() => post({ action: 'closeWorkspaceTab', tab: item.ref })}><Icon name="x" size={12} /></Button>}
         </div>;
       })}

@@ -108,7 +108,7 @@ test('expanded chats have titles and activity indicators; the rail contains only
   expect(rows()).not.toContain('data-tab-kind="agent"');
 });
 
-test('the expanded sidebar has one search field and only the fallback collapse button in its title bar', () => {
+test('search lives in the title bar and the compact fallback keeps an accessible search icon', () => {
   const render = (nativeSidebarControls: boolean, isTaskSidebarCollapsed = false, search = '') =>
     renderToStaticMarkup(h(WorkspaceSidebar, {
       snapshot: { ...fixture(), mixesBrowserTabsInSidebar: false, nativeSidebarControls, isTaskSidebarCollapsed },
@@ -117,10 +117,23 @@ test('the expanded sidebar has one search field and only the fallback collapse b
   for (const nativeControls of [false, true]) {
     const html = render(nativeControls);
     const titlebar = html.split('class="window-drag-strip"')[1].split('</div>')[0];
-    expect(titlebar.match(/aria-label="[^"]+"/g) ?? []).toEqual(nativeControls ? [] : ['aria-label="Collapse chat sidebar"']);
-    expect(html.match(/id="task-search"/g)).toHaveLength(1);
+    expect(titlebar.includes('id="task-search"')).toBe(!nativeControls);
+    expect(titlebar.includes('aria-label="Collapse chat sidebar"')).toBe(!nativeControls);
+    if (!nativeControls) expect(render(false, true)).toContain('aria-label="Search chats"');
+    expect(html.match(/id="task-search"/g) ?? []).toHaveLength(nativeControls ? 0 : 1);
     expect(html).not.toContain('aria-label="Clear search"');
-    expect(render(nativeControls, false, 'Trip')).toContain('aria-label="Clear search"');
+    expect(render(nativeControls, false, 'Trip').includes('aria-label="Clear search"')).toBe(!nativeControls);
     expect(render(nativeControls, true)).not.toContain('id="task-search"');
   }
+});
+
+test('hover reveals the open tabs and their close buttons without changing the pinned preference', () => {
+  const snapshot = { ...fixture(), isTaskSidebarCollapsed: true };
+  const render = (isTaskSidebarPeeked: boolean) => renderToStaticMarkup(h(WorkspaceSidebar, {
+    snapshot: { ...snapshot, isTaskSidebarPeeked }, search: '', setSearch: () => {}, post: () => {}, nativeHost: true,
+  })).html;
+  expect(render(false)).not.toContain('class="workspace-close"');
+  expect(render(true)).toContain('aria-label="Close tab: Trips"');
+  expect(render(true)).toContain('id="task-search"');
+  expect(render(false)).toContain('agent-rail');
 });

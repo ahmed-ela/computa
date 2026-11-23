@@ -184,6 +184,7 @@ export interface AppSnapshot {
   showToolPayloads: boolean;
   isInspectorPresented: boolean;
   isTaskSidebarCollapsed?: boolean;
+  isTaskSidebarPeeked?: boolean;
   isBrowserPresented: boolean;
   isSettingsPresented: boolean;
   isReviewPresented?: boolean;
@@ -195,7 +196,7 @@ export type NativeAction =
   | { action: 'selectTask'; id: string }
   | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }
-  | { action: 'createTask' | 'newWorkspaceBrowserTab' | 'openTabLauncher' }
+  | { action: 'createTask' | 'newWorkspaceBrowserTab' | 'openTabLauncher' | 'focusSidebarSearch' | 'clearSidebarSearch' }
   | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab'; tab: WorkspaceTab }
   | { action: 'moveWorkspaceTab'; tab: WorkspaceTab; target: WorkspaceTab }
   | { action: 'chooseTaskWorkspace'; taskID: string }
@@ -212,6 +213,7 @@ export type NativeAction =
   | { action: 'steerQueuedPrompt'; taskID: string; id: string }
   | { action: 'resumeQueue'; taskID: string }
   | { action: 'toggleInspector' }
+  | { action: 'setTaskSidebarPeeked'; peeked: boolean }
   | { action: 'setTaskSidebarCollapsed'; collapsed: boolean }
   | { action: 'toggleBrowser' }
   | { action: 'toggleReview' }

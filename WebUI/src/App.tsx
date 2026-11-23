@@ -13,7 +13,7 @@ import {
 } from '@octanejs/shadcn/DropdownMenu';
 import { Icon } from './Icon';
 import { useConversationDrafts } from './conversationDrafts';
-import { WorkspaceSidebar } from './WorkspaceSidebar';
+import { WorkspaceSidebar, sidebarIsCompact } from './WorkspaceSidebar';
 import { copyText } from './clipboard';
 import { ReviewPanel } from './ReviewPanel';
 import { ModelLabel, ModelSelector } from './ModelSelector';
@@ -964,6 +964,7 @@ export function App() {
   function focusSearch() {
     const current = currentSnapshot.current;
     if (!current || current.isSettingsPresented || current.pendingApprovalCount) return;
+    if (nativeHost && current.nativeSidebarControls) { post({ action: 'focusSidebarSearch' }); return; }
     const field = document.getElementById('task-search');
     if (field && !current.isTaskSidebarCollapsed) { field.focus(); return; }
     focusSearchOnExpand.current = true;
@@ -976,9 +977,9 @@ export function App() {
   }
 
   useEffect(() => {
-    const clearSearch = () => setSearch('');
-    document.addEventListener('kolmogor-clear-chat-search', clearSearch);
-    return () => document.removeEventListener('kolmogor-clear-chat-search', clearSearch);
+    const receiveQuery = (event: Event) => setSearch((event as CustomEvent<string>).detail);
+    document.addEventListener('kolmogor-tab-query', receiveQuery);
+    return () => document.removeEventListener('kolmogor-tab-query', receiveQuery);
   }, []);
 
   useEffect(() => {
@@ -992,7 +993,11 @@ export function App() {
       if (!nativeHost && event.key === ',') { event.preventDefault(); post({ action: 'showSettings' }); }
     };
     document.addEventListener('keydown', handleKey);
-    return () => document.removeEventListener('keydown', handleKey);
+    document.addEventListener('kolmogor-focus-tab-search', focusSearch);
+    return () => {
+      document.removeEventListener('keydown', handleKey);
+      document.removeEventListener('kolmogor-focus-tab-search', focusSearch);
+    };
   }, [snapshot?.isSettingsPresented, snapshot?.isTaskSidebarCollapsed, snapshot?.pendingApprovalCount]);
 
   useEffect(() => {
@@ -1011,7 +1016,8 @@ export function App() {
   return (
     <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined} data-native-sidebar-controls={snapshot.nativeSidebarControls || undefined}
       data-browser-primary={snapshot.primaryBrowserID && !snapshot.isSettingsPresented ? (nativeHost ? "native" : "preview") : undefined}
-      data-sidebar-collapsed={snapshot.isTaskSidebarCollapsed ? 'true' : undefined}
+      data-sidebar-peeked={snapshot.isTaskSidebarCollapsed && snapshot.isTaskSidebarPeeked || undefined}
+      data-sidebar-collapsed={sidebarIsCompact(snapshot) ? 'true' : undefined}
       data-allows-side-pane={snapshot.allowsBrowserSidePane || undefined}
       data-browser-pane={nativeHost && snapshot.isBrowserPresented && !snapshot.isSettingsPresented ? 'open' : undefined}>
       <div className="app-panels" inert={snapshot.isSettingsPresented || snapshot.pendingApprovalCount > 0}>
