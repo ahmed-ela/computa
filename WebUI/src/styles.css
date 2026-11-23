@@ -113,7 +113,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .section-count { margin-left: 7px; font-variant-numeric: tabular-nums; }
 /* Let WebKit draw the macOS overlay and honor the user’s scrollbar preference. */
 .task-list { min-height: 0; flex: 1; overflow: hidden auto; padding-block: 2px 14px; }
-.task-row { width: 100%; height: 27px; margin-bottom: 1px; padding: 0 6px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--text); }
+.task-row { width: 100%; height: calc(var(--sidebar-row-height) - 1px); margin-bottom: 1px; padding: 0 6px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--text); }
 .task-row[data-tab-kind="agent"]:not(.agent-rail-button) {
   grid-template-columns: minmax(0, 1fr) auto; padding-inline-start: 16px; column-gap: 6px;
 }
@@ -537,7 +537,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .app-shell[data-browser-primary="native"] .sidebar { width: 100%; flex-basis: 100%; }
 .app-shell[data-browser-primary] :is(.workspace,.inspector) { display: none; }
 .preview-browser-content { display: grid; flex: 1; align-content: center; justify-items: center; gap: 10px; }
-.workspace-tab-row { position: relative; width: 100%; }
+.workspace-tab-row { position: relative; width: 100%; height: var(--sidebar-row-height); }
 .workspace-tab-row .workspace-close { top: 50%; transform: translateY(-50%); opacity: 0; pointer-events: none; }
 .workspace-tab-row:hover .workspace-close, .workspace-tab-row:focus-within .workspace-close { opacity: 1; pointer-events: auto; }
 .site-favicon, .site-favicon-spinner, .site-initial, .new-browser-tab-icon { width: 16px; height: 16px; flex: 0 0 16px; }

@@ -25,7 +25,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private weak var state: AppState?
     private weak var webView: WKWebView?
     private var latestSnapshot: WebUISnapshot?
-    private var latestContent: Data?
     private var nextRevision: UInt64 = 0
     private var pageIsReady = false
     private let consumeLauncherChat: (String) -> Bool
@@ -64,16 +63,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         var contentSnapshot = baseSnapshot
         contentSnapshot.revision = 0
 
-        guard let content = try? Self.encoder.encode(contentSnapshot), content != latestContent else {
-            return
-        }
-
-        latestContent = content
+        guard latestSnapshot != contentSnapshot else { return }
+        latestSnapshot = contentSnapshot
         nextRevision &+= 1
-        var versionedSnapshot = baseSnapshot
-        versionedSnapshot.revision = nextRevision
-        latestSnapshot = versionedSnapshot
-        Self.diagnostic("snapshot revision=\(nextRevision) tasks=\(versionedSnapshot.tasks.count) ready=\(pageIsReady)")
+        Self.diagnostic("snapshot revision=\(nextRevision) tasks=\(contentSnapshot.tasks.count) ready=\(pageIsReady)")
         pushLatestSnapshotIfReady()
     }
 
@@ -417,14 +410,14 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     private func pushLatestSnapshotIfReady() {
         guard pageIsReady, var snapshot = latestSnapshot, let webView else { return }
+        snapshot.revision = nextRevision
         snapshot.nativeSidebarControls = webView.window?.styleMask.contains(.titled) == true
 
         do {
-            let data = try Self.encoder.encode(snapshot)
-            let object = try JSONSerialization.jsonObject(with: data)
+            let data = try JSONEncoder().encode(snapshot)
             webView.callAsyncJavaScript(
-                "window.__localCodexReceiveState?.(snapshot)",
-                arguments: ["snapshot": object],
+                "window.__localCodexReceiveState?.(JSON.parse(json))",
+                arguments: ["json": String(decoding: data, as: UTF8.self)],
                 in: nil,
                 in: .page
             ) { [weak self] result in
@@ -498,10 +491,4 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         }
         return .cancel
     }
-
-    private static let encoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        return encoder
-    }()
 }
