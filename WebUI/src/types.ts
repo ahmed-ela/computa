@@ -162,6 +162,19 @@ export interface AgentProfile {
   history: {id: string; title: string}[];
 }
 
+export interface CodexCLIUsageWindow {
+  usedPercent: number;
+  windowDurationMins?: number;
+  resetsAt?: number;
+}
+
+export interface CodexCLIUsageBucket {
+  id: string;
+  label?: string;
+  primary?: CodexCLIUsageWindow;
+  secondary?: CodexCLIUsageWindow;
+}
+
 export interface AppSnapshot {
   selectedAgentProfile?: AgentProfile;
   agentNames?: Record<string, string>;
@@ -193,6 +206,8 @@ export interface AppSnapshot {
   selectedModelAvailableForNewPrompt?: boolean;
   canRefreshWebsiteModels?: boolean;
   websiteModelsError?: string;
+  codexCLIUsage?: CodexCLIUsageBucket[];
+  codexCLIUsageRefreshing?: boolean;
   showToolPayloads: boolean;
   isInspectorPresented: boolean;
   isTaskSidebarCollapsed?: boolean;
@@ -220,6 +235,7 @@ export type NativeAction =
   | { action: 'moveWorkspaceTab'; tab: WorkspaceTab; target: WorkspaceTab }
   | { action: 'chooseTaskWorkspace'; taskID: string }
   | { action: 'prepareWebsiteModel'; taskID: string }
+  | { action: 'refreshCodexCLIUsage'; taskID: string }
   | { action: 'launcherChatReady'; taskID: string }
   | { action: 'submitPrompt'; requestID: string; taskID: string; prompt: string }
   | { action: 'interruptTask'; taskID: string }

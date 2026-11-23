@@ -67,6 +67,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let websiteModelsRefreshing: Bool
     let canRefreshWebsiteModels: Bool
     let websiteModelsError: String?
+    let codexCLIUsage: [CodexCLIUsage.Bucket]?
+    let codexCLIUsageRefreshing: Bool?
     let showToolPayloads: Bool
     let isInspectorPresented: Bool
     let isTaskSidebarCollapsed: Bool
@@ -151,6 +153,9 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         websiteModelsRefreshing = state.websiteModelsRefreshing
         canRefreshWebsiteModels = state.canRefreshWebsiteModels
         websiteModelsError = state.websiteModelsError
+        let showsCodexCLIUsage = state.selectedTask.flatMap { InstalledCodexCLI.slug($0.model) } != nil
+        codexCLIUsage = showsCodexCLIUsage ? state.codexCLIUsage : nil
+        codexCLIUsageRefreshing = showsCodexCLIUsage ? state.codexCLIUsageRefreshing : nil
         showToolPayloads = state.showToolPayloads
         isInspectorPresented = state.isInspectorPresented
         isTaskSidebarCollapsed = state.isTaskSidebarCollapsed

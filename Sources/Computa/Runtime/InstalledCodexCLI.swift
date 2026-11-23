@@ -1,6 +1,107 @@
 import Darwin
 import Foundation
 
+/// Only quota data is passed to the composer; the RPC's account, plan, and credit details stay out of the web bridge.
+enum CodexCLIUsage {
+    struct Window: Codable, Equatable, Sendable {
+        let usedPercent: Int
+        let windowDurationMins: Int?
+        let resetsAt: Int?
+    }
+
+    struct Bucket: Codable, Equatable, Sendable {
+        let id: String
+        let label: String?
+        let primary: Window?
+        let secondary: Window?
+    }
+
+    struct Report: Sendable {
+        var revision: UInt64 = 0
+        var buckets: [Bucket]?
+    }
+
+    private struct WireBucket: Decodable {
+        let limitId: String?
+        let limitName: String?
+        let primary: Window?
+        let secondary: Window?
+
+        func bucket(key: String? = nil, includeEmpty: Bool = false) -> Bucket? {
+            guard includeEmpty || primary != nil || secondary != nil else { return nil }
+            let id = key ?? limitId
+            return Bucket(id: id.flatMap { $0.isEmpty ? nil : $0 } ?? "codex",
+                          label: limitName, primary: primary, secondary: secondary)
+        }
+    }
+
+    static func read(_ data: Data) throws -> [Bucket] {
+        struct Result: Decodable {
+            let rateLimits: WireBucket?
+            let rateLimitsByLimitId: [String: WireBucket]?
+        }
+        struct Reply: Decodable { let result: Result }
+        let result = try JSONDecoder().decode(Reply.self, from: data).result
+        let buckets = result.rateLimitsByLimitId?.compactMap { key, value in value.bucket(key: key) } ?? []
+        if !buckets.isEmpty { return buckets }
+        return result.rateLimits?.bucket().map { [$0] } ?? []
+    }
+
+    static func notification(_ params: [String: Any]) -> Bucket? {
+        struct Params: Decodable { let rateLimits: WireBucket }
+        guard let fields = params["rateLimits"] as? [String: Any], fields["primary"] != nil || fields["secondary"] != nil,
+              let data = try? JSONSerialization.data(withJSONObject: params),
+              let message = try? JSONDecoder().decode(Params.self, from: data) else { return nil }
+        // A snapshot with cleared windows supersedes an older read for this bucket.
+        return message.rateLimits.bucket(includeEmpty: true)
+    }
+
+    /// Reads replace the account snapshot; notifications replace only their own bucket.
+    /// A notification delivered during a read wins over the response for that bucket.
+    struct Session {
+        private(set) var report = Report()
+        private(set) var readID: UUID?
+        private var updatesDuringRead: [String: Bucket] = [:]
+
+        mutating func beginRead() -> UUID {
+            let id = UUID()
+            readID = id
+            updatesDuringRead.removeAll()
+            return id
+        }
+
+        mutating func completeRead(_ id: UUID, buckets: [Bucket]?) -> Report {
+            guard id == readID else { return report }
+            var snapshot: [String: Bucket] = [:]
+            for bucket in buckets ?? [] { snapshot[bucket.id] = bucket }
+            snapshot.merge(updatesDuringRead) { _, newer in newer }
+            readID = nil
+            updatesDuringRead.removeAll()
+            return publish(snapshot.isEmpty && buckets == nil ? nil : Array(snapshot.values))
+        }
+
+        mutating func apply(_ bucket: Bucket) -> Report {
+            if readID != nil { updatesDuringRead[bucket.id] = bucket }
+            return publish((report.buckets ?? []).filter { $0.id != bucket.id } + [bucket])
+        }
+
+        mutating func invalidate() -> Report {
+            readID = nil
+            updatesDuringRead.removeAll()
+            return publish(nil)
+        }
+
+        private mutating func publish(_ buckets: [Bucket]?) -> Report {
+            let visible = buckets?.filter { $0.primary != nil || $0.secondary != nil }
+            report = Report(revision: report.revision + 1, buckets: visible?.sorted {
+                if ($0.id == "codex") != ($1.id == "codex") { return $0.id == "codex" }
+                return $0.id < $1.id
+            })
+            return report
+        }
+    }
+}
+
 enum InstalledCodexCLI {
     static let route = "cli/codex"
     static let prefix = route + "/model/"

@@ -21,6 +21,7 @@ protocol AgentRuntimeClient: Sendable {
 
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption]
     func installedCLIModels() async throws -> [LocalModelOption]
+    func readCodexCLIUsage() async -> CodexCLIUsage.Report
     func loadTasks() async throws -> [AgentTask]
     func loadWorkspaceHistory(including threadIDs: Set<String>) async throws -> WorkspaceHistory
     func readSavedChat(_ id: String) async throws -> AgentTask
@@ -55,6 +56,7 @@ extension AgentRuntimeClient {
     func readSavedChat(_ id: String) async throws -> AgentTask { throw CocoaError(.fileNoSuchFile) }
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { throw AgentCLIError.unavailable("CLI catalog unavailable.") }
     func installedCLIModels() async throws -> [LocalModelOption] { throw InstalledCodexCLI.Failure.missing }
+    func readCodexCLIUsage() async -> CodexCLIUsage.Report { .init() }
     /// Older adapters may keep their restricted submission path. They cannot
     /// silently claim Full access without implementing its execution policy.
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
@@ -137,6 +139,7 @@ enum AgentRuntimeEvent: Sendable {
     case reasoningMessagesDiscarded(taskID: AgentTask.ID)
     case taskStatusChanged(taskID: AgentTask.ID, status: TaskStatus)
     case contextUsageUpdated(taskID: AgentTask.ID, usage: RuntimeContextUsage?)
+    case codexCLIUsageUpdated(CodexCLIUsage.Report)
     case contextCompactionChanged(taskID: AgentTask.ID, state: RuntimeCompactionState)
     case approvalRequested(ActionApprovalRequest)
     case approvalResolved(requestID: String)
