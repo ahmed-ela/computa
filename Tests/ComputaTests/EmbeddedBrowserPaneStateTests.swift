@@ -575,7 +575,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.startRuntimeIfNeeded()
         let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1110, height: 720),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = hosting
         window.orderBack(nil)
@@ -643,11 +643,13 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try await requireDOM("getComputedStyle(document.querySelector('.workspace')).display !== 'none' && innerWidth >= 600")
         state.selectWorkspaceTab(.browser(ref))
         try await requireDOM("!!document.querySelector('[data-browser-primary=native] .site-favicon') && innerWidth === 230")
+        let lights = try trafficLightFrames(in: window)
+        let railWidth = lights.green.maxX + lights.red.minX
         let expandedCenters = try await sidebarIconCenters(in: chat)
         let toggle = "#task-sidebar-toggle"
         try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=true] .lucide-panel-left-close')")
         _ = try await chat.evaluateJavaScript("document.querySelector('\(toggle)').click(); true")
-        try await requireDOM("!!document.querySelector('.agent-rail .site-favicon') && innerWidth === 44")
+        try await requireDOM("!!document.querySelector('.agent-rail .site-favicon') && innerWidth === \(railWidth)")
         try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=false] .lucide-panel-left-open')")
         try await requireDOM("!document.querySelector('.workspace-close')")
         func hover(_ entered: Bool, expectedWidth: CGFloat) throws {
@@ -661,7 +663,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             if entered { owner.mouseEntered(with: event) } else { owner.mouseExited(with: event) }
         }
         try await requireDOM("!!document.querySelector('.sidebar-search-icon') && !document.querySelector('#task-search')")
-        try hover(true, expectedWidth: 44)
+        try hover(true, expectedWidth: railWidth)
         try await requireDOM("innerWidth === 230 && !!document.querySelector('.workspace-close')")
         let peekedCenters = try await sidebarIconCenters(in: chat)
         XCTAssertEqual(peekedCenters, expandedCenters)
@@ -674,22 +676,26 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             """)
         try await requireDOM("!!document.querySelector('.sidebar-search-row #task-search')")
         try hover(false, expectedWidth: 230)
-        try await requireDOM("innerWidth === 44 && !document.querySelector('.workspace-close')")
+        try await requireDOM("innerWidth === \(railWidth) && !document.querySelector('.workspace-close')")
         XCTAssertTrue(state.isTaskSidebarCollapsed)
         for _ in 0..<3 {
-            try hover(true, expectedWidth: 44)
+            try hover(true, expectedWidth: railWidth)
             try await requireDOM("""
                 innerWidth === 230 && document.querySelectorAll('.task-row').length === 2
                   && document.querySelectorAll('.workspace-tab-row').length < 80
                 """)
             try hover(false, expectedWidth: 230)
-            try await requireDOM("innerWidth === 44 && document.querySelectorAll('.agent-rail .task-row').length === 2")
+            try await requireDOM("innerWidth === \(railWidth) && document.querySelectorAll('.agent-rail .task-row').length === 2")
         }
         let fieldPreserved = try await page.evaluateJavaScript("document.querySelector('input').value === 'B12' && location.hash === '#seat'") as? Bool
         XCTAssertEqual(fieldPreserved, true)
         XCTAssertTrue(session.webView(for: id) === page)
         let collapsedCenters = try await sidebarIconCenters(in: chat)
         XCTAssertEqual(collapsedCenters, expandedCenters)
+        for (name, point) in collapsedCenters {
+            XCTAssertEqual(point[0], lights.yellow.midX, accuracy: 0.5, name)
+        }
+        XCTAssertEqual(chat.bounds.width - lights.green.maxX, lights.red.minX, accuracy: 0.5)
         let center = try XCTUnwrap(collapsedCenters["Trip agent"])
         let crop = WKSnapshotConfiguration()
         crop.rect = NSRect(x: center[0] - 10, y: center[1] - 10, width: 20, height: 20)
@@ -715,7 +721,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             """)
         try await requireDOM("document.querySelectorAll('[data-tab-kind]').length === 1")
         state.isTaskSidebarCollapsed = true
-        try await requireDOM("innerWidth === 44 && document.querySelectorAll('.agent-rail .task-row').length === 1 && !!document.querySelector('.agent-rail [aria-label=\"Trip agent\"]')")
+        try await requireDOM("innerWidth === \(railWidth) && document.querySelectorAll('.agent-rail .task-row').length === 1 && !!document.querySelector('.agent-rail [aria-label=\"Trip agent\"]')")
         _ = try await chat.evaluateJavaScript("document.dispatchEvent(new KeyboardEvent('keydown', {key:'k', metaKey:true, bubbles:true})); true")
         try await requireDOM("innerWidth === 230")
         try await requireDOM("document.activeElement?.id === 'task-search' && document.activeElement.value === 'Trip agent'")
@@ -1134,7 +1140,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.selectWorkspaceTab(.browser(try XCTUnwrap(session.humanTab(id: tab)?.workspaceID)))
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 740),
-                              styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
@@ -1167,7 +1173,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 _ = try await sidebar.evaluateJavaScript("\(toggle).click(); true")
             }
             await settleLayout(host)
-            let expectedWidth = collapsed ? 44 : 230
+            let lights = try trafficLightFrames(in: window)
+            let expectedWidth = collapsed ? lights.green.maxX + lights.red.minX : 230
             let inSidebar = await waitForScriptBool(on: sidebar, script: """
                 (() => {
                     const field = \(pill), filter = document.querySelector('.sidebar-search-row');
@@ -1188,8 +1195,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                     if (!row || button?.parentElement !== row || strip.querySelector('button')) return false;
                     const r = row.getBoundingClientRect(), t = button.getBoundingClientRect();
                     if (r.top < strip.getBoundingClientRect().bottom || r.bottom > \(pill).getBoundingClientRect().top
-                        || t.left !== r.left || innerWidth - r.right > 8 || r.left > 8) return false;
+                        || t.left !== r.left || Math.abs(t.left + t.width / 2 - \(lights.yellow.midX)) > 0.5) return false;
                     if (\(collapsed)) return !nav && row.querySelectorAll('button').length === 1;
+                    if (innerWidth - r.right > 8) return false;
                     if (!nav) return false;
                     const n = nav.getBoundingClientRect();
                     return n.left > t.right && n.right === r.right && Math.abs((n.top+n.bottom-t.top-t.bottom)/2) <= 1
@@ -1395,6 +1403,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let toggle = NSPoint(x: bounds.minX + 14, y: bounds.midY)
         try await clickInWindow(at: toggle, window: window)
         XCTAssertTrue(state.isTaskSidebarCollapsed)
+        let lights = try trafficLightFrames(in: window)
         let compactEnd = button.convert(button.bounds, to: nil).maxX
         let working = await waitForScriptBool(on: chat, script: """
             document.querySelectorAll('.agent-rail .task-row').length === 25
@@ -1402,7 +1411,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 && document.querySelectorAll('.bot-sparkle-star').length === 50
                 && getComputedStyle(document.querySelector('[data-agent-status=working] .bot-sparkle-pass')).animationName
                     === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-pass')
-                && document.querySelector('.sidebar').getBoundingClientRect().width === 44
+                && document.querySelector('.sidebar').getBoundingClientRect().width === \(lights.green.maxX + lights.red.minX)
                 && document.querySelector('.toolbar-title-block').getBoundingClientRect().left >= \(compactEnd)
                 && !document.querySelector('#task-search')
             """)
@@ -1500,6 +1509,58 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 && !!document.querySelector('[data-native-sidebar-controls=true]') && !document.querySelector('.sidebar [aria-label="New agent"]')
             """)
         XCTAssertTrue(idle)
+    }
+
+    @MainActor
+    func testTrafficLightRelayoutMovesDividerAndIconColumnInTheOpenWindow() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
+        state.isTaskSidebarCollapsed = true
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        await settleLayout(host)
+        let chat = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        func check() async throws {
+            let lights = try trafficLightFrames(in: window)
+            let aligned = await waitForScriptBool(on: chat, script: """
+                (() => {
+                  const rail = document.querySelector('.sidebar')?.getBoundingClientRect();
+                  const icon = document.querySelector('.sidebar-search-icon svg')?.getBoundingClientRect();
+                  return rail && icon && Math.abs(rail.right - \(lights.green.maxX) - \(lights.red.minX)) <= 0.5
+                    && Math.abs(icon.left + icon.width / 2 - \(lights.yellow.midX)) <= 0.5;
+                })()
+                """)
+            XCTAssertTrue(aligned, "Rail gaps should match and Search should align with the yellow button.")
+        }
+        try await check()
+        let original = try trafficLightFrames(in: window)
+        // Deliberately asymmetric spacing catches implementations that assume
+        // a fixed width, or use the group's midpoint instead of the yellow button.
+        for (kind, offset) in [(NSWindow.ButtonType.closeButton, CGFloat(2)), (.miniaturizeButton, 9), (.zoomButton, 12)] {
+            let button = try XCTUnwrap(window.standardWindowButton(kind))
+            button.setFrameOrigin(NSPoint(x: button.frame.minX + offset, y: button.frame.minY))
+        }
+        let moved = try trafficLightFrames(in: window)
+        XCTAssertEqual(moved.green.maxX - original.green.maxX, 12, accuracy: 0.5)
+        XCTAssertEqual(moved.yellow.midX - original.yellow.midX, 9, accuracy: 0.5)
+        try await check()
+    }
+
+    @MainActor
+    private func trafficLightFrames(in window: NSWindow) throws -> (red: CGRect, yellow: CGRect, green: CGRect) {
+        func rect(_ kind: NSWindow.ButtonType) throws -> CGRect {
+            let button = try XCTUnwrap(window.standardWindowButton(kind))
+            return button.convert(button.bounds, to: nil)
+        }
+        return try (rect(.closeButton), rect(.miniaturizeButton), rect(.zoomButton))
     }
 
     @MainActor

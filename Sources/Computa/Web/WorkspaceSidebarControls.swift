@@ -1,8 +1,27 @@
 import SwiftUI
 
+struct SidebarRailGeometry: Codable, Equatable, Sendable {
+    let width: CGFloat
+    let iconCenter: CGFloat
+
+    // A borderless window or a web-only preview has no native traffic lights.
+    static let fallback = Self(width: 44, iconCenter: 22)
+
+    @MainActor
+    static func measured(in window: NSWindow) -> Self? {
+        func frame(_ kind: NSWindow.ButtonType) -> CGRect? {
+            guard let button = window.standardWindowButton(kind), button.window === window,
+                  !button.isHiddenOrHasHiddenAncestor, !button.bounds.isEmpty else { return nil }
+            return button.convert(button.bounds, to: nil)
+        }
+        guard let red = frame(.closeButton), let yellow = frame(.miniaturizeButton), let green = frame(.zoomButton),
+              red.minX >= 0, red.maxX <= yellow.minX, yellow.maxX <= green.minX else { return nil }
+        return Self(width: green.maxX + red.minX, iconCenter: yellow.midX)
+    }
+}
+
 @MainActor
 final class SidebarRail: NSResponder {
-    static let compactWidth: CGFloat = 44
     static let expandedWidth: CGFloat = 230
     var onHover: (Bool) -> Void = { _ in }
     override func mouseEntered(with event: NSEvent) { onHover(true) }

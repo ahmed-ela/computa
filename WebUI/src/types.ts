@@ -190,6 +190,7 @@ export interface AppSnapshot {
   workspaceBrowsers?: WorkspaceBrowser[];
   primaryBrowserID?: string;
   titlebarHeight?: number;
+  sidebarRail?: { width: number; iconCenter: number };
   selectedTaskID?: string;
   selectedEntryID?: string;
   tasks: TaskSnapshot[];
