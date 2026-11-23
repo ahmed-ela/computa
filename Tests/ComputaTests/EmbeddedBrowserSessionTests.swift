@@ -859,7 +859,7 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
     }
 
     func testAsyncBlankPopupPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {
-        let session = EmbeddedBrowserSession(persistent: false)
+        let session = EmbeddedBrowserSession(persistent: false, maximumPopups: 1)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
                               styleMask: [], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -900,6 +900,10 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNil(child.configuration.urlSchemeHandler(forURLScheme: "localcodex-app"))
         let childReady = try await script(child, "return !!document.getElementById('popup-ready') && !!window.opener;")
         XCTAssertEqual(childReady, Data("true".utf8))
+        let ordinary = try session.createTab(select: false)
+        session.closeTab(ordinary)
+        let nested = try await script(child, "return window.open('about:blank', 'nested') === null;")
+        XCTAssertEqual(nested, Data("true".utf8))
         _ = try await script(child, "window.opener.postMessage('popup-finished', window.opener.location.origin); return true;")
         let deadline = ContinuousClock.now + .seconds(5)
         var received = false
@@ -919,6 +923,31 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNil(child.navigationDelegate)
         let closed = try await script(opener, "return window.fixtureChild.closed && !!document.getElementById('ready');")
         XCTAssertEqual(closed, Data("true".utf8))
+        try session.presentTab(openerID, in: host)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(2, session: session)
+        XCTAssertNotEqual(session.selectedTabID, childTab.id)
+    }
+
+    func testClosingSelectedPopupInMixedWorkspaceReturnsToItsOpener() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
+        let openerID = try session.createTab()
+        let opener = try XCTUnwrap(session.webView(for: openerID))
+        let openerTab = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: openerID)).workspaceID)
+        _ = try session.createTab()
+        state.selectWorkspaceTab(openerTab)
+        try await loadPopupFixture(opener)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(3, session: session)
+        let popup = try XCTUnwrap(session.tabs.first(where: \.isPopup))
+        XCTAssertEqual(state.selectedWorkspaceTab, .browser(popup.workspaceID))
+        let view = try XCTUnwrap(session.webView(for: popup.id))
+        _ = try await script(view, "window.close(); return true;")
+        try await waitForPopupCount(2, session: session)
+        XCTAssertEqual(state.selectedWorkspaceTab, openerTab)
+        XCTAssertTrue(session.webView(for: openerID) === opener)
     }
 
     func testTargetBlankPopupAndCloseCallbacksPreserveOpenerAndBackgroundSelection() async throws {
@@ -954,19 +983,25 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
     }
 
     func testPopupCapAndInferenceOwnershipRejectWithoutReplacingTabs() async throws {
-        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 2)
+        let session = EmbeddedBrowserSession(persistent: false, maximumPopups: 1)
         defer { session.shutdown() }
         let openerID = try session.createTab()
         let opener = try XCTUnwrap(session.webView(for: openerID))
         try await loadPopupFixture(opener)
+        let opened = try await script(opener, "return window.open('about:blank', 'first') !== null;")
+        XCTAssertEqual(opened, Data("true".utf8))
+        let popup = try XCTUnwrap(session.tabs.first(where: \.isPopup))
         let selected = try session.createTab()
         let generation = session.documentGeneration(for: openerID)
         let rejected = try await script(opener, "return window.open('about:blank', 'over-cap') === null;")
         XCTAssertEqual(rejected, Data("true".utf8))
-        XCTAssertEqual(session.tabs.map(\.id), [openerID, selected])
+        XCTAssertEqual(session.tabs.map(\.id), [openerID, popup.id, selected])
         XCTAssertEqual(session.selectedTabID, selected)
         XCTAssertEqual(session.documentGeneration(for: openerID), generation)
-        XCTAssertTrue(session.tabs[0].error?.contains("up to 2 tabs") == true)
+        XCTAssertEqual(session.tabs[0].error, EmbeddedBrowserSession.Failure.popupLimit(1).localizedDescription)
+        session.closeTab(popup.id)
+        let reopened = try await script(opener, "return window.open('about:blank', 'replacement') !== null;")
+        XCTAssertEqual(reopened, Data("true".utf8))
 
         let modelSession = EmbeddedBrowserSession(persistent: false)
         defer { modelSession.shutdown() }
@@ -1048,20 +1083,104 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNil(session.selectedTabID)
     }
 
-    func testTabCapRejectsWithoutAllocatingOrChangingSelection() throws {
-        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 2)
+    func testUserTabsCanGrowPastEightWhileAgentSlotsRemainBounded() throws {
+        let session = EmbeddedBrowserSession(persistent: false, maximumAgentTabs: 2)
         defer { session.shutdown() }
-        _ = try session.createTab()
-        let selected = try session.createTab()
-        XCTAssertThrowsError(try session.createTab()) {
+        let human = try (0..<12).map { _ in try session.createTab() }
+        let tool = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
+        _ = try session.createUnloadedModelTabForTesting()
+        XCTAssertThrowsError(try session.createUnloadedModelTabForTesting()) {
             XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .tabLimit(2))
         }
-        XCTAssertEqual(session.tabs.count, 2)
-        XCTAssertEqual(session.selectedTabID, selected)
-        XCTAssertNotNil(session.errorMessage)
-        session.closeTab(selected)
-        XCTAssertNoThrow(try session.createTab())
-        XCTAssertNil(session.errorMessage)
+        let extra = try session.createTab(select: false)
+        XCTAssertEqual(session.workspaceBrowserTabs.map(\.id), human + [extra])
+        XCTAssertEqual(session.selectedTabID, human.last)
+        session.closeTab(tool)
+        XCTAssertNoThrow(try session.createUnloadedModelTabForTesting())
+    }
+
+    func testPressureReleasesReadOnlyResourceButKeepsLiveEditsAndTabOrder() async throws {
+        let text = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "read-only marker",
+            finalMIME: "text/plain", cacheControl: "private, max-age=60")
+        let editor = try InitialRequestHTTPFixture(finalStatus: 200,
+            finalHTML: "<textarea id='draft'></textarea><div contenteditable id='rich'></div>",
+            cacheControl: "private, max-age=60")
+        let textURL = try await text.start().appendingPathComponent("human/final")
+        let editURL = try await editor.start().appendingPathComponent("human/final")
+        defer { text.stop(); editor.stop() }
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let textID = try session.createTab(url: textURL)
+        let editID = try session.createTab(url: editURL)
+        for id in [textID, editID] {
+            try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10))
+        }
+        let editView = try XCTUnwrap(session.webView(for: editID))
+        _ = try await script(editView, """
+            document.querySelector('#draft').value = 'unsaved draft';
+            document.querySelector('#rich').textContent = 'rich draft';
+            window.editorBuffer = 'memory only';
+            return true;
+            """)
+        for _ in 0..<10 { _ = try session.createTab() }
+        let order = session.workspaceBrowserTabs.map(\.id)
+        let selected = session.selectedTabID
+        let priorDocument = session.documentGeneration(for: textID)
+        for level: DispatchSource.MemoryPressureEvent in [.warning, .critical, .normal] {
+            session.handleMemoryPressure(level)
+            XCTAssertEqual(session.workspaceBrowserTabs.map(\.id), order)
+            XCTAssertEqual(session.selectedTabID, selected)
+            XCTAssertNil(session.webView(for: textID))
+            XCTAssertTrue(session.webView(for: editID) === editView)
+        }
+        session.selectTab(editID)
+        let edits = try await script(editView, """
+            return [document.querySelector('#draft').value, document.querySelector('#rich').textContent, window.editorBuffer];
+            """)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: edits) as? [String], ["unsaved draft", "rich draft", "memory only"])
+        session.selectTab(textID)
+        try await session.waitForHumanTabReady(id: textID, until: .now + .seconds(10))
+        let reloaded = try XCTUnwrap(session.webView(for: textID))
+        let body = try await script(reloaded, "return document.body.innerText.trim();")
+        XCTAssertEqual(body, Data("\"read-only marker\"".utf8))
+        XCTAssertNotEqual(priorDocument, session.documentGeneration(for: textID))
+        XCTAssertEqual(session.workspaceBrowserTabs.map(\.id), order)
+    }
+
+    func testPressureKeepsRedirectedAndNoStoreResponsesInTheirOriginalViews() async throws {
+        let privateText = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "private", finalMIME: "text/plain")
+        let redirected = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "redirected", finalMIME: "text/plain",
+                                                      cacheControl: "private, max-age=60")
+        defer { privateText.stop(); redirected.stop() }
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let direct = try await privateText.start().appendingPathComponent("human/final")
+        let redirect = try await redirected.start().appendingPathComponent("human/start")
+        let ids = try [direct, redirect].map { try session.createTab(url: $0) }
+        for id in ids { try await session.waitForHumanTabReady(id: id, until: .now + .seconds(10)) }
+        let views = try ids.map { try XCTUnwrap(session.webView(for: $0)) }
+        _ = try session.createTab()
+        session.handleMemoryPressure(.critical)
+        for (id, view) in zip(ids, views) { XCTAssertTrue(session.webView(for: id) === view) }
+    }
+
+    func testRestoringManyPagesAllocatesOnlySelectedRendererAndKeepsDormantTabs() throws {
+        let profile = UUID(), prefs = isolatedTestPreferences()
+        registerKimiFixtureProfileForCleanup(profile)
+        let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { session.shutdown() }
+        let pages = (0..<16).map { _ in SavedWorkspace.Page(id: UUID(), url: nil, mobile: false) }
+        session.restoreWorkspacePages(SavedWorkspace(order: pages.map { .browser($0.id) },
+            drafts: [:], browserProfile: profile, pages: pages, selectedPage: pages[9].id, browserIsPrimary: true, showsBrowserPane: false))
+        let tabs = session.workspaceBrowserTabs
+        XCTAssertEqual(tabs.map(\.workspaceID), pages.map(\.id))
+        XCTAssertEqual(tabs.filter { session.webView(for: $0.id) != nil }.map(\.workspaceID), [pages[9].id])
+        XCTAssertEqual(session.restorablePages.map(\.id), pages.map(\.id))
+        session.closeTab(tabs[0].id)
+        session.selectTab(tabs[3].id)
+        XCTAssertTrue(session.humanTab(id: tabs[3].id) === tabs[3])
+        XCTAssertNotNil(session.webView(for: tabs[3].id))
+        XCTAssertEqual(session.workspaceBrowserTabs.map(\.workspaceID), Array(pages.dropFirst().map(\.id)))
     }
 
     func testClosingTabDetachesViewClearsDelegatesAndIgnoresLateCallbacks() throws {

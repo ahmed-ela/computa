@@ -315,7 +315,7 @@ extension AppState {
             do {
                 try browserSession.reopenWorkspacePage(page, at: index)
             } catch {
-                // Creation failures (such as the tab limit) leave the close record available for retry.
+                // Creation failures leave the close record available for retry.
                 presentBrowserTabOpenError(error)
                 return
             }

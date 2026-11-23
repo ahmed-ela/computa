@@ -8,11 +8,11 @@ use objc2_app_kit::{NSButton, NSPopUpButton, NSTextField, NSView};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     rc::Rc,
 };
 use uuid::Uuid;
 
-pub const MAX_HUMAN_BROWSER_TABS: usize = 8;
 pub const NATIVE_BROWSER_TOOLBAR_HEIGHT: f64 = 88.;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedBrowserAddress(String);
@@ -206,7 +206,7 @@ define_class!(
         #[unsafe(method(submitBrowserAddress:))]fn submit(&self,sender:&NSTextField){if self.ivars().address.borrow().as_ref().is_some_and(|field|std::ptr::eq(&**field,sender)){self.navigate()}}
         // SAFETY: button index comes from exact retained native sender identity.
         #[unsafe(method(browserButton:))]fn button(&self,sender:&NSButton){if self.ivars().blocked.get(){return}let Some(index)=self.ivars().buttons.borrow().iter().position(|button|std::ptr::eq(&**button,sender))else{return};let selected=self.ivars().selected.get();let tab=self.ivars().tabs.borrow().iter().find(|tab|Some(tab.id)==selected).cloned();let event=match(index,tab){
-            (0,_)if self.ivars().tabs.borrow().len()<MAX_HUMAN_BROWSER_TABS=>Some(NativeBrowserEvent::NewTab),
+            (0,_)=>Some(NativeBrowserEvent::NewTab),
             (1,Some(tab))=>Some(NativeBrowserEvent::CloseTab{tab_id:tab.id}),
             (2,Some(tab))if tab.can_go_back=>Some(NativeBrowserEvent::Back{tab_id:tab.id}),
             (3,Some(tab))if tab.can_go_forward=>Some(NativeBrowserEvent::Forward{tab_id:tab.id}),
@@ -237,17 +237,10 @@ impl BrowserTarget {
             return;
         };
         match ValidatedBrowserAddress::normalize(&field.stringValue().to_string()) {
-            Ok(address) => {
-                if self.ivars().selected.get().is_none()
-                    && self.ivars().tabs.borrow().len() >= MAX_HUMAN_BROWSER_TABS
-                {
-                    return;
-                }
-                (self.ivars().callback)(NativeBrowserEvent::Navigate {
-                    tab_id: self.ivars().selected.get(),
-                    address,
-                })
-            }
+            Ok(address) => (self.ivars().callback)(NativeBrowserEvent::Navigate {
+                tab_id: self.ivars().selected.get(),
+                address,
+            }),
             Err(error) => {
                 if let Some(status) = self.ivars().status.borrow().as_ref() {
                     status.setStringValue(&NSString::from_str(&error.to_string()))
@@ -338,11 +331,11 @@ impl TrustedNativeBrowserControls {
         selected: Option<Uuid>,
         blocked: bool,
     ) -> Result<()> {
-        if tabs.len() > MAX_HUMAN_BROWSER_TABS
-            || tabs.iter().enumerate().any(|(i, tab)| {
-                tab.id.is_nil() || tabs[..i].iter().any(|previous| previous.id == tab.id)
-            })
-            || selected.is_some_and(|id| !tabs.iter().any(|tab| tab.id == id))
+        let mut ids = HashSet::with_capacity(tabs.len());
+        if tabs
+            .iter()
+            .any(|tab| tab.id.is_nil() || !ids.insert(tab.id))
+            || selected.is_some_and(|id| !ids.contains(&id))
         {
             return Err(AutomationError::Invalid("native browser tab state".into()));
         }
@@ -405,7 +398,7 @@ impl TrustedNativeBrowserControls {
             .find(|tab| Some(tab.id) == self.target.ivars().selected.get());
         self.selector.setEnabled(active && !tabs.is_empty());
         self.address.setEnabled(active);
-        self.buttons[0].setEnabled(active && tabs.len() < MAX_HUMAN_BROWSER_TABS);
+        self.buttons[0].setEnabled(active);
         self.buttons[1].setEnabled(active && tab.is_some());
         self.buttons[2].setEnabled(active && tab.is_some_and(|tab| tab.can_go_back));
         self.buttons[3].setEnabled(active && tab.is_some_and(|tab| tab.can_go_forward));

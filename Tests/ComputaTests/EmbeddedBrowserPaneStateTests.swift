@@ -167,9 +167,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
-    func testReopenHonorsSheetAndTabLimitAndExcludesRuntimeCloses() throws {
+    func testReopenHonorsSheetAndRemainsAvailableAtAgentLimit() throws {
         let prefs = isolatedTestPreferences()
-        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 1, defaults: prefs)
+        let session = EmbeddedBrowserSession(persistent: false, maximumAgentTabs: 1, defaults: prefs)
         defer { session.shutdown() }
         let state = AppState(tasks: [], preferences: prefs, browserSession: session)
         let id = try session.createTab(url: URL(string: "https://example.test/callback?code=private&state=flow"))
@@ -182,10 +182,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.presentedSheet = nil
         let tool = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
         state.reopenClosedTab()
-        XCTAssertTrue(state.canReopenClosedTab)
-        XCTAssertTrue(session.workspaceBrowserTabs.isEmpty)
+        XCTAssertFalse(state.canReopenClosedTab)
+        XCTAssertEqual(session.workspaceBrowserTabs.count, 1)
         session.closeTab(tool)
-        state.reopenClosedTab()
         let reopened = try XCTUnwrap(session.humanTab(id: XCTUnwrap(session.selectedTabID)))
         XCTAssertEqual(reopened.workspaceID, original.workspaceID)
         XCTAssertNil(session.restorablePage(for: reopened)?.url)
@@ -378,7 +377,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let task = AgentTask(title: "First chat", summary: "", status: .draft, workspace: "", model: "local")
         WorkspaceTabs(defaults: prefs).save(SavedWorkspace(order: [.agent(task.id)], selectedAgent: task.id,
             drafts: [:], pages: [], browserIsPrimary: false, showsBrowserPane: true))
-        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 1, defaults: prefs)
+        let session = EmbeddedBrowserSession(persistent: false, maximumAgentTabs: 1, defaults: prefs)
         let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 680),
@@ -420,9 +419,10 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(session.webView(for: setup.id) === page)
 
         state.newWorkspaceBrowserTab()
-        XCTAssertEqual(state.browserTabOpenError, EmbeddedBrowserSession.Failure.tabLimit(1).localizedDescription)
-        XCTAssertEqual(state.selectedWorkspaceTab, .agent(task.id))
-        state.browserTabOpenError = nil
+        XCTAssertNil(state.browserTabOpenError)
+        let newPage = try XCTUnwrap(state.primaryBrowserID)
+        XCTAssertNotEqual(newPage, setup.workspaceID)
+        XCTAssertEqual(state.selectedWorkspaceTab, .browser(newPage))
     }
 
     @MainActor

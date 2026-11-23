@@ -12,6 +12,7 @@ final class WebModelFailureDiagnosticTests: XCTestCase {
             (ChatGPTInferenceCookieSeed.Failure.verificationFailed, .profileVerificationFailed),
             (ChatGPTInferenceCookieSeed.Failure.deadline, .profileDeadline),
             (EmbeddedBrowserSession.Failure.tabLimit(Int.max), .tabLimit),
+            (EmbeddedBrowserSession.Failure.popupLimit(Int.max), .popupLimit),
             (EmbeddedBrowserSession.Failure.tabClosed, .tabClosed),
             (EmbeddedBrowserSession.Failure.sessionClosed, .sessionClosed),
             (EmbeddedBrowserSession.Failure.modelTabPrivate, .modelTabPrivate),

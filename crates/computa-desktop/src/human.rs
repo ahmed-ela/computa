@@ -1,8 +1,16 @@
 //! Persistent human browsing. These views have no privileged protocol, native
 //! message handler, model tool bridge, injected script, or automatic window grant.
+use block2::RcBlock;
 use computa_macos::browser_controls::{
-    MAX_HUMAN_BROWSER_TABS, NativeBrowserEvent, NativeBrowserTab, ValidatedBrowserAddress,
+    NativeBrowserEvent, NativeBrowserTab, ValidatedBrowserAddress,
 };
+use dispatch2::{
+    _dispatch_source_type_memorypressure, DispatchObject, DispatchQueue, DispatchRetained,
+    DispatchSource, dispatch_source_memorypressure_flags_t as Pressure,
+};
+use objc2::rc::Retained;
+use objc2_app_kit::NSView;
+use objc2_web_kit::WKInactiveSchedulingPolicy;
 use std::{collections::HashMap, rc::Rc};
 use tao::window::Window;
 use uuid::Uuid;
@@ -12,6 +20,7 @@ use wry::{
 };
 #[derive(Clone, Debug)]
 pub enum HumanEvent {
+    MemoryPressure(bool),
     Title {
         tab: Uuid,
         title: String,
@@ -26,12 +35,55 @@ pub enum HumanEvent {
         url: String,
     },
 }
+const MAX_POPUPS: usize = 4;
+
+// Created, delivered and dropped on the AppKit thread.
+struct PressureMonitor(Rc<DispatchRetained<DispatchSource>>);
+impl PressureMonitor {
+    fn new(callback: Rc<dyn Fn(HumanEvent)>) -> Self {
+        let warn = Pressure::DISPATCH_MEMORYPRESSURE_WARN.0 as usize;
+        let critical = Pressure::DISPATCH_MEMORYPRESSURE_CRITICAL.0 as usize;
+        let mask = warn | critical | Pressure::DISPATCH_MEMORYPRESSURE_NORMAL.0 as usize;
+        // SAFETY: libdispatch supplies the static type, the memory-pressure handle is zero,
+        // and the main queue owns both this source and the callback's Rc values.
+        let source = Rc::new(unsafe {
+            DispatchSource::new(
+                (&raw const _dispatch_source_type_memorypressure).cast_mut(),
+                0,
+                mask,
+                Some(DispatchQueue::main()),
+            )
+        });
+        let weak = Rc::downgrade(&source);
+        let handler = RcBlock::new(move || {
+            if let Some(source) = weak.upgrade() {
+                callback(HumanEvent::MemoryPressure(
+                    source.data() & (warn | critical) != 0,
+                ));
+            }
+        });
+        // SAFETY: dispatch copies the block; its single delivery queue is the main queue.
+        unsafe { source.set_event_handler_with_block(RcBlock::as_ptr(&handler)) };
+        source.activate();
+        Self(source)
+    }
+}
+impl Drop for PressureMonitor {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 struct Tab {
+    is_popup: bool,
+    detached_parent: Option<Retained<NSView>>,
     view: WebView,
     metadata: NativeBrowserTab,
     document: Uuid,
 }
 pub struct HumanBrowser {
+    _pressure_monitor: PressureMonitor,
+    under_pressure: bool,
     tabs: HashMap<Uuid, Tab>,
     order: Vec<Uuid>,
     selected: Option<Uuid>,
@@ -49,6 +101,8 @@ impl HumanBrowser {
         callback: Rc<dyn Fn(HumanEvent)>,
     ) -> Self {
         Self {
+            _pressure_monitor: PressureMonitor::new(callback.clone()),
+            under_pressure: false,
             tabs: HashMap::new(),
             order: vec![],
             selected: None,
@@ -89,13 +143,29 @@ impl HumanBrowser {
     }
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
-        for (id, tab) in &self.tabs {
-            let _ = tab.view.set_visible(visible && Some(*id) == self.selected);
+        for (id, tab) in &mut self.tabs {
+            let show = visible && Some(*id) == self.selected;
+            let native = tab.view.webview();
+            if self.under_pressure && !show && !tab.is_popup {
+                if tab.detached_parent.is_none() {
+                    // SAFETY: the window owns this parent and we retain it before detaching on the AppKit thread.
+                    tab.detached_parent = unsafe { native.superview() };
+                    native.removeFromSuperview();
+                }
+            } else if let Some(parent) = tab.detached_parent.take() {
+                parent.addSubview(&native);
+                let _ = tab.view.set_bounds(self.bounds);
+            }
+            let _ = tab.view.set_visible(show);
         }
     }
     pub fn set_bounds(&mut self, bounds: Rect) {
         self.bounds = bounds;
-        for tab in self.tabs.values() {
+        for tab in self
+            .tabs
+            .values()
+            .filter(|tab| tab.detached_parent.is_none())
+        {
             let _ = tab.view.set_bounds(bounds);
         }
     }
@@ -105,9 +175,6 @@ impl HumanBrowser {
         url: Option<ValidatedBrowserAddress>,
         select: bool,
     ) -> Result<Uuid, String> {
-        if self.tabs.len() >= MAX_HUMAN_BROWSER_TABS {
-            return Err("Close a browser tab before opening another (maximum 8).".into());
-        }
         let id = Uuid::new_v4();
         let title_callback = self.callback.clone();
         let load_callback = self.callback.clone();
@@ -144,14 +211,15 @@ impl HumanBrowser {
         // SAFETY: this exact WKWebView and its preferences are live on the
         // AppKit thread. Blocking script-opened windows grants no web capability.
         unsafe {
-            view.webview()
-                .configuration()
-                .preferences()
-                .setJavaScriptCanOpenWindowsAutomatically(false);
+            let preferences = view.webview().configuration().preferences();
+            preferences.setJavaScriptCanOpenWindowsAutomatically(false);
+            preferences.setInactiveSchedulingPolicy(WKInactiveSchedulingPolicy::Suspend);
         }
         self.tabs.insert(
             id,
             Tab {
+                is_popup: false,
+                detached_parent: None,
                 view,
                 metadata: NativeBrowserTab {
                     id,
@@ -266,6 +334,10 @@ impl HumanBrowser {
         blocked: bool,
     ) -> Result<(), String> {
         match event {
+            HumanEvent::MemoryPressure(under_pressure) => {
+                self.under_pressure = under_pressure;
+                self.set_visible(self.visible);
+            }
             HumanEvent::Title { tab, title } => {
                 if let Some(entry) = self.tabs.get_mut(&tab) {
                     entry.metadata.title = bounded(title, 512);
@@ -283,10 +355,16 @@ impl HumanBrowser {
                 }
             }
             HumanEvent::Popup { source, url } => {
-                if self.tabs.contains_key(&source) && !blocked {
+                if self.tabs.get(&source).is_some_and(|tab| !tab.is_popup) && !blocked {
+                    if self.tabs.values().filter(|tab| tab.is_popup).count() >= MAX_POPUPS {
+                        return Err("Close a pop-up before opening another.".into());
+                    }
                     let address =
                         ValidatedBrowserAddress::validate(&url).map_err(|e| e.to_string())?;
-                    self.create(window, Some(address), true)?;
+                    let id = self.create(window, Some(address), true)?;
+                    if let Some(tab) = self.tabs.get_mut(&id) {
+                        tab.is_popup = true;
+                    }
                 }
             }
         }

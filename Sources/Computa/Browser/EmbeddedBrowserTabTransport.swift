@@ -402,6 +402,12 @@ final class EmbeddedBrowserTabTransport: EmbeddedBrowserControlBackend {
     private func observe(target: BrowserTarget, readiness requestedReadiness: BrowserReadReadiness?,
                          authorization: BrowserReadAuthorization? = nil) async throws -> BrowserDocumentObservation {
         let id = try exactID(target)
+        if session.webView(for: id) == nil {
+            try Task.checkCancellation()
+            guard let current = self.target(for: id) else { throw BrowserTabBrokerError.targetClosed }
+            try authorization?(current)
+            try session.wakeTabIfNeeded(id)
+        }
         try session.markHumanDocumentUsedByTool(tabID: id, generation: generation(for: id))
         try await session.waitForHumanTabReady(id: id, until: .now + .seconds(12))
         try Task.checkCancellation()

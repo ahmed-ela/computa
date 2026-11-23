@@ -6293,7 +6293,7 @@ final class EmbeddedWebModelTransportTests: XCTestCase {
     }
 
     func testFailedCleanupRetainsFourExtraHandlesWithoutResumingOrEvictingThem() async throws {
-        let browser = EmbeddedBrowserSession(persistent: false, maximumTabs: 12)
+        let browser = EmbeddedBrowserSession(persistent: false, maximumAgentTabs: 12)
         let fixture = try Fixture(page: Self.providerPage(.claude), browser: browser); defer { fixture.shutdown() }
         func start() async throws -> String {
             let result = try await call(fixture.transport, "webProviderStart", ["provider": "claude"])

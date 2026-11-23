@@ -9,6 +9,7 @@ final class EmbeddedBrowserTab: Identifiable {
     let id: UUID
     // The privileged sidebar receives this display handle, never a browser-tool target ID.
     let workspaceID: UUID
+    fileprivate var isDormant = false
     let isPopup: Bool
     let requestsMobileSite: Bool
     fileprivate let kimiProfileID: UUID?
@@ -43,6 +44,7 @@ final class EmbeddedBrowserTab: Identifiable {
 final class EmbeddedBrowserSession {
     enum Failure: Error, LocalizedError, Equatable {
         case tabLimit(Int)
+        case popupLimit(Int)
         case tabClosed
         case sessionClosed
         case modelTabPrivate
@@ -54,7 +56,8 @@ final class EmbeddedBrowserSession {
 
         var errorDescription: String? {
             switch self {
-            case .tabLimit(let limit): "This browser allows up to \(limit) tabs, including background model sessions. Close a browser tab before opening another; restart Kolmogor if only retained model sessions remain."
+            case .tabLimit(let limit): "All \(limit) agent browser slots are in use. Try again when another agent page finishes."
+            case .popupLimit(let limit): "There are already \(limit) open pop-ups. Close one before opening another."
             case .tabClosed: "That browser tab is no longer open."
             case .sessionClosed: "This browser session has ended."
             case .modelTabPrivate: "Model sessions run privately in the background. Open a regular browser tab to visit the website."
@@ -71,12 +74,13 @@ final class EmbeddedBrowserSession {
     private(set) var tabs: [EmbeddedBrowserTab] = []
     /// The human browser never exposes an inference page, including a retained
     /// session whose website cleanup could not be confirmed.
-    var humanTabs: [EmbeddedBrowserTab] { tabs.filter { entries[$0.id]?.isModelOwned == false } }
+    var humanTabs: [EmbeddedBrowserTab] { tabs.filter { $0.isDormant || entries[$0.id]?.isModelOwned == false } }
     var workspaceBrowserTabs: [EmbeddedBrowserTab] {
-        humanTabs.filter { entries[$0.id]?.isToolOwned == false }
+        humanTabs.filter { $0.isDormant || entries[$0.id]?.isToolOwned == false }
     }
     @ObservationIgnored private var workspaceFaviconsEnabled = false
     @ObservationIgnored var onWorkspaceTabOpened: ((UUID) -> Void)?
+    /// The workspace picks a neighbor only when closing left no opener to return to.
     @ObservationIgnored var onWorkspaceTabClosed: ((UUID, Bool) -> Void)?
     @ObservationIgnored var onWorkspacePageChanged: (() -> Void)?
     private(set) var selectedTabID: UUID?
@@ -89,6 +93,7 @@ final class EmbeddedBrowserSession {
     }
 
     func restorablePage(for tab: EmbeddedBrowserTab) -> SavedWorkspace.Page? {
+        if tab.isDormant { return SavedWorkspace.Page(id: tab.workspaceID, url: tab.url, mobile: tab.requestsMobileSite) }
         guard let entry = entries[tab.id], entry.isRestorable else { return nil }
         return SavedWorkspace.Page(id: tab.workspaceID, url: entry.restoreURL, mobile: tab.requestsMobileSite)
     }
@@ -111,12 +116,15 @@ final class EmbeddedBrowserSession {
     }
 
     func restoreWorkspacePages(_ snapshot: SavedWorkspace) {
-        guard persistent, snapshot.browserProfile == workspaceProfileID else { return }
+        guard !isShutdown, persistent, snapshot.browserProfile == workspaceProfileID else { return }
+        let open = Set(snapshot.order)
         var seen = Set(workspaceBrowserTabs.map(\.workspaceID))
-        for page in snapshot.pages where tabs.count < maximumTabs {
-            guard snapshot.order.contains(.browser(page.id)), seen.insert(page.id).inserted else { continue }
-            // createTab validates every address and gives the new view fresh runtime authority.
-            _ = try? createWorkspacePage(page)
+        for page in snapshot.pages where open.contains(.browser(page.id)) && seen.insert(page.id).inserted {
+            let tab = EmbeddedBrowserTab(workspaceID: page.id, requestsMobileSite: page.mobile)
+            tab.isDormant = true
+            tab.url = EmbeddedBrowserURLPolicy.workspaceAddress(page.url)
+            tab.title = tab.url?.host ?? "New tab"
+            tabs.append(tab)
         }
         let selected = workspaceBrowserTabs.first { $0.workspaceID == snapshot.selectedPage }
         if let tab = selected ?? workspaceBrowserTabs.first { selectTab(tab.id) }
@@ -165,7 +173,13 @@ final class EmbeddedBrowserSession {
         }
     }
     #endif
-    let maximumTabs: Int
+    let maximumAgentTabs: Int
+    let maximumPopups: Int
+    private var occupiedAgentSlots: Int {
+        entries.values.lazy.filter { $0.isModelOwned || $0.isToolOwned }.count + pendingChatGPTInferenceCookiePreparationCount
+    }
+    @ObservationIgnored private var pressureSource: DispatchSourceMemoryPressure?
+    private var memoryPressure: DispatchSource.MemoryPressureEvent = .normal
     var pendingChatGPTInferenceCookiePreparationCount: Int { inferenceCookieSeeds.count + inferenceCookieValidations.count }
     var failedChatGPTInferenceCookiePreparationCount: Int {
         inferenceCookieSeeds.values.filter(\.hasFailedCallerAwaitingCallback).count
@@ -275,6 +289,13 @@ final class EmbeddedBrowserSession {
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
         var restoreURL: URL?
+        // Only the initial GET of a standalone, read-only resource can be replayed.
+        var initialReadOnlyRequest: URL?
+        var readOnlyGET: URL?
+        var readOnlyResponse: URL?
+        var openedPopup = false
+        var everInspected = false
+        let defaultSchedulingPolicy: WKPreferences.InactiveSchedulingPolicy
         var isRestorable: Bool { isAvailableToBrowserTools && !isToolOwned && !tab.isPopup }
         var isRegularBrowserTab: Bool { !isModelOwned && tab.kimiProfileID == nil }
         var isDesktopHumanRecoverySource: Bool { isRegularBrowserTab && !isToolOwned && !tab.requestsMobileSite }
@@ -384,6 +405,7 @@ final class EmbeddedBrowserSession {
              popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false) {
             self.tab = tab
             self.view = view
+            self.defaultSchedulingPolicy = view.configuration.preferences.inactiveSchedulingPolicy
             self.delegate = delegate
             self.isModelOwned = isModelOwned
             self.isToolOwned = isToolOwned
@@ -394,9 +416,10 @@ final class EmbeddedBrowserSession {
 
     /// `persistent: false` makes an isolated, nonpersistent test/private session.
     /// An explicit profile ID avoids reading or writing the production preference in tests.
-    init(persistent: Bool = true, maximumTabs: Int = 8, profileID: UUID? = nil, defaults: UserDefaults = .standard,
+    init(persistent: Bool = true, maximumAgentTabs: Int = 8, maximumPopups: Int = 4, profileID: UUID? = nil, defaults: UserDefaults = .standard,
          cookieRetirementDirectory: URL? = nil, geminiDiagnosticDirectory: URL? = nil) {
-        self.maximumTabs = max(1, min(maximumTabs, 32))
+        self.maximumAgentTabs = max(1, maximumAgentTabs)
+        self.maximumPopups = max(1, maximumPopups)
         self.persistent = persistent
         self.profileID = profileID
         self.defaults = defaults
@@ -412,6 +435,15 @@ final class EmbeddedBrowserSession {
             kimiDedicatedProfileID = id
             if saved["enabled"] as? Bool == true { kimiModelProfileID = id }
         }
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.normal, .warning, .critical], queue: .main)
+        pressureSource = source
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let event = self.pressureSource?.data else { return }
+                self.handleMemoryPressure(event)
+            }
+        }
+        source.activate()
     }
 
     /// Resolve once for both WebKit and saved checkpoints, even if preferences
@@ -745,7 +777,7 @@ final class EmbeddedBrowserSession {
     func withExclusiveCookieMaintenance<Result>(
         _ operation: @MainActor (WKHTTPCookieStore, UUID, @escaping @MainActor () -> Bool) async -> Result
     ) async -> Result? {
-        guard !isShutdown, entries.isEmpty, inferenceCookieSeeds.isEmpty, inferenceCookieValidations.isEmpty, exclusiveCookieMaintenance == nil else { return nil }
+        guard !isShutdown, tabs.isEmpty, inferenceCookieSeeds.isEmpty, inferenceCookieValidations.isEmpty, exclusiveCookieMaintenance == nil else { return nil }
         let lease = UUID(), revision = chatGPTResumeProtectionRevision
         exclusiveCookieMaintenance = lease
         var suspended = false
@@ -757,18 +789,18 @@ final class EmbeddedBrowserSession {
         guard temporaryCookieRetirement?.setSuspended(true) == true else { return nil }
         suspended = true
         _ = await temporaryCookieRetirement?.settle(until: .now + .seconds(2))
-        guard !isShutdown, entries.isEmpty, exclusiveCookieMaintenance == lease,
+        guard !isShutdown, tabs.isEmpty, exclusiveCookieMaintenance == lease,
               temporaryCookieRetirement?.hasPendingCallback == false else { return nil }
         let profile = persistent ? persistentProfileIdentifier() : (profileID ?? transientProfileID)
         return await operation(store.httpCookieStore, profile, { [weak self] in
             guard let self else { return false }
-            return !self.isShutdown && self.entries.isEmpty && self.exclusiveCookieMaintenance == lease
+            return !self.isShutdown && self.tabs.isEmpty && self.exclusiveCookieMaintenance == lease
                 && self.websiteDataStore === store && self.chatGPTResumeProtectionRevision == revision
         })
     }
 
     func cookieMaintenanceProtectedIDs() -> Set<UUID>? {
-        guard entries.isEmpty, exclusiveCookieMaintenance != nil else { return nil }
+        guard tabs.isEmpty, exclusiveCookieMaintenance != nil else { return nil }
         return protectedChatGPTConversationIDs()
     }
 
@@ -800,6 +832,9 @@ final class EmbeddedBrowserSession {
             else if let url, EmbeddedWebModelTransport.Provider.chatgpt.conversationURL(url.absoluteString) != nil { return false }
             return ids.count <= 512
         }
+        for tab in tabs where tab.isDormant {
+            guard add(tab.url) else { return nil }
+        }
         for entry in entries.values {
             ids.formUnion(entry.ownedTemporaryChatGPTRoutes)
             let history = entry.view.backForwardList
@@ -827,17 +862,17 @@ final class EmbeddedBrowserSession {
     }
 
     private func createTab(url: URL? = nil, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
-                           requestsMobileSite: Bool = false, workspaceID: UUID = UUID(), isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
+                           requestsMobileSite: Bool = false, workspaceID: UUID = UUID(), isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil, waking: EmbeddedBrowserTab? = nil) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
-            guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+            guard !(modelOwned || toolOwned) || occupiedAgentSlots < maximumAgentTabs else { throw Failure.tabLimit(maximumAgentTabs) }
             if let url { try EmbeddedBrowserURLPolicy.validate(url) }
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = kimiProfile?.store ?? isolatedChatGPTStore ?? dataStore()
             // This fresh controller has no native script handlers, scripts, or UI resource scheme.
             configuration.userContentController = WKUserContentController()
             // OAuth can open a window after an asynchronous response, beyond
-            // the original click's gesture. Human popups still use the tab cap
+            // the original click's gesture. Human popups still use bounded capacity
             // and navigation policy; inference-owned pages cannot open them.
             configuration.preferences.javaScriptCanOpenWindowsAutomatically = !modelOwned && !toolOwned
             if modelOwned {
@@ -858,10 +893,12 @@ final class EmbeddedBrowserSession {
             configuration.defaultWebpagePreferences.allowsContentJavaScript = true
             let entry = try registerTab(configuration: configuration, select: select, modelOwned: modelOwned, toolOwned: toolOwned,
                                         usesIsolatedChatGPTProfile: isolatedChatGPTStore != nil, kimiProfileID: kimiProfile?.id,
-                                        requestsMobileSite: requestsMobileSite, workspaceID: workspaceID)
+                                        requestsMobileSite: requestsMobileSite, workspaceID: workspaceID, waking: waking)
             if toolOwned { mountModelView(entry) }
             // Empty tabs intentionally do not load a homepage or trigger any network request.
-            if let url { try navigate(tabID: entry.tab.id, to: url) }
+            if let url {
+                try navigate(entry, to: url, initialRequest: true)
+            }
             return entry.tab.id
         } catch {
             if !modelOwned { errorMessage = error.localizedDescription }
@@ -871,14 +908,16 @@ final class EmbeddedBrowserSession {
 
     private func registerTab(configuration: WKWebViewConfiguration, select: Bool, modelOwned: Bool, toolOwned: Bool = false,
                              popupOpenerTabID: UUID? = nil, usesIsolatedChatGPTProfile: Bool = false,
-                             kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false, workspaceID: UUID = UUID()) throws -> Entry {
+                             kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false, workspaceID: UUID = UUID(), waking: EmbeddedBrowserTab? = nil) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
-        guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        if popupOpenerTabID != nil, entries.values.lazy.filter({ $0.tab.isPopup }).count >= maximumPopups {
+            throw Failure.popupLimit(maximumPopups)
+        }
         // Apply before construction/initial navigation for human, tool, model
         // and popup tabs. Keep WebKit's own platform/engine user-agent prefix.
         configuration.applicationNameForUserAgent = EmbeddedBrowserIdentity.currentApplicationName
-        let tab = EmbeddedBrowserTab(workspaceID: workspaceID, isPopup: popupOpenerTabID != nil, kimiProfileID: kimiProfileID, requestsMobileSite: requestsMobileSite)
+        let tab = waking ?? EmbeddedBrowserTab(workspaceID: workspaceID, isPopup: popupOpenerTabID != nil, kimiProfileID: kimiProfileID, requestsMobileSite: requestsMobileSite)
         let view: WKWebView
         #if DEBUG
         if modelOwned, let factory = modelViewFactoryForTesting { view = factory(configuration) }
@@ -906,10 +945,11 @@ final class EmbeddedBrowserSession {
         let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned, isToolOwned: toolOwned,
                           popupOpenerTabID: popupOpenerTabID, usesIsolatedChatGPTProfile: usesIsolatedChatGPTProfile)
         entries[tab.id] = entry
-        tabs.append(tab)
+        tab.isDormant = false
+        if waking == nil { tabs.append(tab) }
         // Inactive creation stays inactive, including the first inference tab.
-        if select { selectedTabID = tab.id }
-        if !modelOwned && !toolOwned { onWorkspaceTabOpened?(tab.workspaceID) }
+        if select { updateSelection(to: tab.id) }
+        if waking == nil && !modelOwned && !toolOwned { onWorkspaceTabOpened?(tab.workspaceID) }
         observe(entry)
         if !modelOwned { errorMessage = nil }
         return entry
@@ -939,6 +979,7 @@ final class EmbeddedBrowserSession {
                                         popupOpenerTabID: tabID, kimiProfileID: opener.tab.kimiProfileID,
                                         requestsMobileSite: opener.tab.requestsMobileSite)
             popup.tab.setupProvider = opener.tab.setupProvider
+            opener.openedPopup = true
             if popup.tab.setupProvider != nil { popup.tab.isWebInspectorAvailable = false }
             return popup.view
         } catch {
@@ -953,16 +994,30 @@ final class EmbeddedBrowserSession {
         closeTab(tabID)
     }
 
+    private func updateSelection(to id: UUID) {
+        let previous = selectedTabID
+        selectedTabID = id
+        if let previous, previous != id, let old = entries[previous] { applyMemoryPolicy(to: old) }
+    }
+
     func selectTab(_ id: UUID) {
+        do { try wakeTabIfNeeded(id) } catch { errorMessage = error.localizedDescription; return }
         guard let entry = entries[id] else { errorMessage = Failure.tabClosed.localizedDescription; return }
         guard !entry.isModelOwned else { return }
-        selectedTabID = id
+        updateSelection(to: id)
+        applyMemoryPolicy(to: entry)
         onWorkspacePageChanged?()
         errorMessage = entry.tab.error
     }
 
     func closeTab(_ id: UUID) {
-        guard let entry = entries[id], let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
+        if tabs[index].isDormant {
+            let tab = tabs.remove(at: index)
+            if !isShutdown { onWorkspaceTabClosed?(tab.workspaceID, false) }
+            return
+        }
+        guard let entry = entries[id] else { return }
         // Freeze and sync evidence while this exact page, generation and its
         // delegates still exist. Failure to save never changes cleanup authority.
         if EmbeddedHumanVerificationStore.provider(forTrustedHumanURL: entry.view.url) == "gemini"
@@ -983,7 +1038,7 @@ final class EmbeddedBrowserSession {
         revokeModelInspector(entry, reason: isShutdown ? .shutdown : .closed)
         revokeGroqFixtureInspector(entry, reason: isShutdown ? .shutdown : .closed)
         let wasSelected = selectedTabID == id
-        let humanIndex = tabs.prefix(index).filter { entries[$0.id]?.isModelOwned == false && entries[$0.id]?.isToolOwned == false }.count
+        let humanIndex = tabs.prefix(index).filter { $0.isDormant || (entries[$0.id]?.isModelOwned == false && entries[$0.id]?.isToolOwned == false) }.count
         entry.view.isInspectable = false
         entry.tab.isWebInspectorEnabled = false
         entry.tab.isWebInspectorAvailable = false
@@ -1006,14 +1061,18 @@ final class EmbeddedBrowserSession {
         entry.view.stopLoading()
         entry.view.removeFromSuperview()
         tabs.remove(at: index)
-        if selectedTabID == id {
-            if let opener = entry.popupOpenerTabID, entries[opener]?.isModelOwned == false { selectedTabID = opener }
-            else {
+        var needsAdjacentSelection = wasSelected
+        if wasSelected {
+            if let opener = entry.popupOpenerTabID, entries[opener]?.isModelOwned == false {
+                selectedTabID = opener
+                needsAdjacentSelection = false
+            } else {
                 let remaining = workspaceBrowserTabs
-                selectedTabID = remaining.isEmpty ? nil : remaining[min(humanIndex, remaining.count - 1)].id
+                selectedTabID = nil
+                if !isShutdown, !remaining.isEmpty { selectTab(remaining[min(humanIndex, remaining.count - 1)].id) }
             }
         }
-        if !entry.isModelOwned && !entry.isToolOwned && !isShutdown { onWorkspaceTabClosed?(entry.tab.workspaceID, wasSelected) }
+        if !entry.isModelOwned && !entry.isToolOwned && !isShutdown { onWorkspaceTabClosed?(entry.tab.workspaceID, needsAdjacentSelection) }
         if !entry.isModelOwned { errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error } }
         if let observation = postBlockObservation {
             observation.lease.exactViewClosed = true
@@ -1031,9 +1090,14 @@ final class EmbeddedBrowserSession {
     }
 
     func navigate(tabID: UUID, to url: URL) throws {
+        try navigate(entry(tabID), to: url, initialRequest: false)
+    }
+
+    private func navigate(_ entry: Entry, to url: URL, initialRequest: Bool) throws {
         do {
-            let entry = try entry(tabID)
             try EmbeddedBrowserURLPolicy.validate(url)
+            entry.initialReadOnlyRequest = initialRequest && entry.isRestorable ? url : nil
+            entry.readOnlyResponse = nil
             prepareNavigation(entry, replacesDocument: true)
             entry.pendingConversationURL = url
             (entry.view as? EmbeddedModelWebView)?.captureNativeFocus()
@@ -1043,7 +1107,7 @@ final class EmbeddedBrowserSession {
                 if persistent { onWorkspacePageChanged?() }
             }
         } catch {
-            report(error.localizedDescription, tabID: tabID)
+            report(error.localizedDescription, tabID: entry.tab.id)
             throw error
         }
     }
@@ -1103,6 +1167,7 @@ final class EmbeddedBrowserSession {
     func setWebInspectorEnabled(_ enabled: Bool, for tabID: UUID) throws {
         let entry = try entry(tabID)
         guard !enabled || canInspect(tabID: tabID) else { throw Failure.inspectionUnavailable }
+        if enabled { entry.everInspected = true }
         entry.view.isInspectable = enabled
         entry.tab.isWebInspectorEnabled = enabled
     }
@@ -2461,9 +2526,11 @@ final class EmbeddedBrowserSession {
     }
 
     func presentTab(_ id: UUID, in host: NSView) throws {
+        try wakeTabIfNeeded(id)
         let entry = try entry(id)
         guard !entry.isModelOwned else { throw Failure.modelTabPrivate }
         entry.presentationHost = host
+        applyMemoryPolicy(to: entry)
         if !entry.toolRenderLeases.isEmpty {
             // The workspace may update or replace its selected pane while a
             // task borrows this exact page. Remember the latest human host,
@@ -2493,12 +2560,14 @@ final class EmbeddedBrowserSession {
         entry.presentationHost = nil
         if entry.view.superview === host { entry.view.removeFromSuperview() }
         if entry.needsBackgroundRendering { mountModelView(entry) }
+        applyMemoryPolicy(to: entry)
     }
 
     /// A revocable render lease borrows the exact human view. It cannot select,
     /// navigate, close, or change the ownership of that tab. A selected narrow
     /// human pane cannot shrink the task viewport; final release restores it.
     func acquireToolRendering(tabID: UUID) throws -> UUID {
+        try wakeTabIfNeeded(tabID)
         let entry = try entry(tabID)
         guard entry.isAvailableToBrowserTools else { throw Failure.modelTabPrivate }
         guard modelRenderHost?.window != nil else {
@@ -2506,6 +2575,7 @@ final class EmbeddedBrowserSession {
         }
         let lease = UUID()
         entry.toolRenderLeases.insert(lease)
+        applyMemoryPolicy(to: entry)
         mountModelView(entry)
         return lease
     }
@@ -2525,6 +2595,7 @@ final class EmbeddedBrowserSession {
         }
         entry.frameBeforeToolRendering = nil
         (entry.view as? EmbeddedModelWebView)?.protectsNativeFocus = false
+        applyMemoryPolicy(to: entry)
     }
 
     /// A retained lease is not evidence that its render surface still exists.
@@ -2969,12 +3040,14 @@ final class EmbeddedBrowserSession {
     }
 
     func humanTab(id: UUID) -> EmbeddedBrowserTab? {
+        if entries[id] == nil { return tabs.first { $0.id == id && $0.isDormant } }
         guard let entry = entries[id], !entry.isModelOwned else { return nil }
         return entry.tab
     }
 
     /// Dedicated sign-in and OAuth pages remain visible to the person only.
     func browserToolTab(id: UUID) -> EmbeddedBrowserTab? {
+        if entries[id] == nil { return tabs.first { $0.id == id && $0.isDormant } }
         guard let entry = entries[id], entry.isAvailableToBrowserTools else { return nil }
         return entry.tab
     }
@@ -3267,7 +3340,7 @@ final class EmbeddedBrowserSession {
         guard chatGPTInferencePrewarmingEnabled, !isShutdown, chatGPTInferencePrewarm == nil,
               inferenceCookieValidations.isEmpty, exclusiveCookieMaintenance == nil,
               let admit = chatGPTInferencePrewarmAdmission,
-              tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { return }
+              occupiedAgentSlots < maximumAgentTabs else { return }
         do { try admit() } catch { return }
         let warm: InferencePrewarm
         #if DEBUG
@@ -3480,7 +3553,7 @@ final class EmbeddedBrowserSession {
         try Task.checkCancellation()
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
-        guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        guard occupiedAgentSlots < maximumAgentTabs else { throw Failure.tabLimit(maximumAgentTabs) }
         let source = dataStore(), isolated = WKWebsiteDataStore.nonPersistent(), reservation = UUID()
         let seed: ChatGPTInferenceCookieSeed
         #if DEBUG
@@ -3646,6 +3719,8 @@ final class EmbeddedBrowserSession {
         cancelModelNativeFocusDiagnostic()
         #endif
         isShutdown = true
+        pressureSource?.cancel()
+        pressureSource = nil
         geminiCookieTimeline?.stop()
         geminiCookieTimeline = nil
         cacheIdentity?.close()
@@ -3662,6 +3737,67 @@ final class EmbeddedBrowserSession {
         modelRenderHosts.removeAll()
         websiteDataStore = nil
         cacheIdentity = nil
+    }
+
+    /// Keep rich documents and their unsaved JavaScript/DOM state in their original view.
+    /// A pending callback cannot unload a replacement document: all admission and release runs on the main actor.
+    func handleMemoryPressure(_ event: DispatchSource.MemoryPressureEvent) {
+        guard !isShutdown else { return }
+        memoryPressure = event
+        for entry in Array(entries.values) { applyMemoryPolicy(to: entry) }
+        if event.contains(.critical) {
+            // Drop only re-fetchable RAM cache. Cookies, local storage and disk cache keep their lifetimes.
+            websiteDataStore?.removeData(ofTypes: [WKWebsiteDataTypeMemoryCache], modifiedSince: .distantPast) {}
+        }
+    }
+
+    private func applyMemoryPolicy(to entry: Entry) {
+        guard entry.isRestorable, entries[entry.tab.id] === entry else { return }
+        let underPressure = !memoryPressure.intersection([.warning, .critical]).isEmpty
+        let idle = selectedTabID != entry.tab.id && entry.presentationHost == nil && entry.view.window == nil &&
+            entry.toolRenderLeases.isEmpty && !entry.openedPopup && !entry.everInspected && !entry.recoveryToolUsed
+        let preferences = entry.view.configuration.preferences
+        let scheduling: WKPreferences.InactiveSchedulingPolicy = underPressure && idle ? .suspend : entry.defaultSchedulingPolicy
+        if preferences.inactiveSchedulingPolicy != scheduling { preferences.inactiveSchedulingPolicy = scheduling }
+        guard underPressure, idle, !entry.view.isLoading, entry.navigation == nil, entry.tab.error == nil,
+              entry.view.backForwardList.backList.isEmpty, entry.view.backForwardList.forwardList.isEmpty,
+              let url = entry.readOnlyResponse, url == entry.view.url, url == entry.restoreURL else { return }
+        entry.stopFittingPage()
+        entry.observations.forEach { $0.invalidate() }
+        entry.delegate.invalidate()
+        entry.view.navigationDelegate = nil
+        entry.view.uiDelegate = nil
+        entry.navigationChanges.close()
+        entry.tab.isDormant = true
+        entry.tab.isWebInspectorAvailable = false
+        entry.tab.documentID = UUID()
+        entry.tab.documentGeneration = UUID()
+        entry.tab.pendingFaviconGeneration = nil
+        entries.removeValue(forKey: entry.tab.id)
+    }
+
+    fileprivate func recordMainRequest(_ request: URLRequest, view: WKWebView, tabID: UUID) {
+        guard let entry = entries[tabID], entry.view === view else { return }
+        entry.readOnlyGET = request.httpMethod == "GET" && request.url == entry.initialReadOnlyRequest ? request.url : nil
+        entry.initialReadOnlyRequest = nil
+        entry.readOnlyResponse = nil
+    }
+
+    fileprivate func recordMainResponse(_ response: URLResponse, view: WKWebView, tabID: UUID) {
+        guard let entry = entries[tabID], entry.view === view, let http = response as? HTTPURLResponse else { return }
+        defer { entry.readOnlyGET = nil }
+        let readOnlyTypes = ["text/plain", "image/png", "image/jpeg", "image/webp", "image/gif"]
+        guard let url = http.url, url == entry.readOnlyGET, http.statusCode == 200,
+              readOnlyTypes.contains(http.mimeType?.lowercased() ?? ""),
+              http.value(forHTTPHeaderField: "Cache-Control")?.lowercased().contains("no-store") != true
+        else { return }
+        entry.readOnlyResponse = url
+    }
+
+    func wakeTabIfNeeded(_ id: UUID) throws {
+        guard entries[id] == nil, let tab = tabs.first(where: { $0.id == id && $0.isDormant }) else { return }
+        _ = try createTab(url: tab.url, select: false, modelOwned: false, requestsMobileSite: tab.requestsMobileSite,
+                          workspaceID: tab.workspaceID, waking: tab)
     }
 
     private func entry(_ id: UUID) throws -> Entry {
@@ -4109,6 +4245,7 @@ final class EmbeddedBrowserSession {
 
     fileprivate func completed(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID, error: Error? = nil) {
         guard let entry = entries[tabID], entry.view === view, entry.navigation === navigation else { return }
+        defer { applyMemoryPolicy(to: entry) }
         if entry.isModelOwned, navigation != nil {
             if error == nil, entry.modelCommittedGeneration == entry.tab.documentGeneration {
                 entry.modelFinishedGeneration = entry.tab.documentGeneration
@@ -4617,6 +4754,9 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             guard let url = navigationAction.request.url else { throw EmbeddedBrowserURLPolicy.Rejection.invalidAddress }
             try EmbeddedBrowserURLPolicy.validateNavigation(url,
                 isMainFrame: navigationAction.targetFrame?.isMainFrame ?? true, mainDocumentURL: webView.url)
+            if navigationAction.targetFrame?.isMainFrame == true {
+                session?.recordMainRequest(navigationAction.request, view: webView, tabID: tabID)
+            }
             if navigationAction.targetFrame?.isMainFrame ?? true {
                 session?.protectPendingConversation(webView, tabID: tabID, url: url)
             }
@@ -4662,6 +4802,7 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
             return
         }
         if navigationResponse.isForMainFrame, let url = navigationResponse.response.url {
+            session?.recordMainResponse(navigationResponse.response, view: webView, tabID: tabID)
             session?.recordGeminiRecoveryHTTPFailure(navigationResponse.response, isMainFrame: true,
                                                      view: webView, tabID: tabID)
             admitChatGPT(url, view: webView) { decisionHandler($0 ? .allow : .cancel) }

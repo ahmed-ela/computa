@@ -3780,7 +3780,7 @@ actor WebModelServer {
         case profileUnavailable = "unavailable", profileBounds = "bounds", profileInvalidSource = "invalid_source"
         case profileDestinationNotEmpty = "destination_not_empty", profileVerificationFailed = "verification_failed"
         case profileDeadline = "deadline"
-        case tabLimit = "tab_limit", tabClosed = "tab_closed", sessionClosed = "session_closed"
+        case tabLimit = "tab_limit", popupLimit = "popup_limit", tabClosed = "tab_closed", sessionClosed = "session_closed"
         case modelTabPrivate = "model_tab_private", modelPopupUnsupported = "model_popup_unsupported"
         case toolPopupUnsupported = "tool_popup_unsupported", popupProfileMismatch = "popup_profile_mismatch"
         case inspectionUnavailable = "inspection_unavailable", cookieMaintenancePending = "cookie_maintenance_pending"
@@ -3799,6 +3799,7 @@ actor WebModelServer {
             } else if let failure = error as? EmbeddedBrowserSession.Failure {
                 switch failure {
                 case .tabLimit: self = .tabLimit
+                case .popupLimit: self = .popupLimit
                 case .tabClosed: self = .tabClosed
                 case .sessionClosed: self = .sessionClosed
                 case .modelTabPrivate: self = .modelTabPrivate
@@ -3828,7 +3829,8 @@ actor WebModelServer {
             case .profileDestinationNotEmpty: "Private ChatGPT browser profile preparation found a nonempty destination. No prompt was replayed."
             case .profileVerificationFailed: "The private ChatGPT browser profile could not be verified. No prompt was replayed."
             case .profileDeadline: "Private ChatGPT browser profile preparation reached its deadline. No prompt was replayed."
-            case .tabLimit: "The browser tab limit was reached, including background model sessions."
+            case .tabLimit: "All agent browser slots are in use."
+            case .popupLimit: "The browser pop-up limit was reached."
             case .tabClosed: "The browser tab is no longer open."
             case .sessionClosed: "The browser session has ended."
             case .modelTabPrivate: "A private model browser tab cannot be used as a regular browser tab."
