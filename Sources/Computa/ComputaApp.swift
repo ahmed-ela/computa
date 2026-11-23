@@ -148,6 +148,7 @@ struct ComputaApp: App {
                 WebWorkspaceView(state: state)
                     .preferredColorScheme(state.appearance.colorScheme)
                     .frame(minWidth: 980, minHeight: 640)
+                    .onOpenURL { state.openExternalWebsite($0) }
                     .onAppear {
                         state.startRuntimeIfNeeded()
                     }

@@ -195,6 +195,12 @@ extension AppState {
         }
     }
 
+    /// Launch Services delivers web links to a visible human tab.
+    func openExternalWebsite(_ url: URL) {
+        guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else { return }
+        newWorkspaceBrowserTab(url: url)
+    }
+
     func newWorkspaceBrowserTab(url: URL = EmbeddedBrowserURLPolicy.newTabURL) {
         guard !approvalGateBlocksInteraction, presentedSheet == nil else { return }
         do {

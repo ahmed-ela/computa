@@ -120,3 +120,23 @@ test('timestamps and signs each updater helper before its enclosing framework an
   expect(nested.filter(call => call.includes('--preserve-metadata=entitlements'))).toEqual([nested[0]]);
   expect(signs.slice(-2).map(call => call.at(-1))).toEqual([join(f.output, framework), f.output]);
 });
+
+test("the optional browser profile signs the outer app and preserves final Developer ID verification", async () => {
+  const f = await fixture();
+  const profile = join(f.app, "../browser.provisionprofile");
+  const options = parseSignOptions(["--app", f.app, "--output", f.output, "--identity", identity,
+    "--browser-passkey-profile", profile]);
+  await signRelease(options, f.run);
+  const outer = f.calls.findIndex(call => call[1]?.endsWith("/sign_browser_passkeys.py"));
+  expect(outer).toBeGreaterThan(0);
+  expect(f.calls[outer].slice(2)).toEqual([f.output, profile, "A".repeat(40)]);
+  expect(f.calls[outer + 1]).toContain("--verify");
+  expect(f.calls[outer + 1].at(-1)).toBe(f.output);
+  expect(f.calls.filter(call => call.includes("--sign")).map(call => call.at(-1))).toEqual([join(f.output, f.runtime)]);
+});
+
+test("re-signing a provisioned input without its explicit profile cannot silently drop passkeys", async () => {
+  const f = await fixture();
+  await writeFile(join(f.app, "Contents/embedded.provisionprofile"), "existing profile");
+  await expect(signRelease(f.options, f.run)).rejects.toThrow("explicit provisioning");
+});

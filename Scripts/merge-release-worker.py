@@ -92,6 +92,7 @@ def install():
     parser.add_argument("--identity", required=True)
     parser.add_argument("--notary-profile", required=True)
     parser.add_argument("--sparkle-signer", help="optional already-authorized copy of the pinned Sparkle sign_update")
+    parser.add_argument("--browser-passkey-profile", type=Path, help="approved Developer ID profile for website passkeys")
     opts = parser.parse_args(sys.argv[2:])
     state = opts.state.expanduser().resolve()
     if state.exists() and any(state.iterdir()) and not (state / "release-service").is_file():
@@ -107,6 +108,8 @@ def install():
     for key in ("CARGO_HOME", "RUSTUP_HOME", "DEVELOPER_DIR"):
         if os.getenv(key):
             cfg[key] = os.environ[key]
+    if opts.browser_passkey_profile:
+        cfg["COMPUTA_BROWSER_PASSKEY_PROFILE"] = str(opts.browser_passkey_profile.expanduser().resolve(strict=True))
     if opts.sparkle_signer:
         cfg["COMPUTA_SPARKLE_SIGNER"] = str(Path(opts.sparkle_signer).resolve(strict=True))
     agent = Path.home() / "Library/LaunchAgents" / (LABEL + ".plist")

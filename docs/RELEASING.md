@@ -97,3 +97,15 @@ migration have separate qualification gates.
 Both `https://computa.wtf/appcast.xml` and `https://kolmogor.com/appcast.xml` serve the signed update feed. The Worker recognizes historical Computa disk images and new Kolmogor images. Keep the old domain registered and routed for installed clients. Existing copies update in place through Sparkle and can retain the filename `Computa.app`. The updated bundle displays Kolmogor. New downloads install as `Kolmogor.app`.
 
 The Apple bundle identifier, signing team, Sparkle public key, saved chat and tab keys, Keychain services, provider protocols and private signing-worker directory retain their existing identifiers for upgrade compatibility.
+
+### Website passkeys on macOS
+
+Kolmogor uses WebKit’s own WebAuthn flow in its browser tabs. Passkeys for arbitrary websites require the managed macOS browser entitlement. The organization’s Apple Developer Account Holder can request it for bundle ID `com.ahmedelamin.LocalCodex`, team `MSMG8CJLB3`. [Apple’s eligibility criteria](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.web-browser.public-key-credential) · [Apple request form](https://developer.apple.com/contact/request/macos-browsers-passkeys/)
+
+Suggested application wording:
+
+> Kolmogor is a macOS app with a tabbed web browser built on WKWebView. People can open the new-tab address/search field, enter a website address, follow links, and sign in directly on the site. The browser declares the HTTP and HTTPS URL schemes and opens a requested web address in a visible tab. We request the macOS browser passkeys capability so people can register and sign in to sites they visit using WebKit’s system credential prompt.
+
+After approval, enable the capability on the explicit App ID and issue a Developer ID provisioning profile for the app’s distribution certificate. Keep that file on the signing Mac. Supply its absolute path using `--browser-passkey-profile FILE` on the merge worker’s install command (or on `Scripts/sign-release.ts` for a staged build). The worker uses it on subsequent releases. An expired, mismatched or unavailable configured profile stops signing.
+
+Qualify the first provisioned build before publishing. In a visible Kolmogor tab, open [WebAuthn.io](https://webauthn.io/), enter a disposable username and choose **Register**. Approve the macOS passkey sheet and confirm the site reports registration. Open a fresh tab, enter the same username, choose **Authenticate**, and verify that the site shows the authenticated account. Also cancel a request and confirm the site stays signed out. Record the build and outcomes. An unprovisioned build is expected to fail third-party platform passkey registration.
