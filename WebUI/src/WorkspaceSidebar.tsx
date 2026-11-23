@@ -115,6 +115,10 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !snapshot.isTaskSidebarCollapsed })}>
     <Icon name={snapshot.isTaskSidebarCollapsed ? 'sidebarOpen' : 'sidebarClose'} size={16} /></Button>;
   return <aside className="sidebar" aria-label="Workspace navigation"
+    style={snapshot.sidebarRail && {
+      '--rail-width': snapshot.sidebarRail.width + 'px',
+      '--rail-center': snapshot.sidebarRail.iconCenter + 'px',
+    }}
     onMouseEnter={() => { if (!nativeHost && snapshot.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarPeeked', peeked: true }); }}
     onMouseLeave={() => { if (!nativeHost && snapshot.isTaskSidebarCollapsed) post({ action: 'setTaskSidebarPeeked', peeked: false }); }}>
     <div className="window-drag-strip" style={snapshot.titlebarHeight ? { height: snapshot.titlebarHeight + 'px' } : undefined}>

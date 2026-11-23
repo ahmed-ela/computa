@@ -7,6 +7,7 @@ import SwiftUI
 struct NativeRuntimeStatusBar: View {
     @Bindable var state: AppState
     var compact = false
+    var iconCenter = SidebarRailGeometry.fallback.iconCenter
     @State private var approvalErrorPresented = false
 
     var body: some View {
@@ -74,8 +75,7 @@ struct NativeRuntimeStatusBar: View {
             // Temporarily hide context usage from the status bar.
             // ContextUsageIndicator(state: state)
         }
-        // Center the 22-point gear on the sidebar’s fixed 22-point icon column.
-        .padding(.leading, 11)
+        .padding(.leading, iconCenter - 11)
         .frame(maxWidth: .infinity, alignment: .leading)
         .lineLimit(1)
         .disabled(state.presentedSheet != nil)

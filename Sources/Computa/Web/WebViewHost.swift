@@ -6,6 +6,7 @@ struct WebWorkspaceView: View {
     @Bindable var state: AppState
     @State private var showsAccessModeSettings = false
 
+    @State private var sidebarRail = SidebarRailGeometry.fallback
     @State private var sidebarPeeked = false
     @State private var launcherPresented = false
     @State private var editingBrowserID: UUID?
@@ -87,8 +88,9 @@ struct WebWorkspaceView: View {
         let rowHeight = topInset > 0 ? topInset : 32
         let browserPrimary = state.primaryBrowserID != nil && state.shouldPresentBrowserPane
         let compact = state.isTaskSidebarCollapsed && !sidebarPeeked
-        let sidebarWidth = compact ? SidebarRail.compactWidth : SidebarRail.expandedWidth
+        let sidebarWidth = compact ? sidebarRail.width : SidebarRail.expandedWidth
         var snapshot = WebUISnapshot(state: state, titlebarHeight: rowHeight)
+        snapshot.sidebarRail = sidebarRail
         snapshot.isTaskSidebarPeeked = sidebarPeeked
         snapshot.launcherChat = launcherChat
         return ZStack(alignment: .center) {
@@ -97,6 +99,7 @@ struct WebWorkspaceView: View {
                     state: state,
                     snapshot: snapshot,
                     sidebarControlsEnabled: launcherAllowed && !commandPanelPresented,
+                    setSidebarRail: { sidebarRail = $0 },
                     setSidebarPeeked: { sidebarPeeked = $0 },
                     openTabLauncher: openLauncher,
                     openBrowserAddress: openBrowserAddress,
@@ -190,8 +193,8 @@ struct WebWorkspaceView: View {
             // WebKit reserves this part of the task sidebar. Keep its native
             // controls above the approval shield and outside the web bridge.
             if state.presentedSheet == nil {
-                NativeRuntimeStatusBar(state: state, compact: compact)
-                    .frame(maxWidth: compact ? 44 : 190, alignment: .leading)
+                NativeRuntimeStatusBar(state: state, compact: compact, iconCenter: sidebarRail.iconCenter)
+                    .frame(maxWidth: compact ? sidebarRail.width : 190, alignment: .leading)
                     .frame(height: 34)
             }
         }
@@ -228,6 +231,7 @@ private struct CodexWebView: NSViewRepresentable {
     let state: AppState
     let snapshot: WebUISnapshot
     let sidebarControlsEnabled: Bool
+    let setSidebarRail: (SidebarRailGeometry) -> Void
     let setSidebarPeeked: (Bool) -> Void
     let openTabLauncher: () -> Void
     let openBrowserAddress: () -> Void
@@ -270,6 +274,7 @@ private struct CodexWebView: NSViewRepresentable {
 #if DEBUG
         webView.isInspectable = true
 #endif
+        webView.onSidebarGeometry = setSidebarRail
         webView.rail.onHover = setSidebarPeeked
         context.coordinator.attach(webView: webView)
         context.coordinator.update(snapshot: snapshot)
@@ -286,7 +291,7 @@ private struct CodexWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         let shell = webView as? WindowConfiguredWebView
         let compact = snapshot.isTaskSidebarCollapsed && !snapshot.isTaskSidebarPeeked
-        let railWidth = compact ? SidebarRail.compactWidth : SidebarRail.expandedWidth
+        let railWidth = compact ? snapshot.sidebarRail.width : SidebarRail.expandedWidth
         shell?.trackSidebar(width: snapshot.isTaskSidebarCollapsed && sidebarControlsEnabled ? railWidth : 0)
         webView.needsLayout = true
         context.coordinator.update(snapshot: snapshot)
@@ -317,6 +322,23 @@ private final class WindowConfiguredWebView: WKWebView {
     var openTabLauncher: (() -> Void)?
     var openBrowserAddress: (() -> Void)?
     let rail = SidebarRail()
+    var onSidebarGeometry: ((SidebarRailGeometry) -> Void)?
+    private var lastGeometry: SidebarRailGeometry?
+
+    @objc private func titlebarDidChange(_ notification: Notification) { updateSidebarGeometry() }
+
+    private func updateSidebarGeometry() {
+        guard let window else { return }
+        let geometry = SidebarRailGeometry.measured(in: window) ?? lastGeometry ?? .fallback
+        guard geometry != lastGeometry else { return }
+        lastGeometry = geometry
+        // AppKit can lay out the title bar during a SwiftUI update.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, self.window === window, self.lastGeometry == geometry else { return }
+            self.onSidebarGeometry?(geometry)
+        }
+    }
+
     private var trackedWidth: CGFloat = 0
     private var railArea: NSTrackingArea?
     private var titlebarControls: [NSTitlebarAccessoryViewController] = []
@@ -367,6 +389,7 @@ private final class WindowConfiguredWebView: WKWebView {
 
     override func layout() {
         super.layout()
+        updateSidebarGeometry()
         guard let window, let state, compose.superview != nil else { return }
         compose.isHidden = !window.styleMask.contains(.titled) || state.presentedSheet != nil
             || (state.primaryBrowserID != nil && state.shouldPresentBrowserPane)
@@ -415,6 +438,9 @@ private final class WindowConfiguredWebView: WKWebView {
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if let window {
+            lastGeometry = nil
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didUpdateNotification, object: window)
+            NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: nil)
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
             NotificationCenter.default.removeObserver(self, name: WorkspaceTabLauncher.requestNotification, object: window)
             NotificationCenter.default.removeObserver(self, name: BrowserAddressPalette.requestNotification, object: window)
@@ -437,12 +463,20 @@ private final class WindowConfiguredWebView: WKWebView {
                                                name: BrowserAddressPalette.requestNotification, object: window)
         NotificationCenter.default.addObserver(self, selector: #selector(handleTabLauncherRequest(_:)),
                                                name: WorkspaceTabLauncher.requestNotification, object: window)
+        NotificationCenter.default.addObserver(self, selector: #selector(titlebarDidChange(_:)),
+                                               name: NSWindow.didUpdateNotification, object: window)
         window.title = "Kolmogor"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.minSize = NSSize(width: 980, height: 640)
         guard window.styleMask.contains(.titled) else { return }
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = window.standardWindowButton(kind) else { continue }
+            button.postsFrameChangedNotifications = true
+            NotificationCenter.default.addObserver(self, selector: #selector(titlebarDidChange(_:)),
+                name: NSView.frameDidChangeNotification, object: button)
+        }
         for control in titlebarControls where !window.titlebarAccessoryViewControllers.contains(control) {
             window.addTitlebarAccessoryViewController(control)
         }
