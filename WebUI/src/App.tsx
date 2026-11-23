@@ -449,6 +449,7 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
 }
 
 function availableForNewPrompt(model: string, snapshot: AppSnapshot): boolean {
+  if (snapshot.selectedModelAvailableForNewPrompt !== undefined) return snapshot.selectedModelAvailableForNewPrompt;
   if (!(model.startsWith('browser/') || model.startsWith('cli/')) || !snapshot.providerSetups?.length) return true;
   return snapshot.modelOptions.some(option => option.id === model && option.available !== false && option.selectable !== false);
 }
@@ -638,6 +639,20 @@ function Conversation({ snapshot, task, draftState }: { snapshot: AppSnapshot; t
     });
     post({ action: 'submitPrompt', requestID, taskID: task.id, prompt });
   };
+  const handledLaunch = useRef<string>();
+  useEffect(() => {
+    const launch = snapshot.launcherChat;
+    if (!launch || launch.taskID !== task.id || handledLaunch.current === task.id ||
+        snapshot.pendingApprovalCount || snapshot.isSettingsPresented || snapshot.primaryBrowserID) return;
+    handledLaunch.current = task.id;
+    if (launch.unsentDraft) {
+      setDraft(launch.unsentDraft);
+      const reason = isValidPrompt(launch.unsentDraft) ? 'Choose an available model to send this draft.' : 'Shorten this draft before sending.';
+      setSubmissionErrors(current => ({ ...current, [task.id]: reason }));
+    }
+    document.getElementById('task-prompt')?.focus();
+    post({ action: 'launcherChatReady', taskID: task.id });
+  }, [snapshot.launcherChat?.taskID, task.id, snapshot.pendingApprovalCount, snapshot.isSettingsPresented, snapshot.primaryBrowserID]);
   const rows = activityTimeline(task);
   return (
     <div className={`conversation-column ${rows.length === 0 && !snapshot.isReviewPresented ? 'is-empty' : ''} ${snapshot.isReviewPresented ? 'is-reviewing' : ''}`}>

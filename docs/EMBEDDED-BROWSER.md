@@ -19,8 +19,11 @@ retain their [separate qualification gates](../TODO.md#embedded-browser-agent-co
 
 ## Using the browser pane
 
-Press **⌘T** from a chat or browser tab to open Google. The sidebar’s **New browser tab**
-button and the browser toolbar’s square-and-arrow button also open a browser tab.
+Press **⌘T** or click **New tab** in the mixed sidebar. **Browser** is selected first.
+Press **Return** to open Google, or type a query and press **Return** to search.
+Press **↓** to select **Chat**. **Return** opens a new chat with the cursor in the
+composer. If you entered text, Kolmogor sends it as the first message using your
+selected default model. **↑** moves back to Browser and **Esc** dismisses the launcher.
 Use **⇧⌘N** for a new agent chat or **⌘N** for a new window. Press **⌘⇧[** for the
 previous open tab and **⌘⇧]** for the next. Both follow the sidebar order across
 agent and browser tabs and wrap at either end.

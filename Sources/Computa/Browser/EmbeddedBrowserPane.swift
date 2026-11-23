@@ -102,7 +102,6 @@ struct EmbeddedBrowserPane: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityIdentifier("embedded-browser-pane")
         .focusedValue(\.browserPaneFocused, true)
-        .focusedSceneValue(\.newBrowserTabInPane, { createTab() })
         .focusedSceneValue(\.focusBrowserAddress, { addressFocused = true })
         .onAppear { synchronizeAddress() }
         .onChange(of: session.selectedTabID) { _, _ in
@@ -138,7 +137,7 @@ struct EmbeddedBrowserPane: View {
             .contextMenu {
                 Button("New Mobile Tab") { createTab(requestsMobileSite: true) }
             }
-            .help("New browser tab (⌘T). Control-click for a mobile tab.")
+            .help("New browser tab. Control-click for a mobile tab.")
             .accessibilityLabel("New browser tab")
             .accessibilityIdentifier("browser-new-tab")
         }

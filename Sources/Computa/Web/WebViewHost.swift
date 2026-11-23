@@ -6,11 +6,50 @@ struct WebWorkspaceView: View {
     @Bindable var state: AppState
     @State private var showsAccessModeSettings = false
 
+    @State private var launcherPresented = false
+    @State private var launcherChat: LauncherChat?
+
+    private var launcherAllowed: Bool {
+        state.presentedSheet == nil && !showsAccessModeSettings && !state.isAPIProvidersPresented
+            && !state.approvalGateBlocksInteraction
+    }
+
+    private func openLauncher() {
+        guard launcherAllowed else { return }
+        launcherPresented = true
+    }
+
+    private func launch(_ destination: NewTabDestination, text: String) {
+        guard launcherPresented, launcherAllowed else { return }
+        launcherPresented = false
+        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch destination {
+        case .browser:
+            guard let url = query.isEmpty ? EmbeddedBrowserURLPolicy.newTabURL : try? EmbeddedBrowserURLPolicy.searchURL(for: query) else { return }
+            state.newWorkspaceBrowserTab(url: url)
+        case .chat:
+            if state.isReviewPresented { state.toggleReview() }
+            state.createTask()
+            guard let task = state.selectedTask else { return }
+            // Accept against the new task before a second shortcut can change selection.
+            var unsentDraft: String?
+            if !query.isEmpty {
+                let available = LocalModelOption.availableForNewPrompt(task.model, in: state.modelOptions)
+                let accepted = available && state.acceptPrompt(prompt: query, taskID: task.id, requestID: task.id)
+                if !accepted { unsentDraft = query }
+            }
+            launcherChat = LauncherChat(taskID: task.id, unsentDraft: unsentDraft)
+        }
+    }
+
     var body: some View {
         GeometryReader { geometry in
             workspace(topInset: geometry.safeAreaInsets.top)
         }
         .focusedSceneValue(\.tabWorkspace, state)
+        .onChange(of: launcherAllowed) { _, allowed in
+            if !allowed { launcherPresented = false }
+        }
     }
 
     private func workspace(topInset: CGFloat) -> some View {
@@ -18,11 +57,19 @@ struct WebWorkspaceView: View {
         let rowHeight = topInset > 0 ? topInset : 32
         let browserPrimary = state.primaryBrowserID != nil && state.shouldPresentBrowserPane
         let sidebarWidth: CGFloat = state.isTaskSidebarCollapsed ? 72 : 230
+        var snapshot = WebUISnapshot(state: state, titlebarHeight: rowHeight)
+        snapshot.launcherChat = launcherChat
         return ZStack(alignment: .center) {
             HSplitView {
                 CodexWebView(
                     state: state,
-                    snapshot: WebUISnapshot(state: state, titlebarHeight: rowHeight),
+                    snapshot: snapshot,
+                    openTabLauncher: openLauncher,
+                    consumeLauncherChat: { id in
+                        guard launcherChat?.taskID == id else { return false }
+                        launcherChat = nil
+                        return state.selectedTaskID == id && state.primaryBrowserID == nil && launcherAllowed && !launcherPresented
+                    },
                     showAccessModeSettings: { showsAccessModeSettings = true }
                 )
                 .frame(minWidth: browserPrimary ? sidebarWidth : 600,
@@ -60,9 +107,14 @@ struct WebWorkspaceView: View {
                     .layoutPriority(1)
                 }
             }
-            .allowsHitTesting(!state.approvalGateBlocksInteraction)
-            .accessibilityHidden(state.approvalGateBlocksInteraction)
+            .allowsHitTesting(!state.approvalGateBlocksInteraction && !launcherPresented)
+            .accessibilityHidden(state.approvalGateBlocksInteraction || launcherPresented)
             .disabled(state.approvalGateBlocksInteraction)
+
+            if launcherPresented && launcherAllowed {
+                Color.black.opacity(0.10).onTapGesture { launcherPresented = false }
+                WorkspaceTabLauncher(launch: launch, cancel: { launcherPresented = false })
+            }
 
             // The web surface stays inert through approval settlement.
             if state.resolvingApprovalIDs.isEmpty,
@@ -119,10 +171,12 @@ struct WebWorkspaceView: View {
 private struct CodexWebView: NSViewRepresentable {
     let state: AppState
     let snapshot: WebUISnapshot
+    let openTabLauncher: () -> Void
+    let consumeLauncherChat: (String) -> Bool
     let showAccessModeSettings: () -> Void
 
     func makeCoordinator() -> WebBridge {
-        WebBridge(state: state, showAccessModeSettings: showAccessModeSettings)
+        WebBridge(state: state, consumeLauncherChat: consumeLauncherChat, showAccessModeSettings: showAccessModeSettings)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -147,6 +201,7 @@ private struct CodexWebView: NSViewRepresentable {
         )
 
         let webView = WindowConfiguredWebView(frame: .zero, configuration: configuration)
+        webView.openTabLauncher = openTabLauncher
         webView.configureTitlebarControls(state: state)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
@@ -194,6 +249,7 @@ private struct CodexWebView: NSViewRepresentable {
 
 @MainActor
 private final class WindowConfiguredWebView: WKWebView {
+    var openTabLauncher: (() -> Void)?
     private var titlebarControls: [NSTitlebarAccessoryViewController] = []
 
     private weak var state: AppState?
@@ -258,7 +314,14 @@ private final class WindowConfiguredWebView: WKWebView {
         return super.hitTest(point)
     }
 
+    @objc private func handleTabLauncherRequest(_ notification: Notification) {
+        openTabLauncher?()
+    }
+
     override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if let window {
+            NotificationCenter.default.removeObserver(self, name: WorkspaceTabLauncher.requestNotification, object: window)
+        }
         if let window, window !== newWindow, window.styleMask.contains(.titled) {
             for control in titlebarControls {
                 if let index = window.titlebarAccessoryViewControllers.firstIndex(of: control) {
@@ -272,6 +335,8 @@ private final class WindowConfiguredWebView: WKWebView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         guard let window else { return }
+        NotificationCenter.default.addObserver(self, selector: #selector(handleTabLauncherRequest(_:)),
+                                               name: WorkspaceTabLauncher.requestNotification, object: window)
         window.title = "Kolmogor"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true

@@ -192,6 +192,134 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    private func launcherEditor(in host: NSView, window: NSWindow) async throws -> NSTextView {
+        for _ in 0..<100 {
+            host.layoutSubtreeIfNeeded()
+            if let field = nativeViews(in: host).compactMap({ $0 as? NSTextField })
+                .first(where: { $0.identifier?.rawValue == "workspace-tab-launcher" }),
+               let editor = field.currentEditor() as? NSTextView, editor === window.firstResponder {
+                return editor
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("The new-tab field did not receive keyboard focus")
+        throw CocoaError(.coderInvalidValue)
+    }
+
+    @MainActor
+    func testNewTabRoutesKeyboardInputToGoogleOrTheNewChatsComposer() async throws {
+        let prefs = isolatedTestPreferences()
+        let browser = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        let runtime = TabLauncherRuntime()
+        let state = AppState(tasks: [], runtime: runtime, preferences: prefs,
+                             browserSession: browser, mixesBrowserTabsInSidebar: true)
+        state.connectionState = .connected(provider: runtime.providerName)
+        state.defaultModel = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1050, height: 680),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close(); browser.shutdown() }
+        await settleLayout(host)
+        let web = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        func open() async throws -> NSTextView {
+            let ready = await waitForScriptBool(on: web, script: "!!document.querySelector('button[aria-label=\"New tab\"]')")
+            XCTAssertTrue(ready)
+            _ = try await web.evaluateJavaScript("document.querySelector('button[aria-label=\"New tab\"]').click(); true")
+            return try await launcherEditor(in: host, window: window)
+        }
+        func press(_ char: String, code: UInt16) throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                characters: char, charactersIgnoringModifiers: char, isARepeat: false, keyCode: code))
+            window.sendEvent(event)
+        }
+
+        _ = try await open()
+        try press("\r", code: 36)
+        XCTAssertEqual(browser.webView(for: try XCTUnwrap(browser.selectedTabID))?.url, EmbeddedBrowserURLPolicy.newTabURL)
+        XCTAssertTrue(state.tasks.isEmpty)
+
+        let search = "C++ & coffee"
+        let address = try await open()
+        address.insertText(search, replacementRange: address.selectedRange())
+        try press("\u{f701}", code: 125)
+        try press("\u{f700}", code: 126)
+        try press("\r", code: 36)
+        let url = try XCTUnwrap(browser.webView(for: XCTUnwrap(browser.selectedTabID))?.url)
+        XCTAssertEqual(url.host, "www.google.com")
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "q", value: search)])
+        XCTAssertTrue(state.tasks.isEmpty)
+
+        _ = try await open()
+        try press("\u{f701}", code: 125)
+        try press("\r", code: 36)
+        let empty = try XCTUnwrap(state.selectedTaskID)
+        let focused = await waitForScriptBool(on: web, script: "document.activeElement?.id === 'task-prompt'")
+        XCTAssertTrue(focused)
+        try press("z", code: 6)
+        let typed = await waitForScriptBool(on: web, script: "document.querySelector('#task-prompt')?.value === 'z'")
+        XCTAssertTrue(typed)
+
+        let message = "Compare the two train routes"
+        let input = try await open()
+        input.insertText(message, replacementRange: input.selectedRange())
+        try press("\u{f701}", code: 125)
+        try press("\r", code: 36)
+        let sent = try XCTUnwrap(state.selectedTaskID)
+        XCTAssertNotEqual(sent, empty)
+        let received = await waitForScriptBool(on: web, script: "document.querySelector('.user-message')?.textContent.includes('Compare the two train routes') === true")
+        XCTAssertTrue(received)
+        let calls = await runtime.submissions
+        XCTAssertEqual(calls.map(\.id), [sent])
+        XCTAssertEqual(calls.map(\.prompt), [message])
+        XCTAssertEqual(state.tasks.count, 2)
+        XCTAssertEqual(browser.workspaceBrowserTabs.count, 2)
+        state.selectTask(empty)
+        let preserved = await waitForScriptBool(on: web, script: "document.querySelector('#task-prompt')?.value === 'z'")
+        XCTAssertTrue(preserved)
+        _ = try await open()
+        try press("\u{1b}", code: 53)
+        XCTAssertEqual(state.selectedTaskID, empty)
+        XCTAssertEqual(state.tasks.count, 2)
+        XCTAssertEqual(browser.workspaceBrowserTabs.count, 2)
+
+        await settleLayout(host)
+        XCTAssertFalse(nativeViews(in: host).contains { $0.identifier?.rawValue == "workspace-tab-launcher" })
+
+        // Leave the new chat before WebKit paints it. Submission is already bound to its ID.
+        let quick = try await open()
+        quick.insertText("Keep working", replacementRange: quick.selectedRange())
+        try press("\u{f701}", code: 125)
+        try press("\r", code: 36)
+        let background = try XCTUnwrap(state.selectedTaskID)
+        state.selectTask(empty)
+        for _ in 0..<100 where await runtime.submissions.count < 2 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let completed = await runtime.submissions
+        XCTAssertEqual(completed.map(\.id), [sent, background])
+        XCTAssertEqual(completed.map(\.prompt), [message, "Keep working"])
+
+        state.defaultModel = "browser/unavailable-fixture"
+        let disconnected = try await open()
+        disconnected.insertText("Save this draft", replacementRange: disconnected.selectedRange())
+        try press("\u{f701}", code: 125)
+        try press("\r", code: 36)
+        let draftKept = await waitForScriptBool(on: web, script: """
+            document.activeElement?.id === 'task-prompt' && document.activeElement.value === 'Save this draft'
+                && document.querySelector('.composer-submit-status')?.textContent.includes('available model') === true
+            """)
+        XCTAssertTrue(draftKept)
+        let finalCalls = await runtime.submissions
+        XCTAssertEqual(finalCalls.count, 2)
+    }
+
+    @MainActor
     func testMixedSidebarFaviconSwitchingReorderAndHistory() async throws {
         let html = """
         <title>Cedar rail</title>
@@ -228,15 +356,17 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             .appendingPathComponent("icons/new-browser-tab.svg"))
         XCTAssertNotNil(NSImage(contentsOf: iconURL))
         try await requireDOM("""
-        (() => { const icon = document.querySelector('button[aria-label="New browser tab"] .new-browser-tab-icon');
+        (() => { const icon = document.querySelector('button[aria-label="New tab"] .new-browser-tab-icon');
           return icon && getComputedStyle(icon).maskImage.includes('/icons/new-browser-tab.svg')
             && icon.getBoundingClientRect().width === 16; })()
         """)
         _ = try await chat.evaluateJavaScript("""
         const draft = document.querySelector('.composer-shell textarea'); draft.value='Return ticket';
         draft.dispatchEvent(new Event('input', { bubbles:true }));
-        document.querySelector('button[aria-label="New browser tab"]').click(); true
+        document.querySelector('button[aria-label="New tab"]').click(); true
         """)
+        let field = try await launcherEditor(in: hosting, window: window)
+        field.doCommand(by: #selector(NSResponder.insertNewline(_:)))
         try await requireDOM("!!document.querySelector('[data-browser-primary=native]') && innerWidth < 300 && getComputedStyle(document.querySelector('.workspace')).display === 'none'")
         let ref = try XCTUnwrap(state.primaryBrowserID)
         let id = try XCTUnwrap(session.selectedTabID)
@@ -567,7 +697,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                         && sidebar.querySelector('.task-search').getBoundingClientRect().height === 32
                         && strip.getBoundingClientRect().bottom <= sidebar.querySelector('.task-search').getBoundingClientRect().top
                         && sidebar.querySelector('.task-search').getBoundingClientRect().bottom <= list.getBoundingClientRect().top
-                        && !sidebar.querySelector('[aria-label="New browser tab"], [data-tab-kind=browser]')
+                        && !sidebar.querySelector('[aria-label="New tab"], [data-tab-kind=browser]')
                         && document.documentElement.dataset.appearance === '\(state.appearance.rawValue)'
                         && sidebar && document.elementFromPoint(120, 12)?.closest('.sidebar') === sidebar
                         && sidebar.getBoundingClientRect().top === 0;
@@ -1770,4 +1900,16 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertGreaterThan(png.count, 3_000)
         try png.write(to: URL(fileURLWithPath: path), options: .withoutOverwriting)
     }
+}
+
+private actor TabLauncherRuntime: AgentRuntimeClient {
+    nonisolated let providerName = "Keyboard test"
+    private(set) var submissions: [(id: String, prompt: String)] = []
+    func loadTasks() async throws -> [AgentTask] { [] }
+    nonisolated func events() -> AsyncStream<AgentRuntimeEvent> { AsyncStream { $0.finish() } }
+    func submit(prompt: String, toTaskID taskID: String, modelID: String) async throws {
+        submissions.append((taskID, prompt))
+    }
+    func interrupt(taskID: String) async throws {}
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
 }

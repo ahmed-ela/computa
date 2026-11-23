@@ -27,9 +27,15 @@ struct WorkspaceBrowserSnapshot: Codable, Equatable, Sendable {
     let isFaviconLoading: Bool
 }
 
+struct LauncherChat: Codable, Equatable, Sendable {
+    let taskID: String
+    let unsentDraft: String?
+}
+
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
     var nativeSidebarControls = false
+    var launcherChat: LauncherChat?
     let titlebarHeight: CGFloat?
     let mixesBrowserTabsInSidebar: Bool
     let workspaceOrder: [WorkspaceTabID]
@@ -47,6 +53,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let accessMode: String
     let defaultModel: String
     let modelOptions: [LocalModelOption]
+    let selectedModelAvailableForNewPrompt: Bool
     let providerSetups: [ModelProviderSetup]
     let websiteModelsRefreshing: Bool
     let canRefreshWebsiteModels: Bool
@@ -103,6 +110,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         accessMode = state.accessMode.rawValue
         defaultModel = state.defaultModel
         modelOptions = state.modelOptions
+        selectedModelAvailableForNewPrompt = LocalModelOption.availableForNewPrompt(
+            state.selectedTask?.model ?? state.defaultModel, in: modelOptions)
         var setups = WebsiteModelCatalog.discoveryProviders.map { provider in
             ModelProviderSetup(route: "browser/" + provider, name: WebsiteModelCatalog.providerLabel(provider),
                 connected: state.websiteModelChoices.contains { choice in choice.provider == provider }
