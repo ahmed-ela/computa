@@ -398,6 +398,35 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
                      timestamp: Date(timeIntervalSinceReferenceDate: 123_458))
     }
 
+    func testOriginalCLIPermissionExplanationDropsUnobservedClaims() {
+        let text = "The app is running, but the desktop tool reported that accessibility permission isn’t granted. "
+            + "I couldn’t verify the experiment’s status. I didn’t interrupt the app."
+        XCTAssertEqual(NativeAccessibilityDenial.projectedReply(text),
+            "the desktop tool reported that accessibility permission isn’t granted.")
+        let why = "The inspection did not run because Kolmogor lacks macOS Accessibility permission."
+        XCTAssertEqual(NativeAccessibilityDenial.projectedReply("No. " + why + " The screen was empty."), why)
+        XCTAssertNil(NativeAccessibilityDenial.projectedReply("The app is empty because Kolmogor lacks macOS Accessibility permission."))
+        XCTAssertNil(NativeAccessibilityDenial.projectedReply("I verified everything."))
+    }
+
+    func testAccessibilityReceiptRejectsFabricatedStatementsAndDispatch() throws {
+        let store = try NativeFailureEvidenceStore(directory: directory)
+        let reply = NativeAccessibilityDenial.explanation.replacingOccurrences(of: "’", with: "'")
+            + " " + NativeAccessibilityDenial.nextStep
+        let record = try NativeAccessibilityDenial.record(threadID: "thread", turnID: "turn", callID: "bind", reply: reply)
+        XCTAssertEqual(try store.append(record).entry.body, reply)
+        let tampered = try [
+            withDiagnostic(record) { $0["reply"] = reply + "\nThe inspection succeeded." },
+            withDiagnostic(record) { $0["dispatch"] = "unknown" },
+            withDiagnostic(record) { $0["action_outcome"] = "verified" },
+            withDiagnostic(record) { $0["extra"] = "screen contents" },
+        ]
+        for value in tampered { XCTAssertThrowsError(try store.append(value)) { error in
+            guard case NativeFailureEvidenceStore.StoreError.invalid = error else { return XCTFail("Wrong error: \(error)") }
+        } }
+        XCTAssertEqual(try store.load(threadID: "thread").map(\.entry.body), [reply])
+    }
+
     private func withDiagnostic(_ record: NativeFailureEvidenceStore.Record,
                                 change: (inout [String: Any]) -> Void) throws -> NativeFailureEvidenceStore.Record {
         var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.diagnosticText.utf8)) as? [String: Any])

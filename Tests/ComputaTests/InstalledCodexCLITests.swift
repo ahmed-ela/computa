@@ -221,8 +221,66 @@ final class InstalledCodexCLITests: XCTestCase {
         } catch { _ = await state.shutdownRuntime(); throw error }
     }
 
-    private func waitUntil(_ condition: () throws -> Bool) async throws {
-        let limit = ContinuousClock.now.advanced(by: .seconds(70))
+    func testLiveCodexExplainsRealMacOSAccessibilityDenial() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["KOLMOGOR_LIVE_CODEX_AX_DENIAL"] == "1",
+            "Requires signed-in GPT-6.2-Sol, running Kolmogor, and a test host without Accessibility permission.")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("KolmogorAX-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var config = CodexAppServerRuntime.Configuration.localQwen
+        config.codexHomePath = root.path
+        config.workspacePath = root.appendingPathComponent("Workspace").path
+        let runtime = SelectableCodexRuntime(configuration: config)
+        let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences())
+        do {
+            state.startRuntimeIfNeeded()
+            try await waitUntil {
+                if case .failed(let error) = state.connectionState { throw NSError(domain: error, code: 1) }
+                if case .connected = state.connectionState { return true }
+                return false
+            }
+            await state.refreshInstalledCLIModels()
+            let model = try XCTUnwrap(WebUISnapshot(state: state).modelOptions.first {
+                InstalledCodexCLI.slug($0.id) == "gpt-6.2-sol"
+            })
+            state.createTask()
+            let id = try XCTUnwrap(state.selectedTaskID)
+            XCTAssertTrue(state.setTaskModel(model.id, taskID: id))
+            XCTAssertTrue(state.setAccessMode(.fullAccess))
+            let submitted = await state.submit(prompt: """
+                Check whether you can inspect the running Kolmogor app (com.ahmedelamin.LocalCodex).
+                Use computer_v2_open with activation none once. Do not activate the app, read its contents, or use other tools.
+                Tell me whether the inspection was possible.
+                """, toTaskID: id)
+            XCTAssertTrue(submitted)
+            try await waitUntil(timeout: .seconds(180)) {
+                guard let task = state.selectedTask else { return false }
+                if task.status == .failed { throw NSError(domain: task.entries.last?.body ?? "Turn failed", code: 2) }
+                return [.waiting, .completed].contains(task.status) && task.entries.contains { $0.turnID != nil && $0.id.hasPrefix("computer-outcome:") }
+            }
+            let task = try XCTUnwrap(state.selectedTask)
+            func check(_ entries: [TimelineEntry]) throws {
+                let failed = entries.filter { $0.toolEvent?.name == NativeAccessibilityDenial.tool && $0.toolEvent?.status == .failed }
+                XCTAssertEqual(failed.map(\.body), [NativeAccessibilityDenial.error])
+                let reply = try XCTUnwrap(entries.last { $0.kind == .assistant && $0.assistantPhase == "final_answer" })
+                XCTAssertEqual(NativeAccessibilityDenial.projectedReply(reply.body), reply.body)
+            }
+            XCTAssertEqual(task.status, .waiting)
+            try check(task.entries)
+            let thread = try XCTUnwrap(task.runtimeThreadID)
+            _ = await state.shutdownRuntime()
+            let reopened = SelectableCodexRuntime(configuration: config)
+            do {
+                let tasks = try await reopened.loadTasks()
+                let restored = try XCTUnwrap(tasks.first { $0.id == thread })
+                XCTAssertEqual(restored.status, .waiting)
+                try check(restored.entries)
+            } catch { _ = await reopened.shutdown(); throw error }
+            _ = await reopened.shutdown()
+        } catch { _ = await state.shutdownRuntime(); throw error }
+    }
+
+    private func waitUntil(timeout: Duration = .seconds(70), _ condition: () throws -> Bool) async throws {
+        let limit = ContinuousClock.now.advanced(by: timeout)
         while try !condition() {
             guard ContinuousClock.now < limit else { throw NSError(domain: "Timed out waiting for Kolmogor", code: 3) }
             try await Task.sleep(for: .milliseconds(100))

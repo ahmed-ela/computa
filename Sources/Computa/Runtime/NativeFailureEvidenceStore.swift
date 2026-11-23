@@ -42,6 +42,66 @@ enum ComputerOutcomeDiagnostic {
     }
 }
 
+/// Only a typed denial from a nonactivating app bind can issue this receipt.
+struct NativeAccessibilityDenial: LocalizedError {
+    var errorDescription: String? { Self.error }
+
+    static let code = "accessibility_denied_before_dispatch"
+    static let tool = "computer_v2_open"
+    static let error = "Kolmogor needs macOS Accessibility permission to inspect the app."
+    static let explanation = "I couldn’t inspect the app because Kolmogor doesn’t have macOS Accessibility permission."
+    static let nextStep = "Enable Kolmogor in System Settings → Privacy & Security → Accessibility, then try again."
+
+    // Render only complete, independently evidenced sentences. A model can
+    // append its own claims to the receipt even when asked to return it verbatim.
+    static func projectedReply(_ text: String?) -> String? {
+        guard let text, text.utf8.count <= 8_192 else { return nil }
+        let sentences = text.split(separator: ".", omittingEmptySubsequences: false)
+        // A trailing fragment without a period is never a complete sentence.
+        let known = sentences.dropLast().map { $0.trimmingCharacters(in: .whitespacesAndNewlines) + "." }
+        // Older CLI replies often reported the permission error after a clause
+        // about the target. Preserve the independent permission statement only.
+        let clauses = known.map { $0.components(separatedBy: ", but ").last ?? $0 }
+        guard let denial = clauses.first(where: { clause in
+            let normalized = clause.lowercased().replacingOccurrences(of: "’", with: "'")
+            let parts = normalized.components(separatedBy: " because ")
+            guard parts.count <= 2, let reason = parts.last else { return false }
+            if parts.count == 2 {
+                let blocked = /(?:i (?:couldn't|could not|was unable to) (?:inspect|read|access) the (?:app|window|thread)|the (?:app inspection|inspection|desktop tool) (?:didn't run|did not run|was blocked|was not possible))/
+                guard parts[0].wholeMatch(of: blocked) != nil else { return false }
+            }
+            let missing = /(?:kolmogor (?:lacks|doesn't have|does not have) (?:the required )?(?:macos )?accessibility permission|(?:the desktop tool reported that )?(?:macos )?accessibility permission (?:isn't granted|is not granted|was not granted|wasn't granted|is missing|is required))\./
+            return reason.wholeMatch(of: missing) != nil
+        }) else { return nil }
+        return known.contains(nextStep) ? denial + " " + nextStep : denial
+    }
+
+    static var toolGuidance: String {
+        error + " This app inspection did not run. If this prevents you from finishing, reply exactly: "
+            + explanation + " " + nextStep
+    }
+
+    static func diagnostic(reply: String?) -> [String: String] {
+        var value = ["code": code, "cause": "macos_accessibility_permission",
+                     "dispatch": "not_dispatched", "action_outcome": "unverified"]
+        if let reply { value["reply"] = reply }
+        return value
+    }
+
+    static func record(threadID: String, turnID: String, callID: String, reply: String?) throws -> NativeFailureEvidenceStore.Record {
+        let value = diagnostic(reply: projectedReply(reply))
+        let bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        return .init(threadID: threadID, turnID: turnID, callID: callID, toolName: tool,
+                     message: error, diagnosticText: String(decoding: bytes, as: UTF8.self), timestamp: Date())
+    }
+
+    static func failedTool(callID: String, turnID: String, time: Date) -> TimelineEntry {
+        TimelineEntry(id: callID, kind: .tool, title: tool, body: error, timestamp: time,
+            toolEvent: ToolEvent(name: tool, summary: error, status: .failed, input: "",
+                                 output: error + " " + nextStep, duration: nil), turnID: turnID)
+    }
+}
+
 /// App-owned evidence, not an assistant message or an App Server tool receipt.
 /// A successful append has synced a private atomic replacement and its directory.
 /// Bounds fail closed instead of evicting a previous completed action.
@@ -55,9 +115,31 @@ struct NativeFailureEvidenceStore: Sendable {
         let diagnosticText: String
         let timestamp: Date
 
+        private var accessibilityReceipt: [String: String]? {
+            guard toolName == NativeAccessibilityDenial.tool,
+                  let data = try? JSONDecoder().decode([String: String].self, from: Data(diagnosticText.utf8)),
+                  data["code"] == NativeAccessibilityDenial.code else { return nil }
+            return data
+        }
+
         var entry: TimelineEntry {
-            TimelineEntry(id: "native-failure:\(turnID):\(callID)", kind: .system,
-                title: "Native action stopped", body: message, timestamp: timestamp, turnID: turnID)
+            guard let receipt = accessibilityReceipt else {
+                return TimelineEntry(id: "native-failure:\(turnID):\(callID)", kind: .system,
+                    title: "Native action stopped", body: message, timestamp: timestamp, turnID: turnID)
+            }
+            let id = "computer-outcome:\(turnID)"
+            if let reply = NativeAccessibilityDenial.projectedReply(receipt["reply"]) {
+                return TimelineEntry(id: id, kind: .assistant, title: "Kolmogor", body: reply,
+                    timestamp: timestamp, assistantPhase: "final_answer", turnID: turnID)
+            }
+            return TimelineEntry(id: id, kind: .system, title: "App inspection blocked",
+                body: NativeAccessibilityDenial.error + " " + NativeAccessibilityDenial.nextStep,
+                timestamp: timestamp, turnID: turnID)
+        }
+
+        var presentation: [TimelineEntry] {
+            guard accessibilityReceipt != nil else { return [entry] }
+            return [NativeAccessibilityDenial.failedTool(callID: callID, turnID: turnID, time: timestamp), entry]
         }
 
         fileprivate func hasSameEvidence(as other: Self) -> Bool {
@@ -93,20 +175,16 @@ struct NativeFailureEvidenceStore: Sendable {
     static func restoringFailures(_ records: [Record], in history: [TimelineEntry]) -> [TimelineEntry] {
         var entries = history
         for record in records.sorted(by: { $0.timestamp < $1.timestamp }) {
-            var entry = record.entry
-            entry.activityGroupID = entries.first(where: {
-                $0.kind == .user && $0.turnID == record.turnID
-            })?.activityGroupID
-            if let existing = entries.firstIndex(where: { $0.id == entry.id }) {
-                entries.remove(at: existing)
-            }
-            if let end = entries.lastIndex(where: { $0.turnID == record.turnID }) {
-                entries.insert(entry, at: end + 1)
-            } else {
-                // Older/partial histories may lack the turn. Retain the evidence
-                // without assigning it to the newest request.
-                let index = entries.firstIndex(where: { $0.timestamp > record.timestamp }) ?? entries.endIndex
-                entries.insert(entry, at: index)
+            let group = entries.first { $0.kind == .user && $0.turnID == record.turnID }?.activityGroupID
+            for var entry in record.presentation {
+                entry.activityGroupID = group
+                if let index = entries.firstIndex(where: { $0.id == entry.id && $0.turnID == record.turnID }) {
+                    entries[index] = entry
+                } else {
+                    let end = entries.lastIndex(where: { $0.turnID == record.turnID }).map { $0 + 1 }
+                    let index = end ?? entries.firstIndex(where: { $0.timestamp > record.timestamp }) ?? entries.endIndex
+                    entries.insert(entry, at: index)
+                }
             }
         }
         return entries
@@ -284,6 +362,14 @@ struct NativeFailureEvidenceStore: Sendable {
 
     private func validate(_ record: Record) throws {
         for identity in [record.threadID, record.turnID, record.callID] { try validateIdentity(identity) }
+        if record.toolName == NativeAccessibilityDenial.tool, record.diagnosticText.utf8.count <= 2_048,
+           let data = try? JSONDecoder().decode([String: String].self, from: Data(record.diagnosticText.utf8)),
+           data["code"] == NativeAccessibilityDenial.code {
+            guard data == NativeAccessibilityDenial.diagnostic(reply: NativeAccessibilityDenial.projectedReply(data["reply"])),
+                  record.message == NativeAccessibilityDenial.error, record.timestamp.timeIntervalSinceReferenceDate.isFinite
+            else { throw StoreError.invalid("invalid accessibility denial receipt") }
+            return
+        }
         guard !record.toolName.isEmpty, record.toolName.utf8.count <= 128,
               !record.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, record.message.utf8.count <= 2_048,
               record.diagnosticText.utf8.count <= 8_192, record.timestamp.timeIntervalSinceReferenceDate.isFinite,
