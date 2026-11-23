@@ -543,8 +543,7 @@ final class AppState {
                 && WebsiteModelCatalog.inferenceSelection(for: model) == nil
         }
         if retired(defaultModel), defaultModel != replacement {
-            defaultModel = replacement
-            preferences.set(replacement, forKey: Self.defaultModelPreferenceKey)
+            rememberDefaultModel(replacement)
         }
         for index in tasks.indices where retired(tasks[index].model) && tasks[index].model != replacement {
             let taskID = tasks[index].id
@@ -1357,12 +1356,16 @@ final class AppState {
         if isReviewPresented { requestReviewRefresh(taskID: taskID) }
     }
 
+    private func rememberDefaultModel(_ modelID: String) {
+        defaultModel = modelID
+        preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
+    }
+
     @discardableResult
     func setDefaultModel(_ modelID: String) -> Bool {
         guard let option = modelOptions.first(where: { $0.id == modelID }),
               option.available != false, option.selectable != false else { return false }
-        defaultModel = modelID
-        preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
+        rememberDefaultModel(modelID)
         requestAutomaticWebsiteModelRefresh(for: modelID)
         updateWebsitePrewarming()
         return true
@@ -1377,6 +1380,8 @@ final class AppState {
               tasks[index].runtimeThreadID == nil || ((InstalledCodexCLI.slug(tasks[index].model) != nil) == (InstalledCodexCLI.slug(modelID) != nil)
                 && ProviderCLI(modelID: tasks[index].model) == ProviderCLI(modelID: modelID))
         else { return false }
+        rememberDefaultModel(modelID)
+        guard tasks[index].model != modelID else { return true }
         tasks[index].model = modelID
         saveWorkspace()
         requestAutomaticWebsiteModelRefresh(for: modelID)

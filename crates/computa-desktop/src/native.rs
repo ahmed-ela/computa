@@ -903,7 +903,8 @@ impl Host {
             }
             NativeAction::SetTaskModel { task_id, model_id } => {
                 if let Some(task) = self.snapshot.tasks.iter_mut().find(|t| t.id == task_id) {
-                    task.model = model_id;
+                    task.model = model_id.clone();
+                    self.snapshot.default_model = model_id;
                 }
             }
             NativeAction::SetDefaultModel { model_id } => self.snapshot.default_model = model_id,
