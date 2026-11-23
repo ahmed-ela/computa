@@ -443,6 +443,23 @@ enum AppServerThreadHistoryContract {
         })
     }
 
+    static func restartInterruptedTurnID(from data: Data, rejectedTurns: Set<String>) throws -> String? {
+        guard let turn = try savedTurns(data).last, let id = turn["id"] as? String,
+              turn["status"] as? String == "interrupted", !hasSavedError(turn), !rejectedTurns.contains(id),
+              let items = turn["items"] as? [[String: Any]],
+              items.contains(where: { $0["type"] as? String == "userMessage" }) else { return nil }
+        for item in items {
+            switch item["type"] as? String {
+            case "userMessage", "reasoning", "plan", "contextCompaction": continue
+            case "agentMessage" where item["phase"] as? String == "commentary": continue
+            case "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall":
+                guard item["status"] as? String == "completed" else { return nil }
+            default: return nil
+            }
+        }
+        return id
+    }
+
     static func latestUserTurnID(from data: Data) throws -> String? {
         guard let turn = try savedTurns(data).last(where: { ($0["items"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "userMessage" } }),
               let id = turn["id"] as? String, !id.isEmpty, id.utf8.count <= 512 else { return nil }
@@ -955,6 +972,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         var modelProvider: String
         var model: String
         var workspacePath: String
+        var crashRestartStore: AgentRestartStore? = nil
         var codexHomePath: String
         var baseInstructions: String
         var reasoningEffort: String
@@ -1422,6 +1440,8 @@ private extension CodexAppServerRuntime {
         private var commandTranscripts: [AgentTask.ID: AppServerCommandTranscript] = [:]
         private var commandStoppedTurns: [AgentTask.ID: String] = [:]
         private var tasksWithCommands: Set<AgentTask.ID> = []
+        private var crashRequests: [String: (digest: String, mode: AccessMode)] = [:]
+        private var crashInferences: [String: AgentRestartStore.Inference] = [:]
         private var ownedCommandItems: [AgentTask.ID: Set<String>] = [:]
         private var commandItemTurns: [AgentTask.ID: [String: String]] = [:]
         private var ownedCommandProcesses: [AgentTask.ID: [String: String]] = [:]
@@ -1756,7 +1776,15 @@ private extension CodexAppServerRuntime {
                 guard let self else { throw CancellationError() }
                 return try await self.browserAPIToolState(request).availability
             }
+            let crashAdmission: AgentRestartStore.Inference.Admission = { [weak self] task, thread, turn, preparation in
+                try await self?.beginCrashInference(task: task, thread: thread, turn: turn, preparation: preparation)
+            }
+            let supportsCrashRecovery = configuration.crashRestartStore != nil
             let installation = Task { [apiModelServer, webModelServer] in
+                if supportsCrashRecovery {
+                    await apiModelServer.setCrashAdmission(crashAdmission)
+                    await webModelServer.setCrashAdmission(crashAdmission)
+                }
                 await apiModelServer.setBrowserToolStateProvider(apiProvider)
                 await webModelServer.setBrowserToolAvailabilityProvider(websiteProvider)
             }
@@ -1886,9 +1914,59 @@ private extension CodexAppServerRuntime {
 
         #endif
 
+        private func settledForRestart(taskID: String, turn: String) -> Bool {
+            guard nativeStoppedTurns[taskID] != turn, commandStoppedTurns[taskID] != turn,
+                  contextStoppedTurns[taskID] != turn, computerFinalDiagnostics[taskID] != turn,
+                  fileChangeTranscripts[taskID]?.hasUnsettledChange(turnID: turn) != true,
+                  !compactionReservations.contains(taskID),
+                  !compactionTracker.isRunning(taskID: taskID), managedCompactions[taskID] == nil,
+                  ownedCommandItems[taskID, default: []].isEmpty, !commandCleanupTasks.contains(taskID),
+                  computerActiveOperation[taskID] == nil, computerV2InFlight[taskID] == nil,
+                  computerEvidence[taskID]?.completionDiagnostic == nil,
+                  !dynamicToolTasks.values.contains(where: { $0.taskID == taskID }),
+                  !pendingServerApprovals.values.contains(where: { $0.request.taskID == taskID }),
+                  !computerApprovalTask.values.contains(taskID) else { return false }
+            return true
+        }
+
+        private func beginCrashInference(task: String, thread: String, turn: String, preparation: UUID) throws -> AgentRestartStore.Inference? {
+            guard let store = configuration.crashRestartStore, let taskID = taskForThread[thread],
+                  let requestedID = UUID(uuidString: task), UUID(uuidString: taskID) == requestedID, let request = crashRequests[taskID],
+                  let model = modelForTask[taskID], !isPreparingCommandShutdown, !isShuttingDown,
+                  inferencePreparations[taskID] == preparation, turnIdentity.activeTurnID(for: taskID) == turn,
+                  settledForRestart(taskID: taskID, turn: turn) else { return nil }
+            guard crashInferences[taskID]?.isActive != true else {
+                throw RuntimeError.serverError("A model request is already in flight for this task.")
+            }
+            let inference = try AgentRestartStore.Inference(store: store, receipt: .init(threadID: thread,
+                turnID: turn, model: model, accessMode: request.mode, requestDigest: request.digest))
+            crashInferences[taskID] = inference
+            return inference
+        }
+
+        private func invalidateCrashRecovery(_ taskID: String) throws {
+            crashRequests.removeValue(forKey: taskID)
+            try crashInferences[taskID]?.retire()
+            crashInferences.removeValue(forKey: taskID)
+        }
+
+        private func retireCrashCheckpoints() {
+            for id in Set(crashInferences.keys).union(crashRequests.keys) {
+                do { try invalidateCrashRecovery(id) }
+                catch { childCleanupIssues.append("Could not retire an agent crash checkpoint.") }
+            }
+        }
+
         func shutdown() async -> RuntimeShutdownReport {
             if let shutdownTask { return await shutdownTask.value }
+            // Snapshot before cancellation removes tool and approval ownership.
+            let candidates = threadForTask.compactMap { taskID, threadID -> AgentRestartStore.Turn? in
+                guard let turn = turnIdentity.activeTurnID(for: taskID), turnSubmissionClaims[taskID] == nil,
+                      settledForRestart(taskID: taskID, turn: turn) else { return nil }
+                return .init(taskID: taskID, threadID: threadID, turnID: turn)
+            }
             isPreparingCommandShutdown = true
+            retireCrashCheckpoints()
             #if DEBUG
             for waiter in websiteCleanupShutdownWaiters { waiter.resume() }
             websiteCleanupShutdownWaiters.removeAll()
@@ -1902,7 +1980,9 @@ private extension CodexAppServerRuntime {
                 await self.prepareCommandShutdown()
                 self.isShuttingDown = true
                 self.serverFailed(RuntimeError.serverStopped)
-                return await self.finishShutdown()
+                var report = await self.finishShutdown()
+                if report.succeeded { report.interruptedTurns = candidates }
+                return report
             }
             shutdownTask = task
             return await task.value
@@ -2350,13 +2430,18 @@ private extension CodexAppServerRuntime {
             discardComputerV2Session(taskID: taskID)
             computerV2Sessions[taskID] = ComputerV2Session(epoch: UUID())
 
-            computerTaskScopes[taskID] = ComputerTaskScope(userPrompt: prompt)
+            let authorizedRequest = AgentRestartStore.originalRequest ?? prompt
+            if configuration.crashRestartStore != nil, isRemoteInference(modelID) {
+                try invalidateCrashRecovery(taskID)
+                crashRequests[taskID] = (AgentRestartStore.digest(authorizedRequest), accessMode)
+            }
+            computerTaskScopes[taskID] = ComputerTaskScope(userPrompt: authorizedRequest)
             computerAttempts[taskID] = ComputerUnchangedAttemptGuard()
             computerEvidence.removeValue(forKey: taskID)
             computerReadEvidence.removeValue(forKey: taskID)
             computerActiveOperation.removeValue(forKey: taskID)
             computerSearchEvidence[taskID] = ComputerSearchEvidence()
-            nativeMessageEvidence[taskID] = NativeMessageEvidence(prompt: prompt)
+            nativeMessageEvidence[taskID] = NativeMessageEvidence(prompt: authorizedRequest)
             computerRegisteredObservations.removeValue(forKey: taskID)
             computerFinalDiagnostics.removeValue(forKey: taskID)
 
@@ -2443,6 +2528,7 @@ private extension CodexAppServerRuntime {
         }
 
         func steer(prompt: String, taskID: AgentTask.ID) async throws {
+            try invalidateCrashRecovery(taskID)
             guard isReady, !isShuttingDown, !compactionReservations.contains(taskID),
                   turnSubmissionClaims[taskID] == nil,
                   contextStoppedTurns[taskID] == nil,
@@ -3238,6 +3324,7 @@ private extension CodexAppServerRuntime {
         }
 
         func interrupt(taskID: AgentTask.ID, acknowledgmentTimeout: Duration? = nil) async throws {
+            try invalidateCrashRecovery(taskID)
             if let cleanup = terminalCommandCleanups[taskID] {
                 let issues = await cleanup.task.value
                 if !issues.isEmpty { throw RuntimeError.serverError(issues.joined(separator: "; ")) }
@@ -3535,9 +3622,13 @@ private extension CodexAppServerRuntime {
                     } catch { unavailable.append(InstalledCodexCLI.unavailableTask(threadID: id, modelID: model, error: error)) }
                 }
             } else { (records, savedChats) = try await bundledThreadRecords(including: openThreadIDs) }
-            let tasks = try await restoreTasks(records, histories: histories)
+            var tasks = try await restoreTasks(records, histories: histories)
             for receipt in await webModelServer.latestCleanupReceipts() {
                 events.yield(.websiteSessionCleanupUpdated(receipt))
+                if receipt.outcome == .unconfirmed, let thread = receipt.threadID,
+                   let index = tasks.firstIndex(where: { $0.runtimeThreadID == thread }) {
+                    tasks[index].restartInterruptedTurnID = nil
+                }
             }
             return WorkspaceHistory(tasks: tasks + unavailable, savedChats: savedChats)
         }
@@ -3627,6 +3718,11 @@ private extension CodexAppServerRuntime {
                        let restoredStatus = try AppServerThreadHistoryContract.latestUserTurnStatus(from: history,
                             rejectedTurns: rejectedTurns, failedTurns: Set(websiteFailures.map(\.turnID))) {
                         tasks[index].status = restoredStatus
+                    }
+                    if tasks[index].status == .waiting, let interrupted = try AppServerThreadHistoryContract.restartInterruptedTurnID(
+                        from: history, rejectedTurns: rejectedTurns) {
+                        tasks[index].restartInterruptedTurnID = interrupted
+                        tasks[index].restartModelFromReceipt = tasksWithUnknownPersistedModel.contains(taskID)
                     }
                     do {
                         tasks[index].turnDiffs = try AppServerThreadHistoryContract.turnDiffs(from: history,
@@ -3867,6 +3963,7 @@ private extension CodexAppServerRuntime {
             case "turn/completed":
                 let turn = params["turn"] as? [String: Any]
                 guard turnIdentity.complete(taskID: taskID, turnID: turn?["id"] as? String) else { return }
+                try? invalidateCrashRecovery(taskID)
                 if let turnID = turn?["id"] as? String {
                     for entry in fileChangeTranscripts[taskID]?.finishUnconfirmed(turnID: turnID) ?? [] {
                         events.yield(.timelineEntryAppended(taskID: taskID, entry: entry))
@@ -8519,6 +8616,7 @@ private extension CodexAppServerRuntime {
         }
 
         private func serverFailed(_ error: Error) {
+            retireCrashCheckpoints()
             if configuration.usesInstalledCLI, !isShuttingDown, !isPreparingCommandShutdown {
                 for taskID in threadForTask.keys where turnIdentity.activeTurnID(for: taskID) != nil {
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,

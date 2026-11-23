@@ -78,6 +78,10 @@ struct AppServerFileChangeTranscript {
         return entry
     }
 
+    func hasUnsettledChange(turnID: String) -> Bool {
+        entries.values.contains { $0.turnID == turnID && $0.toolEvent?.status != .succeeded }
+    }
+
     var turnIDs: Set<String> { Set(entries.values.compactMap(\.turnID)) }
 
     mutating func receive(item: [String: Any], turnID: String, isCompleted: Bool) -> TimelineEntry? {

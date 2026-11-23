@@ -18,6 +18,8 @@ enum WebsiteModelSetupStatus: Equatable {
 
 private struct ActiveTurnTiming {
     let userEntryID: TimelineEntry.ID
+    let accessMode: AccessMode
+    let requestDigest: String
     let startedAt: Date
 }
 
@@ -1883,7 +1885,14 @@ final class AppState {
                 return tab.id
             }
             let unreadThreads = unreadCompletions.compactMap { $1.hasUnreadCompletion ? $0 : nil }
-            let history = try await runtime.loadWorkspaceHistory(including: Set(openThreads).union(unreadThreads))
+            let restartReceipts: [AgentRestartStore.Receipt]
+            do { restartReceipts = try runtime.restartStore?.pending() ?? [] }
+            catch {
+                Self.unreadLog.error("Agent restart receipts could not be read")
+                restartReceipts = []
+            }
+            let history = try await runtime.loadWorkspaceHistory(including:
+                Set(openThreads).union(unreadThreads).union(restartReceipts.map(\.threadID)))
             guard !Task.isCancelled, !isShuttingDown else { return }
             if taskSnapshotRevision == snapshotRevisionBeforeLoading {
                 savedChats = history.savedChats
@@ -1892,6 +1901,13 @@ final class AppState {
             }
             guard !Task.isCancelled, !isShuttingDown else { return }
             connectionState = .connected(provider: runtime.providerName)
+            // Restore each eligible turn before idle model discovery can recycle a CLI.
+            if let store = runtime.restartStore {
+                for receipt in restartReceipts {
+                    guard !isShuttingDown, !Task.isCancelled else { return }
+                    await resumeInterruptedAgent(receipt, store: store, loaded: history.tasks)
+                }
+            }
             for provider in Set([defaultModel, selectedTask?.model].compactMap { $0 }.compactMap(ProviderCLI.init(modelID:))) {
                 Task { await refreshProviderCLI(provider) }
             }
@@ -1919,9 +1935,44 @@ final class AppState {
         // Retain that completed owner; production finishes it only at shutdown.
     }
 
+    private func resumeInterruptedAgent(_ receipt: AgentRestartStore.Receipt, store: AgentRestartStore,
+                                        loaded: [AgentTask]) async {
+        // Compare the cold history with the current UI snapshot. A newer send, a
+        // model change, an uncertain tool, or a finished turn invalidates the handoff.
+        let restored = loaded.first { $0.runtimeThreadID == receipt.threadID }
+        do { guard try store.claim(receipt) else { return } }
+        catch {
+            Self.unreadLog.error("Agent restart receipt could not be claimed")
+            return
+        }
+        guard let restored, let index = tasks.firstIndex(where: { $0.id == restored.id }),
+              tasks[index] == restored, restored.status == .waiting,
+              restored.restartInterruptedTurnID == receipt.turnID, !isBusy(taskID: restored.id),
+              restored.model == receipt.model || restored.restartModelFromReceipt == true,
+              receipt.accessMode == .fullAccess || accessMode == .askEveryTime,
+              let original = restored.entries.lastIndex(where: {
+                  $0.kind == .user && AgentRestartStore.digest($0.body) == receipt.requestDigest
+              }), let continuation = AgentRestartStore.continuation(for: restored.entries[original...]) else { return }
+        let request = restored.entries[original].body
+        tasks[index].model = receipt.model
+        await AgentRestartStore.$originalRequest.withValue(request) {
+            _ = await submitDelivery(prompt: continuation, toTaskID: restored.id)
+        }
+    }
+
     func shutdownRuntime() async -> RuntimeShutdownReport {
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
+        var eligible: [String: (model: String, timing: ActiveTurnTiming)] = [:]
+        for task in tasks {
+            guard let timing = activeTurnTimings[task.id], activeTurnTaskIDs.contains(task.id),
+                  !interruptingTaskIDs.contains(task.id), !steeringTaskIDs.contains(task.id),
+                  !pendingApprovals.contains(where: { $0.taskID == nil || $0.taskID == task.id }),
+                  !approvalAttemptTaskIDs.values.contains(task.id),
+                  compactionStateByTask[task.id] != .running,
+                  websiteSessionCleanupReceipts[task.id]?.outcome != .unconfirmed else { continue }
+            eligible[task.id] = (task.model, timing)
+        }
         let eventConsumer = runtimeEventConsumer
         eventConsumer?.cancel()
         startupWebsiteModelIdleObservation = nil
@@ -1954,6 +2005,14 @@ final class AppState {
             let report = await runtime?.shutdown() ?? RuntimeShutdownReport(issues: [])
             await eventConsumer?.value
             browserSession.shutdown()
+            guard report.succeeded, let store = runtime?.restartStore else { return report }
+            do {
+                for turn in report.interruptedTurns {
+                    guard let owner = eligible[turn.taskID] else { continue }
+                    try store.save(.init(threadID: turn.threadID, turnID: turn.turnID,
+                        model: owner.model, accessMode: owner.timing.accessMode, requestDigest: owner.timing.requestDigest))
+                }
+            } catch { return RuntimeShutdownReport(issues: ["An interrupted agent could not be saved for relaunch."]) }
             return report
         }
         runtimeShutdown = task
@@ -2452,7 +2511,7 @@ final class AppState {
         websiteSessionCleanupReceipts.removeValue(forKey: taskID)
         entry.activityGroupID = entry.id
         tasks[index].entries.append(entry)
-        tasks[index].summary = prompt
+        if AgentRestartStore.originalRequest == nil { tasks[index].summary = prompt }
         tasks[index].status = .waiting
         tasks[index].updatedAt = .now
         if selectedTaskID == taskID {
@@ -2462,7 +2521,8 @@ final class AppState {
         if let runtime {
             let modelID = tasks[index].model
             activeTurnTimings[taskID] = ActiveTurnTiming(
-                userEntryID: entry.id,
+                userEntryID: entry.id, accessMode: accessMode,
+                requestDigest: AgentRestartStore.digest(AgentRestartStore.originalRequest ?? prompt),
                 startedAt: entry.timestamp
             )
             activeTurnTaskIDs.insert(taskID)

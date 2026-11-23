@@ -151,6 +151,9 @@ struct AgentTask: Identifiable, Hashable, Codable, Sendable {
     let id: String
     /// Engine thread identity survives restarts; the UI's initial task UUID does not.
     var runtimeThreadID: String?
+    /// Latest turn for which the runtime can verify an interruption and settled tool state.
+    var restartInterruptedTurnID: String?
+    var restartModelFromReceipt: Bool?
     var title: String
     var summary: String
     var status: TaskStatus

@@ -383,6 +383,8 @@ actor WebModelServer {
     private var embeddedTransport: (any WebModelTransport)?
     private var embeddedTransportGeneration = UUID()
     private var embeddedTransportIdentity: AnyObject?
+    private var crashAdmission: AgentRestartStore.Inference.Admission?
+    func setCrashAdmission(_ admission: @escaping AgentRestartStore.Inference.Admission) { crashAdmission = admission }
     private var browserToolAvailabilityProvider: EmbeddedBrowserToolAvailabilityProvider?
     private var browserToolAvailabilityProviderRevision = UUID()
     private var groqSubmissionPacer = WebsiteRequestPacer()
@@ -1740,6 +1742,17 @@ actor WebModelServer {
                          taskID: String, identity: NativeRequestIdentity,
                          transport: any WebModelTransport, transportGeneration: UUID) async throws -> InferenceResult {
         let context = try await inferenceContext(taskID: taskID)
+        guard identity.threadID == context.threadID, identity.turnID == context.turnID else { throw Failure.inferenceContextRequired }
+        let window = context.isMaintenance ? nil : try await crashAdmission?(taskID, context.threadID, context.turnID, context.preparationID)
+        return try await AgentRestartStore.Inference.during(window) {
+            try await self.performInContext(originalRequest, provider: provider, taskID: taskID, identity: identity,
+                transport: transport, transportGeneration: transportGeneration, context: context)
+        }
+    }
+
+    private func performInContext(_ originalRequest: WebModelResponseCodec.Request, provider: String,
+                                  taskID: String, identity: NativeRequestIdentity, transport: any WebModelTransport,
+                                  transportGeneration: UUID, context: InferenceContext) async throws -> InferenceResult {
         let nativeCheckpoint = provider == "chatgpt"
             ? try await admitChatGPTContext(originalRequest, taskID: taskID, context: context, identity: identity,
                                            transportGeneration: transportGeneration) : nil

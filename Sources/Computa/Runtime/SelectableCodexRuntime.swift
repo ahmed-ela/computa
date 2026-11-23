@@ -2,6 +2,7 @@ import Foundation
 
 /// Routes each chat to one app-server process for the lifetime of its thread.
 actor SelectableCodexRuntime: AgentRuntimeClient {
+    nonisolated let restartStore: AgentRestartStore?
     nonisolated let providerName: String
     private let bundled: CodexAppServerRuntime
     private let cli: CodexAppServerRuntime
@@ -16,12 +17,21 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
 
     init(configuration: CodexAppServerRuntime.Configuration = .localQwen,
          providerCLISearchDirectories: [String] = ProviderCLI.directories()) {
+        restartStore = AgentRestartStore(directory: URL(fileURLWithPath: configuration.codexHomePath)
+            .appendingPathComponent("InterruptedAgents-v1", isDirectory: true))
         let events = channel.continuation
         providerChats = ProviderCLIChats(root: URL(fileURLWithPath: configuration.codexHomePath)
             .appendingPathComponent("ProviderCLIChats", isDirectory: true), searchDirectories: providerCLISearchDirectories) { events.yield($0) }
-        bundled = CodexAppServerRuntime(configuration: configuration)
+        var hosted = configuration
+        hosted.crashRestartStore = restartStore
+        bundled = CodexAppServerRuntime(configuration: hosted)
         providerName = bundled.providerName
         var native = configuration
+        #if DEBUG
+        // As in production, installed CLI and bundled engine must own distinct
+        // inference servers and their respective tool-ownership callbacks.
+        native.apiModelServerForTesting = nil
+        #endif
         native.executable = .installedCLI
         native.backend = .external
         native.modelProvider = "openai"
@@ -161,12 +171,13 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     }
     func shutdown() async -> RuntimeShutdownReport {
         // Retire MCP callers before either app-server shuts down the shared browser.
-        let providerIssues = await providerChats.shutdown()
+        let providerReport = await providerChats.shutdownReport()
         async let mainReport = bundled.shutdown()
         async let cliReport = cli.shutdown()
         let reports = await [mainReport, cliReport]
         for listener in listeners { await listener.value }
         channel.continuation.finish()
-        return RuntimeShutdownReport(issues: reports.flatMap(\.issues) + providerIssues)
+        let all = reports + [providerReport]
+        return RuntimeShutdownReport(issues: all.flatMap(\.issues), interruptedTurns: all.flatMap(\.interruptedTurns))
     }
 }

@@ -2,7 +2,7 @@ import Foundation
 
 /// Selects the engine's terminal/file sandbox and native approval behavior.
 /// macOS privacy grants and browser/computer tool validation remain authoritative.
-enum AccessMode: String, CaseIterable, Identifiable, Sendable {
+enum AccessMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case askEveryTime
     case fullAccess
 

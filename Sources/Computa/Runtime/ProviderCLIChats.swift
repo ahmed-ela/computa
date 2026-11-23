@@ -14,6 +14,9 @@ actor ProviderCLIChats {
         var tools: [String: TimelineEntry] = [:]
         var item = UUID().uuidString
         var acceptingUpdates = false
+        var canLoadSession = false
+        var restartCancellation: AsyncStream<Void>.Continuation?
+        var browserCalls = 0
         var ending = false
         var browser: OpenCodeBrowserBridge?
         var browserController: EmbeddedBrowserToolController?
@@ -68,7 +71,7 @@ actor ProviderCLIChats {
             var row = try JSONDecoder().decode(Record.self, from: Data(contentsOf: file))
             guard row.task.id == file.deletingPathExtension().lastPathComponent, ProviderCLI(modelID: row.task.model) != nil,
                   active[row.task.id] == nil else { continue }
-            if row.task.status == .running || row.task.status == .waiting {
+            if row.task.status == .running || (row.task.status == .waiting && row.task.restartInterruptedTurnID == nil) {
                 row.task.status = .failed
                 row.task.entries.append(.init(kind: .system, title: "CLI session interrupted",
                     body: "Kolmogor closed before the CLI confirmed this turn."))
@@ -161,13 +164,14 @@ actor ProviderCLIChats {
         do {
             let initResult = try await initialize(conn)
             try check(id, turnID)
+            active[id]?.canLoadSession = (initResult["agentCapabilities"] as? [String: Any])?["loadSession"] as? Bool == true
             var params: [String: Any] = ["cwd": directory.path, "mcpServers": [Any]()]
             if provider == .opencode, let controller = browserController {
                 let capabilities = initResult["agentCapabilities"] as? [String: Any]
                 guard (capabilities?["mcpCapabilities"] as? [String: Any])?["http"] as? Bool == true else {
                     throw AgentCLIError.unavailable("Update OpenCode to a version with HTTP MCP support to use Kolmogor’s browser.")
                 }
-                let scope = ComputerTaskScope(userPrompt: prompt)
+                let scope = ComputerTaskScope(userPrompt: AgentRestartStore.originalRequest ?? prompt)
                 let bridge = OpenCodeBrowserBridge { [weak self] tool, input in
                     guard let self else { throw AgentCLIError.cancelled }
                     return try await self.browserCall(tool, input: input, task: id, turn: turnID, controller: controller, scope: scope)
@@ -213,10 +217,11 @@ actor ProviderCLIChats {
             }
             var task = saved?.task ?? AgentTask(id: id, runtimeThreadID: id, title: String(prompt.prefix(72)),
                 summary: prompt, status: .running, workspace: directory.path, model: modelID, entries: [])
+            task.restartInterruptedTurnID = nil
             task.model = modelID
             task.status = .running
             task.updatedAt = .now
-            task.entries.append(.init(kind: .user, title: "You", body: prompt))
+            task.entries.append(.init(kind: .user, title: "You", body: prompt, turnID: turnID))
             try save(Record(task: task, session: session))
             active[id]?.session = session
             active[id]?.acceptingUpdates = true
@@ -237,7 +242,14 @@ actor ProviderCLIChats {
     private func run(_ prompt: String, id: String, turn: String, session: String, conn: AgentCLIConnection) async {
         do {
             let response = try await rpc(conn, "session/prompt", ["sessionId": session, "prompt": [["type": "text", "text": prompt]]], timeout: .seconds(1800))
-            try check(id, turn)
+            guard let owner = active[id], owner.id == turn, !owner.ending else { throw AgentCLIError.cancelled }
+            if response["stopReason"] as? String == "cancelled", owner.restartCancellation != nil, canResume(owner, task: id) {
+                await finish(id, turn: turn, entry: .init(kind: .system, title: "Paused for restart",
+                    body: "Kolmogor closed during this turn.", turnID: turn), status: .waiting, restarting: true)
+                await conn.close()
+                return
+            }
+            if owner.restartCancellation == nil { try check(id, turn) }
             guard response["stopReason"] as? String == "end_turn", let current = active[id],
                   !current.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AgentCLIError.protocolError("The CLI ended the turn without a completed answer.")
@@ -251,8 +263,9 @@ actor ProviderCLIChats {
         await conn.close()
     }
 
-    private func finish(_ id: String, turn: String, entry: TimelineEntry, status: TaskStatus) async {
+    private func finish(_ id: String, turn: String, entry: TimelineEntry, status: TaskStatus, restarting: Bool = false) async {
         guard let current = active[id], current.id == turn, !current.ending else { return }
+        defer { current.restartCancellation?.finish() }
         active[id]?.ending = true
         active[id]?.acceptingUpdates = false
         clearPermissions(id)
@@ -262,6 +275,7 @@ actor ProviderCLIChats {
         let status = issues.isEmpty ? status : .failed
         row.task.updatedAt = .now
         row.task.status = status
+        row.task.restartInterruptedTurnID = restarting && issues.isEmpty ? turn : nil
         row.task.entries += current.tools.values.sorted { $0.timestamp < $1.timestamp }
         row.task.entries.append(entry)
         let cleanup = issues.isEmpty ? nil : TimelineEntry(kind: .system, title: "Browser cleanup unconfirmed", body: issues.joined(separator: " "))
@@ -294,6 +308,8 @@ actor ProviderCLIChats {
             guard active[task]?.acceptingUpdates == true else { throw AgentCLIError.cancelled }
         }
         try checkTurn()
+        active[task]?.browserCalls += 1
+        defer { if active[task]?.id == turn { active[task]?.browserCalls -= 1 } }
         guard let arguments = try JSONSerialization.jsonObject(with: input) as? [String: Any] else {
             throw AgentCLIError.protocolError("Invalid browser arguments.")
         }
@@ -412,14 +428,52 @@ actor ProviderCLIChats {
         await current.connection?.close()
     }
 
-    func shutdown() async -> [String] {
+    func shutdown() async -> [String] { await shutdownReport().issues }
+
+    private func canResume(_ turn: Turn, task: String) -> Bool {
+        turn.canLoadSession && turn.acceptingUpdates && !turn.ending && turn.session != nil && turn.browserCalls == 0
+            && turn.tools.values.allSatisfy { $0.toolEvent?.status == .succeeded }
+            && !permissions.values.contains { $0.taskID == task }
+            && !browserPermissions.values.contains { $0.task == task }
+    }
+
+    private func cancelForRestart(_ id: String, turnID: String) async {
+        guard let turn = active[id], turn.id == turnID, canResume(turn, task: id),
+              let session = turn.session, let conn = turn.connection else { return }
+        let (stream, finished) = AsyncStream<Void>.makeStream()
+        active[id]?.restartCancellation = finished
+        defer { finished.finish() }
+        do {
+            let message = try JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "method": "session/cancel",
+                "params": ["sessionId": session]])
+            try await conn.send(message)
+            // ACP acknowledges cancellation on the outstanding session/prompt.
+            // A client that never acknowledges stays paused after its process exits.
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { for await _ in stream { } }
+                group.addTask { try? await Task.sleep(for: .seconds(2)) }
+                await group.next()
+                group.cancelAll()
+            }
+        } catch { return }
+    }
+
+    func shutdownReport() async -> RuntimeShutdownReport {
         shuttingDown = true
+        let turns = active
         var issues: [String] = []
+        await withTaskGroup(of: Void.self) { group in
+            for (id, turn) in turns { group.addTask { await self.cancelForRestart(id, turnID: turn.id) } }
+        }
         for conn in Array(discoveries.values) { issues += await conn.close() }
-        for (id, turn) in active {
+        var interrupted = [AgentRestartStore.Turn]()
+        for (id, turn) in turns {
+            if records[id]?.task.restartInterruptedTurnID == turn.id {
+                interrupted.append(.init(taskID: id, threadID: id, turnID: turn.id))
+            }
             await interrupt(id)
             if let conn = turn.connection { issues += await conn.close() }
         }
-        return issues
+        return RuntimeShutdownReport(issues: issues, interruptedTurns: interrupted)
     }
 }

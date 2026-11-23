@@ -16,6 +16,84 @@ final class ProviderCLIIntegrationTests: XCTestCase {
         XCTAssertNil(ProviderCLI(modelID: "cli/gemini/default"))
     }
 
+    func testOnlyAcknowledgedACPInterruptionsWithSettledToolsResume() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("agy")
+        let source = #"""
+        #!/usr/bin/python3
+        import json, sys, uuid
+        from pathlib import Path
+        def emit(obj): print(json.dumps(dict(jsonrpc="2.0", **obj)),flush=True)
+        def update(change): emit({"method":"session/update","params":{"sessionId":session,"update":change}})
+        for line in sys.stdin:
+            m=json.loads(line); method=m["method"]; p=m.get("params",{})
+            if method=="initialize": result={"protocolVersion":1,"agentCapabilities":{"loadSession":True}}
+            elif method=="session/new": session=str(uuid.uuid4()); result={"sessionId":session}
+            elif method=="session/load": session=p["sessionId"]; result={}
+            elif method=="session/prompt":
+                word=p["prompt"][0]["text"]; pending=m["id"]
+                if word in ("safe","unconfirmed","noack","manual"):
+                    if word in ("safe","unconfirmed"):
+                        with (Path(__file__).parent/word).open("a") as f: f.write("one\n")
+                        update({"sessionUpdate":"tool_call","toolCallId":"write","title":"Synthetic write","status":"in_progress"})
+                        if word=="safe": update({"sessionUpdate":"tool_call_update","toolCallId":"write","status":"completed"})
+                    update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ready"}})
+                    continue
+                update({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed "+session}})
+                result={"stopReason":"end_turn"}
+            elif method=="session/cancel":
+                if word!="noack": emit({"id":pending,"result":{"stopReason":"cancelled"}})
+                continue
+            else: raise Exception(method)
+            emit({"id":m["id"],"result":result})
+        """#
+        try Data(source.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let channel = AsyncStream<AgentRuntimeEvent>.makeStream()
+        let store = root.appendingPathComponent("store")
+        let chats = ProviderCLIChats(root: store, searchDirectories: [root.path, "/usr/bin"]) { channel.continuation.yield($0) }
+        var ids = [String: String]()
+        for word in ["safe", "unconfirmed", "noack", "manual"] {
+            let id = UUID().uuidString
+            ids[word] = id
+            try await chats.submit(word, id: id, provider: .antigravity, modelID: ProviderCLI.antigravity.modelID)
+        }
+        let ready = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                var seen = Set<String>()
+                for await event in channel.stream {
+                    if case .assistantMessageDelta(let id, _, let delta) = event, delta == "ready" { seen.insert(id) }
+                    if seen.count == 4 { return true }
+                }
+                return false
+            }
+            group.addTask { try? await Task.sleep(for: .seconds(8)); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        XCTAssertTrue(ready)
+        await chats.interrupt(try XCTUnwrap(ids["manual"]))
+        let report = await chats.shutdownReport()
+        XCTAssertTrue(report.succeeded, report.issues.description)
+        let safe = try XCTUnwrap(ids["safe"])
+        XCTAssertEqual(report.interruptedTurns.map(\.taskID), [safe])
+        let next = AsyncStream<AgentRuntimeEvent>.makeStream()
+        let fresh = ProviderCLIChats(root: store, searchDirectories: [root.path, "/usr/bin"]) { next.continuation.yield($0) }
+        let rows = try await fresh.load()
+        XCTAssertEqual(rows.filter { $0.restartInterruptedTurnID != nil }.map(\.id), [safe])
+        let disk = try JSONDecoder().decode(ProviderCLIChats.Record.self, from: Data(contentsOf: store.appendingPathComponent(safe + ".json")))
+        try await fresh.submit(AgentRestartStore.continuation, id: safe, provider: .antigravity, modelID: ProviderCLI.antigravity.modelID)
+        let answer = try await Self.answer(next.stream, id: safe) { _ in XCTFail("Unexpected approval") }
+        XCTAssertEqual(answer, "resumed " + disk.session)
+        for word in ["safe", "unconfirmed"] {
+            XCTAssertEqual(try String(contentsOf: root.appendingPathComponent(word), encoding: .utf8), "one\n")
+        }
+        _ = await fresh.shutdown()
+    }
+
     @MainActor
     func testFixtureConversationAndRestore() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

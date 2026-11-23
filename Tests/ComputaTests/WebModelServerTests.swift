@@ -1973,6 +1973,34 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testWebsiteCrashCheckpointRetiresBeforeReleasingAChatGPTToolCall() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AgentRestartStore(directory: root)
+        let base = FixtureWebModelTransport(replyTexts: [#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"fixture"}}]}"#])
+        let gate = WebListenerStartupGate()
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        let model = syntheticChatGPTModelID
+        await server.setCrashAdmission { _, thread, turn, _ in
+            try .init(store: store, receipt: .init(threadID: thread, turnID: turn, model: model,
+                accessMode: .askEveryTime, requestDigest: AgentRestartStore.digest("Test website recovery")))
+        }
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(
+            GatedLeaseFixtureTransport(base: base, operation: "webProviderFinish", gate: gate), defaultChatChoice: syntheticChatGPTChoice))
+        let request = try turnRequest(input: [["role": "user", "content": "Test website recovery"]], model: model)
+        let inference = Task { try await server.fixtureInfer(request, taskID: "site-checkpoint") }
+        try await gate.waitUntilEntered()
+        let before = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(before.filter { $0.hasSuffix(".inference") }.count, 1)
+        XCTAssertTrue(try store.pending().isEmpty)
+        await gate.resume()
+        let output = try responseOutput(await inference.value)
+        XCTAssertEqual(output.first?["type"] as? String, "function_call")
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        let issues = await server.fixtureFinish(taskID: "site-checkpoint")
+        XCTAssertTrue(issues.isEmpty)
+    }
+
     func testChatCancellationDuringFreshClosureWithholdsOutputAndClosesOnlyThatLease() async throws {
         let base = FixtureWebModelTransport(replyTexts: [#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"fixture"}}]}"#])
         let gate = WebListenerStartupGate()
@@ -3899,7 +3927,7 @@ final class WebModelServerTests: XCTestCase {
                 XCTAssertTrue(prompt.contains("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nExact currently offered custom names: (none)"))
                 let literalBoundary: String
                 switch provider {
-                case "claude", "kimi":
+                case "claude", "kimi", "grok":
                     literalBoundary = "\n" + ComputaAgentInstructions.literalFencedResponseBoundary
                 case "qwen":
                     let rawSpelling = #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#
@@ -5002,11 +5030,12 @@ private actor FixtureWebModelTransport: WebModelTransport {
             }
         }
         // Fixed synthetic menus, independent of the requested model. Concrete
-        // Groq and Kimi requests still require their exact observed choice;
+        // named-model requests still require their exact observed choice;
         // never reflect the request or repair contradictory evidence from
         // ChoiceWebModelTransport.
         let providerFixtureChoice: WebsiteModelChoice?
         switch currentProvider {
+        case "grok": providerFixtureChoice = syntheticGrokChoice
         case "groq": providerFixtureChoice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
         case "kimi": providerFixtureChoice = syntheticKimiChoice
         case "qwen": providerFixtureChoice = syntheticQwenChoice

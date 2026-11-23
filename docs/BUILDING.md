@@ -150,6 +150,14 @@ be granted again. Setup does not edit TCC, bypass Gatekeeper, or grant Full Acce
 Review Accessibility and Screen Recording prompts yourself. Signing does not
 grant access automatically.
 
+### Running agents across a restart
+
+Starting with 0.21.0, quitting Kolmogor or choosing **Install and Relaunch** saves which active turns the app interrupted. On the next launch, an eligible agent continues in the same chat, with the same model and the original tool restrictions. It receives a continuation request with the existing conversation history. Finished chats and tasks the user stopped stay idle.
+
+The app checks the saved turn and tool outcomes before continuing. Pending approvals, unconfirmed actions, broader permissions, and CLI sessions that cannot acknowledge cancellation and reload their conversation require manual continuation. The first update from an older build can only restore what that build saved.
+
+Website and API models using the bundled engine also save a checkpoint while waiting for a model reply. Kolmogor removes it from disk before passing the reply to the engine for execution. After an unexpected exit, the app can resume at that checkpoint and tell the model which tool calls already finished, even if the engine summarized the conversation. A chat stays paused if a command or edit was still running or if its outcome is unclear. External CLI providers manage their own inference and require manual continuation after a crash.
+
 ## Test fixture portability
 
 TypeScript App Server fixtures use Bun. In Debug tests the runtime resolves an
