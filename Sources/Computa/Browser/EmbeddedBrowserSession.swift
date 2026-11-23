@@ -77,6 +77,7 @@ final class EmbeddedBrowserSession {
     }
     @ObservationIgnored private var workspaceFaviconsEnabled = false
     @ObservationIgnored var onWorkspaceTabOpened: ((UUID) -> Void)?
+    /// The workspace picks a neighbor only when closing left no opener to return to.
     @ObservationIgnored var onWorkspaceTabClosed: ((UUID, Bool) -> Void)?
     @ObservationIgnored var onWorkspacePageChanged: (() -> Void)?
     private(set) var selectedTabID: UUID?
@@ -166,6 +167,10 @@ final class EmbeddedBrowserSession {
     }
     #endif
     let maximumTabs: Int
+    private var reservedPopupID: UUID?
+    private var occupiedTabSlots: Int {
+        tabs.count - (reservedPopupID == nil ? 0 : 1) + pendingChatGPTInferenceCookiePreparationCount
+    }
     var pendingChatGPTInferenceCookiePreparationCount: Int { inferenceCookieSeeds.count + inferenceCookieValidations.count }
     var failedChatGPTInferenceCookiePreparationCount: Int {
         inferenceCookieSeeds.values.filter(\.hasFailedCallerAwaitingCallback).count
@@ -830,14 +835,14 @@ final class EmbeddedBrowserSession {
                            requestsMobileSite: Bool = false, workspaceID: UUID = UUID(), isolatedChatGPTStore: WKWebsiteDataStore? = nil, kimiProfile: KimiProfile? = nil) throws -> UUID {
         do {
             guard !isShutdown else { throw Failure.sessionClosed }
-            guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+            guard occupiedTabSlots < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
             if let url { try EmbeddedBrowserURLPolicy.validate(url) }
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = kimiProfile?.store ?? isolatedChatGPTStore ?? dataStore()
             // This fresh controller has no native script handlers, scripts, or UI resource scheme.
             configuration.userContentController = WKUserContentController()
             // OAuth can open a window after an asynchronous response, beyond
-            // the original click's gesture. Human popups still use the tab cap
+            // the original click's gesture. Human popups still use bounded capacity
             // and navigation policy; inference-owned pages cannot open them.
             configuration.preferences.javaScriptCanOpenWindowsAutomatically = !modelOwned && !toolOwned
             if modelOwned {
@@ -874,7 +879,15 @@ final class EmbeddedBrowserSession {
                              kimiProfileID: UUID? = nil, requestsMobileSite: Bool = false, workspaceID: UUID = UUID()) throws -> Entry {
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
-        guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        let needsPopupSlot = occupiedTabSlots >= maximumTabs
+        if needsPopupSlot {
+            // Only the page mounted in the human browser may use the extra slot.
+            // Keep existing model reservations available while the popup is open.
+            guard reservedPopupID == nil, let openerID = popupOpenerTabID, openerID == selectedTabID,
+                  let opener = entries[openerID], !opener.tab.isPopup,
+                  let host = opener.presentationHost, opener.view.superview === host
+            else { throw Failure.tabLimit(maximumTabs) }
+        }
         // Apply before construction/initial navigation for human, tool, model
         // and popup tabs. Keep WebKit's own platform/engine user-agent prefix.
         configuration.applicationNameForUserAgent = EmbeddedBrowserIdentity.currentApplicationName
@@ -906,6 +919,7 @@ final class EmbeddedBrowserSession {
         let entry = Entry(tab: tab, view: view, delegate: delegate, isModelOwned: modelOwned, isToolOwned: toolOwned,
                           popupOpenerTabID: popupOpenerTabID, usesIsolatedChatGPTProfile: usesIsolatedChatGPTProfile)
         entries[tab.id] = entry
+        if needsPopupSlot { reservedPopupID = tab.id }
         tabs.append(tab)
         // Inactive creation stays inactive, including the first inference tab.
         if select { selectedTabID = tab.id }
@@ -1006,14 +1020,18 @@ final class EmbeddedBrowserSession {
         entry.view.stopLoading()
         entry.view.removeFromSuperview()
         tabs.remove(at: index)
-        if selectedTabID == id {
-            if let opener = entry.popupOpenerTabID, entries[opener]?.isModelOwned == false { selectedTabID = opener }
-            else {
+        if reservedPopupID == id { reservedPopupID = nil }
+        var needsAdjacentSelection = wasSelected
+        if wasSelected {
+            if let opener = entry.popupOpenerTabID, entries[opener]?.isModelOwned == false {
+                selectedTabID = opener
+                needsAdjacentSelection = false
+            } else {
                 let remaining = workspaceBrowserTabs
                 selectedTabID = remaining.isEmpty ? nil : remaining[min(humanIndex, remaining.count - 1)].id
             }
         }
-        if !entry.isModelOwned && !entry.isToolOwned && !isShutdown { onWorkspaceTabClosed?(entry.tab.workspaceID, wasSelected) }
+        if !entry.isModelOwned && !entry.isToolOwned && !isShutdown { onWorkspaceTabClosed?(entry.tab.workspaceID, needsAdjacentSelection) }
         if !entry.isModelOwned { errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error } }
         if let observation = postBlockObservation {
             observation.lease.exactViewClosed = true
@@ -3267,7 +3285,7 @@ final class EmbeddedBrowserSession {
         guard chatGPTInferencePrewarmingEnabled, !isShutdown, chatGPTInferencePrewarm == nil,
               inferenceCookieValidations.isEmpty, exclusiveCookieMaintenance == nil,
               let admit = chatGPTInferencePrewarmAdmission,
-              tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { return }
+              occupiedTabSlots < maximumTabs else { return }
         do { try admit() } catch { return }
         let warm: InferencePrewarm
         #if DEBUG
@@ -3480,7 +3498,7 @@ final class EmbeddedBrowserSession {
         try Task.checkCancellation()
         guard !isShutdown else { throw Failure.sessionClosed }
         guard exclusiveCookieMaintenance == nil else { throw Failure.cookieMaintenancePending }
-        guard tabs.count + pendingChatGPTInferenceCookiePreparationCount < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
+        guard occupiedTabSlots < maximumTabs else { throw Failure.tabLimit(maximumTabs) }
         let source = dataStore(), isolated = WKWebsiteDataStore.nonPersistent(), reservation = UUID()
         let seed: ChatGPTInferenceCookieSeed
         #if DEBUG

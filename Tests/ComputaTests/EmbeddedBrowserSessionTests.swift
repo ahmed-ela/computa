@@ -858,8 +858,8 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertEqual(unchangedPage, Data("1".utf8), "The page and adapter probes must have independent realm state")
     }
 
-    func testAsyncBlankPopupPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {
-        let session = EmbeddedBrowserSession(persistent: false)
+    func testAsyncBlankPopupAtTabLimitPreservesOpenerAndSharedConfigurationAndClosesOnlyChild() async throws {
+        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 1)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
                               styleMask: [], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -900,6 +900,11 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNil(child.configuration.urlSchemeHandler(forURLScheme: "localcodex-app"))
         let childReady = try await script(child, "return !!document.getElementById('popup-ready') && !!window.opener;")
         XCTAssertEqual(childReady, Data("true".utf8))
+        XCTAssertThrowsError(try session.createTab()) {
+            XCTAssertEqual($0 as? EmbeddedBrowserSession.Failure, .tabLimit(1))
+        }
+        let nested = try await script(child, "return window.open('about:blank', 'nested') === null;")
+        XCTAssertEqual(nested, Data("true".utf8))
         _ = try await script(child, "window.opener.postMessage('popup-finished', window.opener.location.origin); return true;")
         let deadline = ContinuousClock.now + .seconds(5)
         var received = false
@@ -919,6 +924,31 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertNil(child.navigationDelegate)
         let closed = try await script(opener, "return window.fixtureChild.closed && !!document.getElementById('ready');")
         XCTAssertEqual(closed, Data("true".utf8))
+        try session.presentTab(openerID, in: host)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(2, session: session)
+        XCTAssertNotEqual(session.selectedTabID, childTab.id)
+    }
+
+    func testClosingSelectedPopupInMixedWorkspaceReturnsToItsOpener() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
+        let openerID = try session.createTab()
+        let opener = try XCTUnwrap(session.webView(for: openerID))
+        let openerTab = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: openerID)).workspaceID)
+        _ = try session.createTab()
+        state.selectWorkspaceTab(openerTab)
+        try await loadPopupFixture(opener)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(3, session: session)
+        let popup = try XCTUnwrap(session.tabs.first(where: \.isPopup))
+        XCTAssertEqual(state.selectedWorkspaceTab, .browser(popup.workspaceID))
+        let view = try XCTUnwrap(session.webView(for: popup.id))
+        _ = try await script(view, "window.close(); return true;")
+        try await waitForPopupCount(2, session: session)
+        XCTAssertEqual(state.selectedWorkspaceTab, openerTab)
+        XCTAssertTrue(session.webView(for: openerID) === opener)
     }
 
     func testTargetBlankPopupAndCloseCallbacksPreserveOpenerAndBackgroundSelection() async throws {
@@ -967,6 +997,9 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertEqual(session.selectedTabID, selected)
         XCTAssertEqual(session.documentGeneration(for: openerID), generation)
         XCTAssertTrue(session.tabs[0].error?.contains("up to 2 tabs") == true)
+        session.selectTab(openerID)
+        let detached = try await script(opener, "return window.open('about:blank', 'detached') === null;")
+        XCTAssertEqual(detached, Data("true".utf8), "A selected tab without a human presentation host cannot claim the extra slot")
 
         let modelSession = EmbeddedBrowserSession(persistent: false)
         defer { modelSession.shutdown() }

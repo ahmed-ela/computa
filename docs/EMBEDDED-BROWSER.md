@@ -130,7 +130,9 @@ those IDs; browser addresses start persisting with the first build that records 
 Human browser pages can open pop-ups as visible tabs, using WebKit's supplied
 configuration so the opener relationship and signed-in profile remain intact.
 Closing a child from the website returns selection to its surviving opener.
-Pop-ups count toward the normal tab limit and obey the same URL policy.
+At the tab limit, the selected page in the browser pane can open one additional
+temporary pop-up for flows such as Google Docs sign-in. Background pages and
+pop-ups cannot claim this extra slot. The same URL policy applies.
 Inference-owned pages cannot create or close browser tabs this way.
 
 Browser tools also reject popups from a human document after attempting input on it, including delayed callbacks after task cleanup. Human popup use on that document requires a reload or fresh document navigation that commits; a SPA route change is insufficient. Untouched documents and declined tool actions retain normal human popup behavior. This is a conservative ownership boundary, not precise attribution of concurrent human and agent input.

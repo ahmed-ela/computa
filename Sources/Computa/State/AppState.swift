@@ -298,9 +298,9 @@ final class AppState {
             self.browserSession.onWorkspacePageChanged = workspaceTabs.onChange
         }
         self.browserSession.onWorkspaceTabOpened = { [weak self] id in self?.workspaceTabs.open(.browser(id)) }
-        self.browserSession.onWorkspaceTabClosed = { [weak self] id, wasSelected in
+        self.browserSession.onWorkspaceTabClosed = { [weak self] id, needsAdjacentSelection in
             guard let self else { return }
-            removeWorkspaceTab(.browser(id), wasSelected: wasSelected && workspaceTabs.browserIsPrimary)
+            removeWorkspaceTab(.browser(id), wasSelected: needsAdjacentSelection && workspaceTabs.browserIsPrimary)
         }
         self.browserSession.onHumanVerificationRecoveryCandidate = { [weak self] candidate in
             Task { @MainActor [weak self] in await self?.recoverWebsiteModels(candidate) }
