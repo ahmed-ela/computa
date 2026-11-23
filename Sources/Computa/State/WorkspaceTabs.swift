@@ -202,6 +202,14 @@ extension AppState {
         return browserSession.workspaceBrowserTabs.first { $0.id == browserSession.selectedTabID }.map { .browser($0.workspaceID) }
     }
 
+    func reloadableBrowserTabID(inBrowserPane: Bool) -> UUID? {
+        guard shouldPresentBrowserPane, !approvalGateBlocksInteraction, presentedSheet == nil,
+              inBrowserPane || primaryBrowserID != nil,
+              let tab = browserSession.workspaceBrowserTabs.first(where: { $0.id == browserSession.selectedTabID }),
+              tab.url != nil, !tab.isLoading else { return nil }
+        return tab.id
+    }
+
     func commandTabs(inBrowserPane: Bool) -> [WorkspaceTabID] {
         inBrowserPane ? browserSession.workspaceBrowserTabs.map { .browser($0.workspaceID) } : openWorkspaceTabs
     }
