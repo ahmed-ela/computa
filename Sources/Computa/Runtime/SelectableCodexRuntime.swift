@@ -59,6 +59,7 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     private func forward(_ event: AgentRuntimeEvent, fromCLI: Bool) {
         switch event {
         case .connectionChanged where fromCLI: return
+        case .codexCLIUsageUpdated where !fromCLI: return
         case .approvalRequested(let request) where fromCLI: cliApprovals.insert(request.id)
         case .approvalResolved(let id) where fromCLI: cliApprovals.remove(id)
         default: break
@@ -97,6 +98,11 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { try await providerChats.models(provider) }
 
     func installedCLIModels() async throws -> [LocalModelOption] { try await cli.installedCLIModels() }
+
+    func readCodexCLIUsage() async -> CodexCLIUsage.Report {
+        listen()
+        return await cli.readCodexCLIUsage()
+    }
 
     func submit(prompt: String, toTaskID taskID: String, modelID: String) async throws {
         try await submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: .askEveryTime)

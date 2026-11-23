@@ -194,6 +194,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                   state.tasks.contains(where: { $0.id == taskID }) else { return }
             state.prepareWebsiteModel(taskID: taskID)
 
+        case "refreshCodexCLIUsage":
+            guard Set(body.keys) == ["action", "taskID"], let taskID = body["taskID"] as? String else { return }
+            Task { await state.refreshCodexCLIUsage(taskID: taskID) }
+
         case "submitPrompt":
             guard let prompt = body["prompt"] as? String,
                   let taskID = body["taskID"] as? String,

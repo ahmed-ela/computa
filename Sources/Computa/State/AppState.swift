@@ -68,6 +68,9 @@ final class AppState {
     private(set) var installedCLIOptions: [LocalModelOption] = []
     private(set) var installedCLICheckStatus: ModelProviderSetup.CheckStatus?
     private(set) var installedCLIError: String?
+    private var codexCLIUsageReport = CodexCLIUsage.Report()
+    var codexCLIUsage: [CodexCLIUsage.Bucket]? { codexCLIUsageReport.buckets }
+    private(set) var codexCLIUsageRefreshing = false
     private var websiteModelCheckResults: [String: WebsiteModelSetupStatus] = [:]
     private var websiteModelRefreshCurrentIntent: WebsiteModelRefreshIntent?
     #if DEBUG
@@ -515,6 +518,23 @@ final class AppState {
             installedCLICheckStatus = .unavailable
             installedCLIError = error.localizedDescription
         }
+    }
+
+    func refreshCodexCLIUsage(taskID: String) async {
+        guard let runtime, !isShuttingDown, !codexCLIUsageRefreshing,
+              !approvalGateBlocksInteraction, presentedSheet == nil, !isAPIProvidersPresented,
+              let task = selectedTask, task.id == taskID,
+              InstalledCodexCLI.slug(task.model) != nil else { return }
+        codexCLIUsageRefreshing = true
+        defer { codexCLIUsageRefreshing = false }
+        let report = await runtime.readCodexCLIUsage()
+        guard !isShuttingDown else { return }
+        acceptCodexCLIUsage(report)
+    }
+
+    private func acceptCodexCLIUsage(_ report: CodexCLIUsage.Report) {
+        guard report.revision > codexCLIUsageReport.revision else { return }
+        codexCLIUsageReport = report
     }
 
     func websiteModelSetupStatus(for provider: String) -> WebsiteModelSetupStatus {
@@ -2476,6 +2496,9 @@ final class AppState {
                eventRequest == approvalAttemptRequests[requestID] {
                 resolvedDuringApprovalAttemptIDs.insert(requestID)
             }
+
+        case .codexCLIUsageUpdated(let report):
+            acceptCodexCLIUsage(report)
 
         case .connectionChanged(let state):
             connectionState = state

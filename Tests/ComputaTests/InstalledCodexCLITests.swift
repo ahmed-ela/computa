@@ -48,6 +48,80 @@ final class InstalledCodexCLITests: XCTestCase {
         XCTAssertNil(Version("0.171.0-alpha.01"))
     }
 
+    func testQuotaReadPrefersAllReportedBucketsAndFallsBackForOlderCLIs() throws {
+        let response = Data("""
+        {"result":{
+          "rateLimits":{"limitId":"codex","primary":{"usedPercent":32}},
+          "rateLimitsByLimitId":{
+            "codex":{"primary":{"usedPercent":32,"windowDurationMins":300,"resetsAt":1800000000},
+                     "secondary":{"usedPercent":76,"windowDurationMins":10080}},
+            "other":{"limitName":"Other models","primary":{"usedPercent":10},"secondary":null},
+            "creditsOnly":{"credits":{"balance":"100"}}
+          }
+        }}
+        """.utf8)
+        var session = CodexCLIUsage.Session()
+        let id = session.beginRead()
+        let buckets = try XCTUnwrap(session.completeRead(id, buckets: CodexCLIUsage.read(response)).buckets)
+        XCTAssertEqual(buckets.map(\.id), ["codex", "other"])
+        XCTAssertEqual(buckets[0].primary, .init(usedPercent: 32, windowDurationMins: 300, resetsAt: 1_800_000_000))
+        XCTAssertEqual(buckets[0].secondary?.usedPercent, 76)
+        XCTAssertNil(buckets[0].secondary?.resetsAt)
+        XCTAssertEqual(buckets[1].label, "Other models")
+        XCTAssertNil(buckets[1].secondary)
+
+        let legacy = Data(#"{"result":{"rateLimits":{"primary":{"usedPercent":100},"secondary":null}}}"#.utf8)
+        XCTAssertEqual(try CodexCLIUsage.read(legacy).first?.id, "codex")
+        let noWindows = Data(#"{"result":{"rateLimits":{"primary":null,"secondary":null,"credits":{"balance":"15"}}}}"#.utf8)
+        XCTAssertEqual(try CodexCLIUsage.read(noWindows), [])
+        XCTAssertThrowsError(try CodexCLIUsage.read(Data(#"{"error":{"code":-32601}}"#.utf8)))
+    }
+
+    func testQuotaNotificationsPreserveOtherBucketsAndCannotReviveInvalidatedRead() throws {
+        let original = try XCTUnwrap(CodexCLIUsage.notification(["rateLimits": [
+            "limitId": "codex", "primary": ["usedPercent": 25]
+        ]]))
+        let updated = try XCTUnwrap(CodexCLIUsage.notification(["rateLimits": [
+            "limitId": "codex", "primary": ["usedPercent": 73]
+        ]]))
+        let other = try XCTUnwrap(CodexCLIUsage.notification(["rateLimits": [
+            "limitId": "other", "secondary": ["usedPercent": 29]
+        ]]))
+        XCTAssertNil(CodexCLIUsage.notification(["rateLimits": ["primary": ["usedPercent": "wrong type"]]]))
+
+        var session = CodexCLIUsage.Session()
+        let read = session.beginRead()
+        _ = session.apply(updated)
+        let received = session.completeRead(read, buckets: [original, other])
+        XCTAssertEqual(received.buckets, [updated, other])
+        XCTAssertEqual(session.apply(original).buckets, [original, other])
+
+        let nextRead = session.beginRead()
+        let signedOut = session.invalidate()
+        let stale = session.completeRead(nextRead, buckets: [original])
+        XCTAssertEqual(stale.revision, signedOut.revision)
+        XCTAssertNil(stale.buckets)
+    }
+
+    func testClearedQuotaWindowStaysClearedAcrossAnOlderRead() throws {
+        let used = try XCTUnwrap(CodexCLIUsage.notification(["rateLimits": [
+            "limitId": "codex", "primary": ["usedPercent": 99]
+        ]]))
+        let other = try XCTUnwrap(CodexCLIUsage.notification(["rateLimits": [
+            "limitId": "other", "primary": ["usedPercent": 10]
+        ]]))
+        var session = CodexCLIUsage.Session()
+        _ = session.apply(used)
+        _ = session.apply(other)
+        let read = session.beginRead()
+        let cleared = try XCTUnwrap(CodexCLIUsage.notification(["rateLimits": [
+            "limitId": "codex", "primary": NSNull(), "secondary": NSNull()
+        ]]))
+        XCTAssertEqual(session.apply(cleared).buckets, [other])
+        XCTAssertEqual(session.completeRead(read, buckets: [used, other]).buckets, [other])
+        XCTAssertNil(CodexCLIUsage.notification(["rateLimits": [:]]))
+    }
+
     func testPickerLoadsEveryVisibleModelAcrossPagesAndRejectsRepeatedCursor() async throws {
         typealias Page = InstalledCodexCLI.Page
         let one = Page.Model(model: "one", displayName: "First", description: nil, hidden: false)
