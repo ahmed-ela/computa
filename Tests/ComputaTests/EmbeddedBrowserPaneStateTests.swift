@@ -232,7 +232,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let restored = await waitForScriptBool(on: web, script: fullChat)
         XCTAssertTrue(restored)
         XCTAssertFalse(state.isBrowserPresented)
-        XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { !$0.isHidden }.map(\.layoutAttribute), [.left])
+        XCTAssertTrue(window.titlebarAccessoryViewControllers.allSatisfy(\.isHidden))
         XCTAssertFalse(nativeViews(in: host).contains { $0.identifier?.rawValue == "chat-new" })
 
         state.connectModelProvider(route: "browser/chatgpt")
@@ -889,10 +889,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         await settleLayout(host)
         let sidebar = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }
             .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
-        let close = try XCTUnwrap(window.standardWindowButton(.closeButton))
-        let toggle = try XCTUnwrap(window.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .left }?.view)
-        let initialToggle = toggle.convert(toggle.bounds, to: nil)
-        let toggleTop = window.frame.height - initialToggle.midY
+        let toggle = "document.querySelector('#task-sidebar-toggle')"
+        var expandedToggle: [Double]?
         let pill = "document.querySelector('button.sidebar-address')"
         func openAddress() async throws -> NSTextView {
             _ = try await sidebar.evaluateJavaScript("\(pill).click(); true")
@@ -909,7 +907,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
         for (width, height, collapsed) in [(1100, 740, false), (980, 640, true), (1280, 820, false)] {
             window.setContentSize(NSSize(width: width, height: height))
-            state.isTaskSidebarCollapsed = collapsed
+            if state.isTaskSidebarCollapsed != collapsed {
+                _ = try await sidebar.evaluateJavaScript("\(toggle).click(); true")
+            }
             await settleLayout(host)
             let expectedWidth = collapsed ? 44 : 230
             let inSidebar = await waitForScriptBool(on: sidebar, script: """
@@ -922,22 +922,29 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 })()
                 """)
             XCTAssertTrue(inSidebar)
-            XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { !$0.isHidden }.map(\.layoutAttribute), [.left])
-            let toggleFrame = toggle.convert(toggle.bounds, to: nil)
-            XCTAssertEqual(toggleFrame.midX, initialToggle.midX, accuracy: 1)
-            XCTAssertEqual(window.frame.height - toggleFrame.midY, toggleTop, accuracy: 1)
-            XCTAssertEqual(toggleFrame.midY, close.convert(close.bounds, to: nil).midY, accuracy: 3)
+            XCTAssertEqual(state.isTaskSidebarCollapsed, collapsed)
+            XCTAssertTrue(window.titlebarAccessoryViewControllers.allSatisfy(\.isHidden))
             let navigationLayout = await waitForScriptBool(on: sidebar, script: """
                 (() => {
-                    const nav = document.querySelector('.sidebar-browser-navigation');
-                    if (\(collapsed)) return nav === null;
+                    const strip = document.querySelector('.window-drag-strip');
+                    const row = document.querySelector('.sidebar-controls-row');
+                    const button = \(toggle), nav = row?.querySelector('.sidebar-browser-navigation');
+                    if (!row || button?.parentElement !== row || strip.querySelector('button')) return false;
+                    const r = row.getBoundingClientRect(), t = button.getBoundingClientRect();
+                    if (r.top < strip.getBoundingClientRect().bottom || r.bottom > \(pill).getBoundingClientRect().top
+                        || t.left !== r.left || innerWidth - r.right > 8 || r.left > 8) return false;
+                    if (\(collapsed)) return !nav && row.querySelectorAll('button').length === 1;
                     if (!nav) return false;
-                    const row = nav.getBoundingClientRect(), strip = document.querySelector('.window-drag-strip').getBoundingClientRect();
-                    return row.top >= strip.bottom && row.bottom <= \(pill).getBoundingClientRect().top
+                    const n = nav.getBoundingClientRect();
+                    return n.left > t.right && n.right === r.right && Math.abs((n.top+n.bottom-t.top-t.bottom)/2) <= 1
                         && Array.from(nav.querySelectorAll('button'), b => b.ariaLabel).join(',') === 'Back,Forward,Reload';
                 })()
                 """)
             XCTAssertTrue(navigationLayout)
+            let position = try await sidebar.evaluateJavaScript("(() => {const r = \(toggle).getBoundingClientRect(); return [r.x, r.y]})()")
+            let origin = try XCTUnwrap(position as? [Double])
+            if let expandedToggle { XCTAssertEqual(origin, expandedToggle) }
+            else { expandedToggle = origin }
             let pageFrame = page.convert(page.bounds, to: nil)
             XCTAssertEqual(pageFrame.maxY, window.frame.height, accuracy: 1)
             XCTAssertEqual(pageFrame.minY, 0, accuracy: 1)

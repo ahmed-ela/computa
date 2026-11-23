@@ -81,10 +81,12 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .approval-nav { min-height: 32px; color: var(--orange); font-size: 12px; }
 .count-pill { margin-left: auto; font-variant-numeric: tabular-nums; }
 .connection-dot, .status-dot, .task-row-status { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
-.sidebar-browser-navigation {
-  display: flex; flex: none; align-items: center; gap: 2px;
+.sidebar-controls-row {
+  display: flex; flex: none; align-items: center; justify-content: space-between;
   margin: 3px var(--sidebar-inset) 0; color: var(--text-secondary);
 }
+.sidebar-controls-row #task-sidebar-toggle { width: var(--sidebar-icon-track); height: 26px; padding: 0; }
+.sidebar-browser-navigation { display: flex; align-items: center; gap: 2px; }
 .sidebar-browser-navigation button { width: 28px; height: 26px; padding: 0; }
 .sidebar-address {
   display: flex; align-items: center; gap: 7px; flex: none; height: 28px; min-width: 0;
@@ -117,7 +119,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 }
 .task-row > .task-row-title:first-child { justify-self: stretch; }
 .task-row:hover { background: var(--surface-hover); }
-.task-row:active, .window-drag-strip button:active { translate: none; }
+.task-row:active, .window-drag-strip button:active, .sidebar-controls-row button:active { translate: none; }
 .task-row.selected { background: var(--surface-selected); }
 .task-row-title { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .task-row.selected .task-row-title { font-weight: 500; }

@@ -319,7 +319,9 @@ private final class WindowConfiguredWebView: WKWebView {
 
     func configureTitlebarControls(state: AppState) {
         self.state = state
-        titlebarControls = [accessory(.left, SidebarTitlebarToggle(state: state))]
+        if !state.mixesBrowserTabsInSidebar {
+            titlebarControls = [accessory(.left, SidebarTitlebarToggle(state: state))]
+        }
         guard state.workspaceLayout.allowsBrowserSidePane else { return }
         titlebarControls.append(accessory(.right, BrowserTitlebarToggle(state: state)))
         compose.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
