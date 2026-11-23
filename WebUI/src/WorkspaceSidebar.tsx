@@ -135,10 +135,12 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           <Icon name={currentPage.isLoading ? 'x' : 'reload'} size={15} /></Button>
       </div>}
     </div>}
-    {nativeHost && currentPage && <button type="button" className="sidebar-address" aria-label="Website address" title="Edit website address (⌘L)"
-      onClick={() => post({ action: 'openBrowserAddress', id: currentPage.id })}>
+    {nativeHost && (snapshot.mixesBrowserTabsInSidebar || currentPage) && <button type="button" className="sidebar-address"
+      aria-label={currentPage ? 'Website address' : 'Open Google in a new tab'}
+      title={currentPage ? 'Edit website address (⌘L)' : 'Open Google in a new tab'}
+      onClick={() => currentPage ? post({ action: 'openBrowserAddress', id: currentPage.id }) : post({ action: 'newWorkspaceBrowserTab' })}>
       <Icon name="browser" size={15} />
-      {!collapsed && <span>{currentPage.host || 'Search or enter URL'}</span>}
+      {currentPage && !collapsed && <span>{currentPage.host || 'Search or enter URL'}</span>}
     </button>}
     <div className="sidebar-search-row">
       {collapsed && <Button variant="ghost" size="icon-xs" className="sidebar-search-icon" aria-label={searchLabel}
