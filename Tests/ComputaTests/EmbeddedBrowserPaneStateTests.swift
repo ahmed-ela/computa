@@ -122,6 +122,53 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testSendNowInSecondQueueRowSteersOnlyThatPrompt() async throws {
+        let runtime = QueueControlledRuntime()
+        let task = AgentTask(title: "Queue fixture", summary: "", status: .running, workspace: "/tmp", model: "local")
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [task], runtime: runtime, preferences: isolatedTestPreferences(), browserSession: session)
+        state.activeTurnTaskIDs.insert(task.id)
+        for prompt in ["First", "Second", "Third"] { _ = await state.submitOrQueue(prompt: prompt, toTaskID: task.id) }
+
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        await settleLayout(host)
+        let chat = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let buttons = "Array.from(document.querySelectorAll('.queue-item-actions button[aria-label^=\"Send queued message\"]'))"
+        let ready = await waitForScriptBool(on: chat, script: """
+            (() => {
+                const buttons = \(buttons);
+                return buttons.length === 3 && buttons.every(b => !b.disabled && b.textContent.trim() === 'Send'
+                    && b.firstElementChild?.tagName.toLowerCase() === 'svg' && b.getBoundingClientRect().width > 0);
+            })()
+            """)
+        XCTAssertTrue(ready)
+        await runtime.holdNextSteer()
+        _ = try await chat.evaluateJavaScript(buttons + "[1].click(); true")
+        let awaitingDelivery = await waitForScriptBool(on: chat, script: """
+            document.querySelector('.queue-item-sending .queue-item-text')?.textContent === 'Second'
+                && \(buttons).length === 2 && \(buttons).every(b => b.disabled)
+            """)
+        await runtime.finishSteer()
+        XCTAssertTrue(awaitingDelivery)
+        let updated = await waitForScriptBool(on: chat, script: """
+            Array.from(document.querySelectorAll('.queue-item-text'), row => row.textContent).join(',') === 'First,Third'
+            """)
+        XCTAssertTrue(updated)
+        let steers = await runtime.steers
+        XCTAssertEqual(steers.map(\.prompt), ["Second"])
+        XCTAssertEqual(steers.first?.taskID, task.id)
+        XCTAssertEqual(state.selectedTask?.entries.filter { $0.kind == .user }.map(\.body), ["Second"])
+    }
+
+    @MainActor
     func testSearchAndReopenOldestSavedChatInWebKit() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("KolmogorSidebar-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
