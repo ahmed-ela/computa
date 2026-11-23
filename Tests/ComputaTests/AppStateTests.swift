@@ -258,6 +258,40 @@ final class AppStateTests: XCTestCase {
         XCTAssertFalse(state.setTaskModel("unlisted/model", taskID: firstTaskID))
     }
 
+    @MainActor
+    func testNewChatsRememberLastExplicitPickAcrossTabsAndRelaunch() async throws {
+        let preferences = isolatedTestPreferences()
+        WebsiteModelCatalog.save([syntheticChatGPTChoice, syntheticQwenChoice], to: preferences)
+        let state = AppState(tasks: [], preferences: preferences)
+        state.createTask()
+        let first = try XCTUnwrap(state.selectedTaskID)
+        XCTAssertTrue(state.setTaskModel(syntheticChatGPTModelID, taskID: first))
+        state.createTask()
+        let second = try XCTUnwrap(state.selectedTaskID)
+        XCTAssertEqual(state.selectedTask?.model, syntheticChatGPTModelID)
+        XCTAssertTrue(state.setTaskModel(syntheticQwenChoice.modelID, taskID: second))
+
+        state.selectTask(first)
+        XCTAssertEqual(state.selectedTask?.model, syntheticChatGPTModelID)
+        XCTAssertEqual(state.defaultModel, syntheticQwenChoice.modelID)
+        XCTAssertFalse(state.setTaskModel("unlisted/model", taskID: first))
+        state.createTask()
+        XCTAssertEqual(state.selectedTask?.model, syntheticQwenChoice.modelID)
+
+        state.selectTask(first)
+        XCTAssertTrue(state.setTaskModel(syntheticChatGPTModelID, taskID: first))
+        XCTAssertEqual(state.tasks.first { $0.id == second }?.model, syntheticQwenChoice.modelID)
+        let recorder = ModelSubmissionRecorder()
+        let reopened = AppState(tasks: [], runtime: ModelRecordingRuntime(recorder: recorder), preferences: preferences)
+        reopened.createTask()
+        let fresh = try XCTUnwrap(reopened.selectedTaskID)
+        let accepted = await reopened.submit(prompt: "hi", toTaskID: fresh)
+        XCTAssertTrue(accepted)
+        let submission = await recorder.lastSubmission()
+        XCTAssertEqual(submission?.taskID, fresh)
+        XCTAssertEqual(submission?.modelID, syntheticChatGPTModelID)
+    }
+
     func testCatalogIncludesBothQwen35MLX4BitModels() {
         let expectedIDs = [
             "lmstudio-community/Qwen3.5-9B-MLX-4bit",

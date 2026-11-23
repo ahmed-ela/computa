@@ -249,7 +249,7 @@ final class AppStateEmbeddedWebModelTests: XCTestCase {
         XCTAssertTrue(state.setTaskModel(instant, taskID: task.id))
         XCTAssertEqual(enabled.last, true)
         state.replaceTasks(with: [])
-        XCTAssertEqual(enabled.last, false)
+        XCTAssertEqual(enabled.last, true, "With no task open, prewarm the last picked model for the next chat")
         XCTAssertTrue(state.setDefaultModel(instant))
         XCTAssertEqual(enabled.last, true)
         state.createTask()

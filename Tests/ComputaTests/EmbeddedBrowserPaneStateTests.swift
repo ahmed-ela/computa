@@ -284,10 +284,10 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let prefs = isolatedTestPreferences()
         let browser = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         let runtime = TabLauncherRuntime()
+        WebsiteModelCatalog.save([syntheticQwenChoice], to: prefs)
         let state = AppState(tasks: [], runtime: runtime, preferences: prefs,
                              browserSession: browser, workspaceLayout: .mixedTabs)
         state.connectionState = .connected(provider: runtime.providerName)
-        state.defaultModel = "lmstudio-community/Qwen3.5-4B-MLX-4bit"
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1050, height: 680),
                               styleMask: [.titled], backing: .buffered, defer: false)
@@ -338,6 +338,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let typed = await waitForScriptBool(on: web, script: "document.querySelector('#task-prompt')?.value === 'z'")
         XCTAssertTrue(typed)
 
+        _ = try await web.evaluateJavaScript("""
+            window.webkit.messageHandlers.localCodex.postMessage({
+                action: 'setTaskModel', taskID: '\(empty)', modelID: '\(syntheticQwenChoice.modelID)'
+            }); true
+            """)
+        let picked = await waitForScriptBool(on: web, script: "document.querySelector('.model-selector-trigger')?.textContent.includes('Qwen3.7-Plus') === true")
+        XCTAssertTrue(picked)
+
         let message = "Compare the two train routes"
         let input = try await open()
         input.insertText(message, replacementRange: input.selectedRange())
@@ -350,6 +358,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let calls = await runtime.submissions
         XCTAssertEqual(calls.map(\.id), [sent])
         XCTAssertEqual(calls.map(\.prompt), [message])
+        XCTAssertEqual(calls.map(\.modelID), [syntheticQwenChoice.modelID])
         XCTAssertEqual(state.tasks.count, 2)
         XCTAssertEqual(browser.workspaceBrowserTabs.count, 2)
         state.selectTask(empty)
@@ -2183,11 +2192,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
 
 private actor TabLauncherRuntime: AgentRuntimeClient {
     nonisolated let providerName = "Keyboard test"
-    private(set) var submissions: [(id: String, prompt: String)] = []
+    private(set) var submissions: [(id: String, prompt: String, modelID: String)] = []
     func loadTasks() async throws -> [AgentTask] { [] }
     nonisolated func events() -> AsyncStream<AgentRuntimeEvent> { AsyncStream { $0.finish() } }
     func submit(prompt: String, toTaskID taskID: String, modelID: String) async throws {
-        submissions.append((taskID, prompt))
+        submissions.append((taskID, prompt, modelID))
     }
     func interrupt(taskID: String) async throws {}
     func resolveApproval(requestID: String, approved: Bool) async throws {}

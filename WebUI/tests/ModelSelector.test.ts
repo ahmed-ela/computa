@@ -416,7 +416,7 @@ describe('website model selectors', () => {
     }
   });
 
-  test('model changes preserve exact IDs and ignore busy, unchanged, unavailable or hidden choices', () => {
+  test('explicit picks include the current model and ignore busy, unavailable or hidden choices', () => {
     for (const disabled of [false, true]) {
       const selected: string[] = [];
       selectionHandlers.length = 0;
@@ -425,11 +425,12 @@ describe('website model selectors', () => {
       expect(selected).toEqual([]);
       expect(selectionHandlers.length).toBeGreaterThan(0);
       const change = selectionHandlers[0];
-      for (const value of [options[1].id, options[4].id, 'browser/claude/choice/missing',
+      for (const value of [options[4].id, 'browser/claude/choice/missing',
         'browser/chatgpt', 'local/saved-model', 'api/alibaba/model/saved-missing', 'unknown']) change(value);
       expect(selected).toEqual([]);
+      change(options[1].id);
       change(options[3].id);
-      expect(selected).toEqual(disabled ? [] : [options[3].id]);
+      expect(selected).toEqual(disabled ? [] : [options[1].id, options[3].id]);
     }
   });
 

@@ -725,7 +725,6 @@ final class WebsiteModelStateTests: XCTestCase {
         }
         let choice = try XCTUnwrap(state.websiteModelChoices.first)
         XCTAssertTrue(state.setTaskModel(choice.modelID, taskID: task.id))
-        XCTAssertTrue(state.setDefaultModel(choice.modelID))
         let reopened = AppState(tasks: [], preferences: preferences)
         XCTAssertEqual(reopened.defaultModel, choice.modelID)
         XCTAssertEqual(reopened.websiteModelChoices, state.websiteModelChoices)
