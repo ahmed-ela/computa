@@ -58,6 +58,22 @@ test('a matching browser tab stays available at either width in mixed mode', () 
     expect(html).toContain('aria-label="Trips"');
   }
 });
+test('the browser address is separate from the tab filter and follows the active browser', () => {
+  const snapshot = fixture();
+  const render = () => renderToStaticMarkup(h(WorkspaceSidebar, {
+    snapshot, search: '', setSearch: () => {}, nativeHost: true, post: () => {},
+  })).html;
+  const expanded = render();
+  const address = expanded.indexOf('aria-label="Website address"');
+  expect(address).toBeGreaterThan(expanded.indexOf('class="window-drag-strip"'));
+  expect(expanded.indexOf('id="task-search"')).toBeGreaterThan(address);
+  expect(expanded).toContain('www.rail.example');
+  snapshot.isTaskSidebarCollapsed = true;
+  expect(render()).toContain('aria-label="Website address"');
+  snapshot.primaryBrowserID = undefined;
+  expect(render()).not.toContain('aria-label="Website address"');
+});
+
 test('a browser in the main pane does not acknowledge the previously selected agent', () => {
   const snapshot = fixture(), task = snapshot.tasks[0];
   Object.assign(task,{status:'Completed',hasUnreadCompletion:true,isBusy:false,unreadCompletionID:'completion'});

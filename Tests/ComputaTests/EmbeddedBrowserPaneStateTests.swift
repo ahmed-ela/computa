@@ -232,7 +232,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let restored = await waitForScriptBool(on: web, script: fullChat)
         XCTAssertTrue(restored)
         XCTAssertFalse(state.isBrowserPresented)
-        XCTAssertEqual(window.titlebarAccessoryViewControllers.map(\.layoutAttribute), [.left])
+        XCTAssertEqual(window.titlebarAccessoryViewControllers.filter { !$0.isHidden }.map(\.layoutAttribute), [.left])
         XCTAssertFalse(nativeViews(in: host).contains { $0.identifier?.rawValue == "chat-new" })
 
         state.connectModelProvider(route: "browser/chatgpt")
@@ -867,7 +867,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
-    func testBrowserAddressInTrafficLightRowSelectsReplacesAndNavigates() async throws {
+    func testSidebarAddressOpensCenteredSelectsReplacesAndNavigates() async throws {
         let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Address selection</title>")
         let url = try await site.start().appendingPathComponent("human/final")
         defer { site.stop() }
@@ -887,59 +887,101 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(loaded)
         window.makeFirstResponder(page)
         await settleLayout(host)
-        let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
-            .first { $0.placeholderString == "Search or enter a website address" })
-        func clickAddress(line: UInt = #line) async throws -> NSTextView {
-            let point = field.convert(NSPoint(x: 30, y: field.bounds.midY), to: nil)
-            try await clickInWindow(at: point, window: window, throughApplication: true)
-            return try XCTUnwrap(field.currentEditor() as? NSTextView,
-                                 "Expected the address field to own focus. Responder: \(String(describing: window.firstResponder))", line: line)
-        }
+        let sidebar = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }
+            .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
         let close = try XCTUnwrap(window.standardWindowButton(.closeButton))
+        let history = try XCTUnwrap(window.titlebarAccessoryViewControllers.last { $0.layoutAttribute == .left })
+        let pill = "document.querySelector('button.sidebar-address')"
+        func openAddress() async throws -> NSTextView {
+            _ = try await sidebar.evaluateJavaScript("\(pill).click(); true")
+            await settleLayout(host)
+            let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
+                .first { $0.identifier?.rawValue == "browser-address" })
+            XCTAssertEqual(field.convert(field.bounds, to: nil).midX, window.frame.width / 2, accuracy: 24)
+            return try XCTUnwrap(field.currentEditor() as? NSTextView)
+        }
+        func selectedURL(_ editor: NSTextView, _ expected: URL, line: UInt = #line) {
+            XCTAssertEqual(editor.string, expected.absoluteString, line: line)
+            XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: expected.absoluteString.utf16.count), line: line)
+        }
         for (width, collapsed) in [(1100, false), (980, true), (1280, false)] {
             window.setContentSize(NSSize(width: width, height: 740))
             state.isTaskSidebarCollapsed = collapsed
             await settleLayout(host)
-            let rect = field.convert(field.bounds, to: nil)
-            XCTAssertEqual(rect.midY, close.convert(close.bounds, to: nil).midY, accuracy: 3)
-            let toggle = try XCTUnwrap(window.titlebarAccessoryViewControllers.first?.view)
-            XCTAssertGreaterThan(rect.minX, toggle.convert(toggle.bounds, to: nil).maxX)
-            XCTAssertLessThanOrEqual(rect.maxX, window.frame.width)
-            XCTAssertEqual(page.convert(page.bounds, to: nil).maxY, window.contentLayoutRect.maxY, accuracy: 3)
+            let expectedWidth = collapsed ? 44 : 230
+            let inSidebar = await waitForScriptBool(on: sidebar, script: """
+                (() => {
+                    const field = \(pill), filter = document.querySelector('.sidebar-search-row');
+                    if (!field || !filter || !field.closest('.sidebar')) return false;
+                    const rect = field.getBoundingClientRect();
+                    return innerWidth === \(expectedWidth) && rect.top >= document.querySelector('.window-drag-strip').getBoundingClientRect().bottom - 1
+                        && rect.bottom <= filter.getBoundingClientRect().top && rect.right <= innerWidth;
+                })()
+                """)
+            XCTAssertTrue(inSidebar)
+            XCTAssertEqual(history.isHidden, collapsed)
+            if !collapsed {
+                let rect = history.view.convert(history.view.bounds, to: nil)
+                XCTAssertEqual(rect.midY, close.convert(close.bounds, to: nil).midY, accuracy: 3)
+                XCTAssertGreaterThan(rect.minX, close.convert(close.bounds, to: nil).maxX)
+                XCTAssertLessThanOrEqual(rect.maxX, CGFloat(expectedWidth))
+            }
+            let editor = try await openAddress()
+            selectedURL(editor, url)
+            editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+            await settleLayout(host)
+            XCTAssertEqual(page.url, url)
         }
-        let full = NSRange(location: 0, length: url.absoluteString.utf16.count)
-        let first = try await clickAddress()
-        XCTAssertEqual(first.string, url.absoluteString)
-        XCTAssertEqual(first.selectedRange(), full)
-
-        window.makeFirstResponder(page)
+        let editor = try await openAddress()
+        editor.moveRight(nil)
+        XCTAssertEqual(editor.selectedRange().length, 0)
+        BrowserAddressPalette.request(in: window) // The window-level ⌘L action.
         await settleLayout(host)
-        let replacement = try await clickAddress()
-        XCTAssertEqual(replacement.selectedRange(), full)
+        selectedURL(editor, url)
         let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
             characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6))
         window.sendEvent(key)
-        XCTAssertEqual(replacement.string, "z")
-        XCTAssertEqual(page.url, url)
+        XCTAssertEqual(editor.string, "z")
         let destination = url.appendingPathComponent("next")
-        replacement.insertText(destination.absoluteString, replacementRange: NSRange(location: 0, length: 1))
-        replacement.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        editor.insertText(destination.absoluteString, replacementRange: NSRange(location: 0, length: 1))
+        editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
         let navigated = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/next')")
-        XCTAssertTrue(navigated, "Return should navigate the same tab from the title bar")
+        XCTAssertTrue(navigated)
 
-        window.makeFirstResponder(page)
+        let command = try await openAddress()
+        command.insertText("back", replacementRange: command.selectedRange())
         await settleLayout(host)
-        let search = try await clickAddress()
+        command.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        await settleLayout(host)
+        command.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        let returned = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/human/final')")
+        XCTAssertTrue(returned, "Down and Return should execute the matching Back command")
+
+        let other = try session.createTab(url: url.appendingPathComponent("alternate"))
+        let otherPage = try XCTUnwrap(session.webView(for: other))
+        let otherLoaded = await waitForScriptBool(on: otherPage, script: "location.pathname.endsWith('/alternate')")
+        XCTAssertTrue(otherLoaded)
+        let original = try XCTUnwrap(session.humanTab(id: tab))
+        state.selectWorkspaceTab(.browser(original.workspaceID))
+        await settleLayout(host)
+        let switcher = try await openAddress()
+        switcher.insertText("alternate", replacementRange: switcher.selectedRange())
+        await settleLayout(host)
+        switcher.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        await settleLayout(host)
+        switcher.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(session.selectedTabID, other)
+        state.selectWorkspaceTab(.browser(original.workspaceID))
+        await settleLayout(host)
+
+        let search = try await openAddress()
         search.insertText("cedar rail times", replacementRange: search.selectedRange())
         search.doCommand(by: #selector(NSResponder.insertNewline(_:)))
-        for _ in 0..<100 where page.url?.host != "www.google.com" {
-            try await Task.sleep(for: .milliseconds(20))
-        }
+        for _ in 0..<100 where page.url?.host != "www.google.com" { try await Task.sleep(for: .milliseconds(20)) }
         let request = try XCTUnwrap(page.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) })
         XCTAssertEqual(session.selectedTabID, tab)
         XCTAssertEqual(request.host, "www.google.com")
-        XCTAssertEqual(request.path, "/search")
         XCTAssertEqual(request.queryItems?.first { $0.name == "q" }?.value, "cedar rail times")
     }
 

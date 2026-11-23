@@ -114,6 +114,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             let line = body["line"] as? Int ?? 0
             Self.diagnostic("client failure kind=\(kind) line=\(line)")
 
+        case "openBrowserAddress":
+            guard let id = body["id"] as? String, id == state.primaryBrowserID?.uuidString,
+                  !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
+            BrowserAddressPalette.request(in: webView?.window)
+
         case "openTabLauncher":
             WorkspaceTabLauncher.request(in: webView?.window)
 

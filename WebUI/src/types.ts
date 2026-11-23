@@ -197,6 +197,7 @@ export type NativeAction =
   | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }
   | { action: 'createTask' | 'newWorkspaceBrowserTab' | 'openTabLauncher' }
+  | { action: 'openBrowserAddress'; id: string }
   | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab'; tab: WorkspaceTab }
   | { action: 'moveWorkspaceTab'; tab: WorkspaceTab; target: WorkspaceTab }
   | { action: 'chooseTaskWorkspace'; taskID: string }
