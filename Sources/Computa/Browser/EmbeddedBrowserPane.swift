@@ -17,6 +17,7 @@ struct EmbeddedBrowserPane: View {
     var onLoadModels: (UUID) -> Void = { _ in }
     var canConfigureKimiProfile = false
     var onSwitchKimiProfile: (UUID) -> Void = { _ in }
+    let onCloseTab: (WorkspaceTabID) -> Void
     let onClose: () -> Void
 
     @State private var address = ""
@@ -159,7 +160,7 @@ struct EmbeddedBrowserPane: View {
                             selected: tab.id == session.selectedTabID,
                             isKimiProfile: session.isKimiProfileTab(tab.id),
                             onSelect: { session.selectTab(tab.id) },
-                            onClose: { session.closeTab(tab.id) }
+                            onClose: { onCloseTab(.browser(tab.workspaceID)) }
                         )
                         .id(tab.id)
                     }

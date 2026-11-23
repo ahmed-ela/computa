@@ -85,10 +85,29 @@ final class EmbeddedBrowserSession {
 
     var restorablePages: [SavedWorkspace.Page] {
         guard persistent else { return [] }
-        return tabs.compactMap { tab in
-            guard let entry = entries[tab.id], entry.isRestorable else { return nil }
-            return SavedWorkspace.Page(id: tab.workspaceID, url: entry.restoreURL, mobile: tab.requestsMobileSite)
+        return tabs.compactMap { restorablePage(for: $0) }
+    }
+
+    func restorablePage(for tab: EmbeddedBrowserTab) -> SavedWorkspace.Page? {
+        guard let entry = entries[tab.id], entry.isRestorable else { return nil }
+        return SavedWorkspace.Page(id: tab.workspaceID, url: entry.restoreURL, mobile: tab.requestsMobileSite)
+    }
+
+    func reopenWorkspacePage(_ page: SavedWorkspace.Page, at index: Int) throws {
+        let next = workspaceBrowserTabs.dropFirst(index).first?.id
+        let id = try createWorkspacePage(page)
+        // registerTab appends new tabs. Put this one back in its old position in the native tab strip.
+        if let next, let insertion = tabs.firstIndex(where: { $0.id == next }),
+           let reopenedIndex = tabs.firstIndex(where: { $0.id == id }), insertion < reopenedIndex {
+            let reopened = tabs.remove(at: reopenedIndex)
+            tabs.insert(reopened, at: insertion)
+            onWorkspacePageChanged?()
         }
+    }
+
+    private func createWorkspacePage(_ page: SavedWorkspace.Page) throws -> UUID {
+        try createTab(url: EmbeddedBrowserURLPolicy.workspaceAddress(page.url), select: false, modelOwned: false,
+                      requestsMobileSite: page.mobile, workspaceID: page.id)
     }
 
     func restoreWorkspacePages(_ snapshot: SavedWorkspace) {
@@ -97,8 +116,7 @@ final class EmbeddedBrowserSession {
         for page in snapshot.pages where tabs.count < maximumTabs {
             guard snapshot.order.contains(.browser(page.id)), seen.insert(page.id).inserted else { continue }
             // createTab validates every address and gives the new view fresh runtime authority.
-            _ = try? createTab(url: EmbeddedBrowserURLPolicy.workspaceAddress(page.url), select: false, modelOwned: false,
-                               requestsMobileSite: page.mobile, workspaceID: page.id)
+            _ = try? createWorkspacePage(page)
         }
         let selected = workspaceBrowserTabs.first { $0.workspaceID == snapshot.selectedPage }
         if let tab = selected ?? workspaceBrowserTabs.first { selectTab(tab.id) }
@@ -1020,9 +1038,9 @@ final class EmbeddedBrowserSession {
             entry.pendingConversationURL = url
             (entry.view as? EmbeddedModelWebView)?.captureNativeFocus()
             entry.navigation = entry.view.load(URLRequest(url: url))
-            if persistent, entry.isRestorable {
+            if entry.isRestorable {
                 entry.restoreURL = EmbeddedBrowserURLPolicy.workspaceAddress(url)
-                onWorkspacePageChanged?()
+                if persistent { onWorkspacePageChanged?() }
             }
         } catch {
             report(error.localizedDescription, tabID: tabID)
@@ -3740,10 +3758,10 @@ final class EmbeddedBrowserSession {
         entry.tab.canGoForward = view.canGoForward
         // A provisional load can still expose the old page URL. Observe the
         // committed document or settled native URL without inspecting its DOM.
-        if persistent, entry.isRestorable, committedNavigation || !view.isLoading,
+        if entry.isRestorable, committedNavigation || !view.isLoading,
            let url = view.url, entry.restoreURL != url {
             entry.restoreURL = EmbeddedBrowserURLPolicy.workspaceAddress(url)
-            onWorkspacePageChanged?()
+            if persistent { onWorkspacePageChanged?() }
         }
         if entry.isRegularBrowserTab, committedNavigation || !view.isLoading {
             observeHumanVerificationCheckpoint(entry)

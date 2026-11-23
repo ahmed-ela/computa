@@ -105,6 +105,9 @@ struct WorkspaceCommands: Commands {
                 .keyboardShortcut("w", modifiers: .command)
                 .disabled(workspaceUnavailable || tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil)
             }
+            Button("Reopen Closed Tab") { state.reopenClosedTab() }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+                .disabled(isTestHost || !state.canReopenClosedTab)
             Button("Close Window") {
                 NSApp.sendAction(#selector(NSWindow.performClose(_:)), to: nil, from: nil)
             }

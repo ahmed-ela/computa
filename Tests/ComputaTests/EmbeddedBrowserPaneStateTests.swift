@@ -121,6 +121,79 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testReopenRestoresBrowserAndAgentTabsInReverseCloseOrder() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Reopened page</title>")
+        let origin = try await site.start()
+        let url = try XCTUnwrap(URL(string: "human/final#article", relativeTo: origin)?.absoluteURL)
+        defer { site.stop() }
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let task = AgentTask(title: "Active agent", summary: "", status: .running, workspace: "", model: "local")
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let originalID = try session.createTab(url: url, requestsMobileSite: true)
+        let original = try XCTUnwrap(session.humanTab(id: originalID))
+        let originalView = try XCTUnwrap(session.webView(for: originalID))
+        let second = try session.createTab()
+        let secondBrowser = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: second)).workspaceID)
+        let sidebar = state.openWorkspaceTabs
+        let strip = session.workspaceBrowserTabs.map(\.workspaceID)
+        let browser = WorkspaceTabID.browser(original.workspaceID)
+        state.closeWorkspaceTab(browser)
+        state.closeWorkspaceTab(secondBrowser)
+        state.closeWorkspaceTab(.agent(task.id))
+        state.reopenClosedTab()
+        XCTAssertEqual(state.selectedWorkspaceTab, .agent(task.id))
+        XCTAssertEqual(state.tasks.first { $0.id == task.id }?.status, .running)
+        XCTAssertTrue(session.workspaceBrowserTabs.isEmpty)
+        state.reopenClosedTab()
+        XCTAssertEqual(state.selectedWorkspaceTab, secondBrowser)
+        XCTAssertEqual(session.workspaceBrowserTabs.count, 1)
+        state.reopenClosedTab()
+        XCTAssertEqual(state.selectedWorkspaceTab, browser)
+        XCTAssertEqual(state.openWorkspaceTabs, sidebar)
+        XCTAssertEqual(session.workspaceBrowserTabs.map(\.workspaceID), strip)
+        let restored = try XCTUnwrap(session.humanTab(id: XCTUnwrap(session.selectedTabID)))
+        XCTAssertNotEqual(restored.id, originalID)
+        XCTAssertTrue(restored.requestsMobileSite)
+        let view = try XCTUnwrap(session.webView(for: restored.id))
+        XCTAssertFalse(view === originalView)
+        let loaded = await waitForScriptBool(on: view, script: "document.title === 'Reopened page' && location.hash === '#article'")
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(view.url, url)
+        XCTAssertFalse(state.canReopenClosedTab)
+        state.reopenClosedTab()
+        XCTAssertEqual(session.workspaceBrowserTabs.count, 2)
+    }
+
+    @MainActor
+    func testReopenHonorsSheetAndTabLimitAndExcludesRuntimeCloses() throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, maximumTabs: 1, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session)
+        let id = try session.createTab(url: URL(string: "https://example.test/callback?code=private&state=flow"))
+        let original = try XCTUnwrap(session.humanTab(id: id))
+        state.closeWorkspaceTab(.browser(original.workspaceID))
+        state.presentedSheet = .settings
+        state.reopenClosedTab()
+        XCTAssertTrue(session.workspaceBrowserTabs.isEmpty)
+        XCTAssertFalse(state.canReopenClosedTab)
+        state.presentedSheet = nil
+        let tool = try session.createToolTab(url: XCTUnwrap(URL(string: "about:blank")))
+        state.reopenClosedTab()
+        XCTAssertTrue(state.canReopenClosedTab)
+        XCTAssertTrue(session.workspaceBrowserTabs.isEmpty)
+        session.closeTab(tool)
+        state.reopenClosedTab()
+        let reopened = try XCTUnwrap(session.humanTab(id: XCTUnwrap(session.selectedTabID)))
+        XCTAssertEqual(reopened.workspaceID, original.workspaceID)
+        XCTAssertNil(session.restorablePage(for: reopened)?.url)
+        XCTAssertTrue(state.shouldPresentBrowserPane)
+        XCTAssertFalse(state.canReopenClosedTab)
+    }
+
+    @MainActor
     func testCycleRevealsOffscreenTabAndPreservesComposerFocus() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
@@ -2081,7 +2154,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         defer { session.shutdown() }
         let first = try session.createTab()
         let selected = try session.createTab()
-        let hosting = NSHostingView(rootView: EmbeddedBrowserPane(session: session, onClose: {})
+        let hosting = NSHostingView(rootView: EmbeddedBrowserPane(session: session, onCloseTab: { _ in }, onClose: {})
             .environment(\.colorScheme, .light))
         hosting.frame = NSRect(x: 0, y: 0, width: 520, height: 560)
         let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
