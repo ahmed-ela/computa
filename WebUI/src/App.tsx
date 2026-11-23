@@ -26,6 +26,7 @@ import { formatWorkedFor } from './duration';
 import { observeDisplayedCompletion } from './completionAcknowledgment';
 import { previewSnapshot, installPreviewBridge } from './preview';
 import {
+  composerPrimaryAction,
   dropQueuedPrompt,
   isValidPrompt,
   moveQueuedPrompt,
@@ -488,6 +489,8 @@ function Composer({
   const willQueue = task.isBusy || task.queuePaused || queueActive;
   const selectedModel = snapshot.modelOptions.find((option) => option.id === task.model);
   const canSubmit = !pending && isValidPrompt(value) && (willQueue || task.modelSelectable && availableForNewPrompt(task.model, snapshot));
+  const primaryAction = composerPrimaryAction(task.status === 'Running', value, willQueue);
+  const stopsTask = primaryAction === 'stop';
   useEffect(() => {
     if (!textarea.current) return;
     textarea.current.style.height = 'auto';
@@ -546,20 +549,13 @@ function Composer({
             */}
           </div>
           <div className="composer-right">
-            {task.status === 'Running' ? (
-              <Button variant="outline" size="icon" className="stop-button" aria-label="Stop task" title="Stop task" onClick={() => post({ action: 'interruptTask', taskID: task.id })}>
-                <Icon name="pause" size={18} />
-              </Button>
-            ) : null}
-            {willQueue ? (
-              <Button size="sm" className="queue-send-button" disabled={!canSubmit} aria-label="Queue prompt" title="Queue message · Enter" onClick={submit}>
-                <Icon name="send" size={15} /> Queue
-              </Button>
-            ) : (
-              <Button size="icon" className="send-button" disabled={!canSubmit} aria-label="Send prompt" title="Send message · Enter" onClick={submit}>
-                <Icon name="send" size={19} />
-              </Button>
-            )}
+            <Button variant={stopsTask ? 'outline' : 'default'} size="icon" className="composer-action"
+              disabled={!stopsTask && !canSubmit}
+              aria-label={stopsTask ? 'Stop task' : primaryAction === 'queue' ? 'Queue prompt' : 'Send prompt'}
+              title={stopsTask ? 'Stop task' : primaryAction === 'queue' ? 'Queue message · Enter' : 'Send message · Enter'}
+              onClick={stopsTask ? () => post({ action: 'interruptTask', taskID: task.id }) : submit}>
+              <Icon name={stopsTask ? 'pause' : 'send'} size={stopsTask ? 18 : 19} />
+            </Button>
           </div>
         </div>
       </div>

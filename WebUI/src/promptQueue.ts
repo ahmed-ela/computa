@@ -29,6 +29,11 @@ export function isValidPrompt(value: string): boolean {
   return prompt.length > 0 && new TextEncoder().encode(prompt).length <= maxPromptBytes;
 }
 
+export function composerPrimaryAction(isRunning: boolean, draft: string, willQueue: boolean): 'stop' | 'queue' | 'send' {
+  if (isRunning && draft.length === 0) return 'stop';
+  return willQueue ? 'queue' : 'send';
+}
+
 export function resolvePromptReceipt(
   currentDraft: string,
   pending: PendingPromptSubmission,
