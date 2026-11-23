@@ -80,7 +80,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .new-task-button:hover { background: var(--surface-hover); }
 .approval-nav { min-height: 32px; color: var(--orange); font-size: 12px; }
 .count-pill { margin-left: auto; font-variant-numeric: tabular-nums; }
-.connection-dot, .status-dot, .task-row-status { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
+.connection-dot, .task-row-status { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
 .sidebar-controls-row {
   display: flex; flex: none; align-items: center; justify-content: space-between;
   margin: 3px var(--sidebar-inset) 0; color: var(--text-secondary);
@@ -177,7 +177,6 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .review-toolbar-button { gap: 6px; }
 .review-toolbar-button.active { background: var(--surface-selected); }
 .toolbar-actions { display: flex; align-items: center; gap: 12px; }
-.status-label { display: flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 11px; }
 .conversation-column { display: flex; min-height: 0; flex: 1; flex-direction: column; }
 .conversation-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
 .conversation-content { width: 100%; max-width: 760px; min-height: 100%; margin: 0 auto; padding: 32px 28px 22px; }
@@ -519,7 +518,6 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
   .sidebar { width: 190px; flex-basis: 190px; }
   .task-toolbar { padding: 0 16px; }
   .toolbar-actions { gap: 8px; }
-  .status-label { font-size: 10px; }
   .conversation-content { padding-right: 18px; padding-left: 18px; }
   .composer-zone { padding-right: 16px; padding-left: 16px; }
   .inspector { position: absolute; z-index: 20; top: 0; right: 0; bottom: 0; width: 280px; box-shadow: -12px 0 32px #0002; }

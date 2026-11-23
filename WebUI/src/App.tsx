@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'octane';
 import { Button } from '@octanejs/shadcn/Button';
 import { Textarea } from '@octanejs/shadcn/Textarea';
 import { NativeSelect, NativeSelectOption } from '@octanejs/shadcn/NativeSelect';
-import { Badge } from '@octanejs/shadcn/Badge';
 import { Switch } from '@octanejs/shadcn/Switch';
 import {
   DropdownMenu,
@@ -99,11 +98,6 @@ function TaskToolbar({ task, snapshot, allowFresh, rowHeight, onNewChat }: { sna
       </div>
       <div className="toolbar-actions">
         {showProjectFolderPicker && task?.status === 'Draft' && task.entries.length === 0 && !task.isBusy ? <Button variant="ghost" size="sm" onClick={() => post({ action: 'chooseTaskWorkspace', taskID: task.id })}>Choose folder</Button> : null}
-        {task && task.status !== 'Draft' && task.status !== 'Completed' ? (
-          <Badge variant="secondary" className={`status-label ${toneClass(task.statusTone)}`}>
-            <span className="status-dot" />{task.status}
-          </Badge>
-        ) : null}
         {/* Temporarily hide the Changes and inspector buttons.
         {task ? <Button variant="ghost" size="sm" className={`review-toolbar-button ${snapshot.isReviewPresented ? 'active' : ''}`}
           aria-label="Toggle changes" aria-pressed={Boolean(snapshot.isReviewPresented)} onClick={() => post({ action: 'toggleReview' })}>
