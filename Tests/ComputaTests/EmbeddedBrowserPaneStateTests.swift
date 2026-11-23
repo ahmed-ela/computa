@@ -486,8 +486,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.selectWorkspaceTab(.browser(ref))
         try await requireDOM("!!document.querySelector('[data-browser-primary=native] .site-favicon') && innerWidth === 230")
         let expandedCenters = try await sidebarIconCenters(in: chat)
-        state.isTaskSidebarCollapsed = true
+        let toggle = "#task-sidebar-toggle"
+        try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=true] .lucide-panel-left-close')")
+        _ = try await chat.evaluateJavaScript("document.querySelector('\(toggle)').click(); true")
         try await requireDOM("!!document.querySelector('.agent-rail .site-favicon') && innerWidth === 44")
+        try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=false] .lucide-panel-left-open')")
         try await requireDOM("!document.querySelector('.workspace-close')")
         func hover(_ entered: Bool, expectedWidth: CGFloat) throws {
             let area = try XCTUnwrap(chat.trackingAreas.first { $0.owner is SidebarRail })
@@ -502,6 +505,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try await requireDOM("!!document.querySelector('.sidebar-search-icon') && !document.querySelector('#task-search')")
         try hover(true, expectedWidth: 44)
         try await requireDOM("innerWidth === 230 && !!document.querySelector('.workspace-close')")
+        try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=false] .lucide-panel-left-open')")
         XCTAssertTrue(prefs.bool(forKey: "taskSidebarCollapsed"))
         try await requireDOM("""
             (() => { const row = document.querySelector('.workspace-tab-row:has(.workspace-close)');
@@ -526,8 +530,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(session.webView(for: id) === page)
         let collapsedCenters = try await sidebarIconCenters(in: chat)
         XCTAssertEqual(collapsedCenters.mapValues { $0.first }, expandedCenters.mapValues { $0.first })
-        state.isTaskSidebarCollapsed = false
+        _ = try await chat.evaluateJavaScript("document.querySelector('\(toggle)').click(); true")
         try await requireDOM("!document.querySelector('.agent-rail') && innerWidth === 230")
+        try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=true] .lucide-panel-left-close')")
         let reopenedCenters = try await sidebarIconCenters(in: chat)
         XCTAssertEqual(reopenedCenters, expandedCenters)
         state.isTaskSidebarCollapsed = true
