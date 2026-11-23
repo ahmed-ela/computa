@@ -2,10 +2,11 @@ import AppKit
 import SwiftUI
 
 enum NewTabDestination: CaseIterable {
-    case browser, chat
+    case browser, agent
 
-    var label: String { self == .browser ? "Browser" : "New agent" }
-    var symbol: String { self == .browser ? "globe" : "square.and.pencil" }
+    var label: String { self == .browser ? "Browser" : "Agent" }
+    @MainActor private static let agentIcon = tabIconAsset("agent", fallback: "person.crop.square").renderingMode(.template)
+    @MainActor var icon: Image { self == .browser ? Image(systemName: "globe") : Self.agentIcon }
 }
 
 /// Window-level input also works when a website currently owns the keyboard.
@@ -31,19 +32,19 @@ struct WorkspaceTabLauncher: View {
             WorkspaceCommandField(text: $text, placeholder: "Search Google or start an agent", label: "New tab",
                                   identifier: "workspace-tab-launcher", move: { selection = min(max(0, selection + $0), 1 + places.count) },
                                   submit: { value in
-                                      if selection == 1 { launch(.chat, value) }
+                                      if selection == 1 { launch(.agent, value) }
                                       else if value == text, places.indices.contains(selection - 2) { openPage(places[selection - 2].url) }
                                       else { launch(.browser, value) }
                                   }, cancel: cancel)
         } choices: {
             Divider()
             ForEach(NewTabDestination.allCases, id: \.self) { destination in
-                WorkspaceCommandRow(title: destination.label, symbol: destination.symbol, selected: selection == (destination == .browser ? 0 : 1)) {
+                WorkspaceCommandRow(title: destination.label, icon: destination.icon, selected: selection == (destination == .browser ? 0 : 1)) {
                     launch(destination, text)
                 }
             }
             ForEach(Array(places.enumerated()), id: \.element.id) { index, place in
-                WorkspaceCommandRow(title: place.label, symbol: place.bookmark ? "bookmark" : "clock", selected: selection == index + 2) {
+                WorkspaceCommandRow(title: place.label, icon: Image(systemName: place.bookmark ? "bookmark" : "clock"), selected: selection == index + 2) {
                     openPage(place.url)
                 }
             }
@@ -87,14 +88,14 @@ struct WorkspaceCommandPanel<Field: View, Choices: View>: View {
 
 struct WorkspaceCommandRow: View {
     let title: String
-    let symbol: String
+    let icon: Image
     let selected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack {
-                Image(systemName: symbol).frame(width: 22)
+                icon.frame(width: 22).accessibilityHidden(true)
                 Text(title).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 if selected { Image(systemName: "return").foregroundStyle(.secondary) }
@@ -104,6 +105,7 @@ struct WorkspaceCommandRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
