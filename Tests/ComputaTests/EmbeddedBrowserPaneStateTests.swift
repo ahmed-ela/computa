@@ -839,6 +839,50 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testClickingUnfocusedAddressSelectsTheWholeURLAndTypingReplacesIt() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Address selection</title>")
+        let url = try await site.start().appendingPathComponent("human/final")
+        defer { site.stop() }
+        let session = EmbeddedBrowserSession(persistent: false, defaults: isolatedTestPreferences())
+        let tab = try session.createTab(url: url)
+        let page = try XCTUnwrap(session.webView(for: tab))
+        let host = NSHostingView(rootView: EmbeddedBrowserPane(session: session, onClose: {}))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 540),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close(); session.shutdown() }
+        let loaded = await waitForScriptBool(on: page, script: "document.title === 'Address selection'")
+        XCTAssertTrue(loaded)
+        window.makeFirstResponder(page)
+        await settleLayout(host)
+        let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
+            .first { $0.placeholderString == "Search or enter a website address" })
+        func clickAddress(line: UInt = #line) async throws -> NSTextView {
+            let point = field.convert(NSPoint(x: 30, y: field.bounds.midY), to: nil)
+            try await clickInWindow(at: point, window: window, throughApplication: true)
+            return try XCTUnwrap(field.currentEditor() as? NSTextView,
+                                 "Expected the address field to own focus. Responder: \(String(describing: window.firstResponder))", line: line)
+        }
+        let full = NSRange(location: 0, length: url.absoluteString.utf16.count)
+        let first = try await clickAddress()
+        XCTAssertEqual(first.string, url.absoluteString)
+        XCTAssertEqual(first.selectedRange(), full)
+
+        window.makeFirstResponder(page)
+        await settleLayout(host)
+        let replacement = try await clickAddress()
+        XCTAssertEqual(replacement.selectedRange(), full)
+        let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6))
+        window.sendEvent(key)
+        XCTAssertEqual(replacement.string, "z")
+        XCTAssertEqual(page.url, url)
+    }
+
+    @MainActor
     func testCollapsedSidebarShowsOnlyWorkingChatsAndExpandedRowsShowUnread() async throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
@@ -1023,7 +1067,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
-    private func clickInWindow(at point: NSPoint, window: NSWindow) async throws {
+    private func clickInWindow(at point: NSPoint, window: NSWindow, throughApplication: Bool = false) async throws {
         let events = try [NSEvent.EventType.leftMouseDown, .leftMouseUp].map { type in
             try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
@@ -1031,7 +1075,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
         // A native control can consume mouseUp in a tracking loop during mouseDown.
         NSApp.postEvent(events[1], atStart: true)
-        window.sendEvent(events[0])
+        if throughApplication {
+            // Install the down event as NSApp.currentEvent, as in a running Mac application.
+            NSApp.postEvent(events[0], atStart: true)
+            let down = try XCTUnwrap(NSApp.nextEvent(matching: .leftMouseDown, until: .distantPast, inMode: .default, dequeue: true))
+            NSApp.sendEvent(down)
+        } else {
+            window.sendEvent(events[0])
+        }
         if let queued = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: false),
            queued.windowNumber == window.windowNumber {
             _ = NSApp.nextEvent(matching: .leftMouseUp, until: .distantPast, inMode: .default, dequeue: true)

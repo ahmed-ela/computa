@@ -28,7 +28,8 @@ Use **⇧⌘N** for a new agent chat or **⌘N** for a new window. Press **⌘�
 previous open tab and **⌘⇧]** for the next. Both follow the sidebar order across
 agent and browser tabs and wrap at either end.
 
-To visit another site, enter a web address or search term in the address field and press **Return**.
+Click the address bar once to select the entire URL. Type a web address or search term to replace it,
+then press **Return**. Click again within the selected URL to place the cursor and edit it.
 Each tab has its own history and reload control. Select a chat in the sidebar to return
 to the conversation. The browser tab keeps its place and page.
 

@@ -111,7 +111,7 @@ struct EmbeddedBrowserPane: View {
         }
         .onChange(of: selectedTab?.url) { _, _ in synchronizeAddress() }
         .onChange(of: addressFocused) { _, focused in
-            if !focused { synchronizeAddress() }
+            if focused { selectAddressOnFirstClick() } else { synchronizeAddress() }
         }
         .onChange(of: isInteractionBlocked) { _, blocked in
             if blocked { addressFocused = false }
@@ -254,6 +254,26 @@ struct EmbeddedBrowserPane: View {
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func selectAddressOnFirstClick() {
+        // Preserve native drag/word selections and focus restored by an agent's background page.
+        guard let click = NSApp.currentEvent, click.type == .leftMouseUp || click.type == .leftMouseDown,
+              click.clickCount == 1, click.modifierFlags.isDisjoint(with: [.shift, .command, .option, .control]),
+              let tab = selectedTab, let window = session.webView(for: tab.id)?.window, window === click.window,
+              let editor = window.firstResponder as? NSTextView, editor.isFieldEditor,
+              let field = editor.delegate as? NSTextField,
+              editor.bounds.contains(editor.convert(click.locationInWindow, from: nil))
+        else { return }
+        // AppKit places the caret during mouse tracking, sometimes after SwiftUI reports focus.
+        let addressAtClick = editor.string
+        RunLoop.main.perform(inModes: [.default, .modalPanel]) { [weak editor, weak field] in
+            MainActor.assumeIsolated {
+                guard let editor, let field, field.currentEditor() === editor, editor.window?.firstResponder === editor,
+                      editor.string == addressAtClick, editor.selectedRange().length == 0, !editor.hasMarkedText() else { return }
+                editor.selectAll(nil)
+            }
+        }
     }
 
     private func synchronizeAddress() {
