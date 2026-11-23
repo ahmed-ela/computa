@@ -963,6 +963,46 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testAgentAddressKeepsSidebarRowsStillAndOpensGoogle() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
+        let agent = AgentTask(title: "Keep this agent", summary: "", status: .draft, workspace: "", model: "local")
+        let state = AppState(tasks: [agent], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        state.selectTask(agent.id)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close(); session.shutdown() }
+        await settleLayout(host)
+        let sidebar = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let button = "document.querySelector('button.sidebar-address')"
+        let geometry = "Array.from(document.querySelectorAll('.sidebar-address,.sidebar-search-row,.new-task-button,.task-list'), el => el.getBoundingClientRect().top)"
+        for compact in [false, true] {
+            state.isTaskSidebarCollapsed = compact
+            state.selectTask(agent.id)
+            let ready = await waitForScriptBool(on: sidebar, script: """
+                \(button)?.ariaLabel === 'Open Google in a new tab' && \(button).textContent.trim() === ''
+                && Boolean(document.querySelector('.sidebar-search-icon')) === \(compact)
+                """)
+            XCTAssertTrue(ready)
+            let before = try await sidebar.evaluateJavaScript(geometry)
+            let tabCount = session.workspaceBrowserTabs.count
+            _ = try await sidebar.evaluateJavaScript("\(button).click(); true")
+            let opened = await waitForScriptBool(on: sidebar, script: "\(button)?.ariaLabel === 'Website address'")
+            XCTAssertTrue(opened)
+            let after = try await sidebar.evaluateJavaScript(geometry)
+            XCTAssertEqual(try XCTUnwrap(before as? [Double]), try XCTUnwrap(after as? [Double]))
+            XCTAssertEqual(session.workspaceBrowserTabs.count, tabCount + 1)
+            XCTAssertTrue(state.openWorkspaceTabs.contains(.agent(agent.id)))
+            XCTAssertEqual(session.restorablePages.first { $0.id == state.primaryBrowserID }?.url?.host, "www.google.com")
+        }
+    }
+
+    @MainActor
     func testSidebarAddressOpensCenteredSelectsReplacesAndNavigates() async throws {
         let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<!doctype html><title>Address selection</title><button>Top control</button>")
         let url = try await site.start().appendingPathComponent("human/final")

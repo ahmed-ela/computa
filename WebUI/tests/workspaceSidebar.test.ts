@@ -83,7 +83,15 @@ test('the browser address is separate from the tab filter and follows the active
   Object.assign(snapshot.workspaceBrowsers![0], { isLoading: true });
   expect(render()).toContain('aria-label="Stop loading"');
   snapshot.primaryBrowserID = undefined;
-  expect(render()).not.toContain('aria-label="Website address"');
+  for (const compact of [false, true]) {
+    snapshot.isTaskSidebarCollapsed = compact;
+    snapshot.isTaskSidebarPeeked = false;
+    const html = render();
+    const emptyAddress = html.match(/<button[^>]*class="sidebar-address"[^>]*>[\s\S]*?<\/button>/)?.[0];
+    expect(emptyAddress).toContain('aria-label="Open Google in a new tab"');
+    expect(emptyAddress).not.toMatch(/<span|rail\.example/);
+    expect(html.indexOf(emptyAddress!)).toBeLessThan(html.indexOf('class="sidebar-search-row"'));
+  }
   expect(render()).not.toContain('aria-label="Browser navigation"');
 });
 
