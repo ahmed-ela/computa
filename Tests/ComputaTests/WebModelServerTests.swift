@@ -3927,7 +3927,7 @@ final class WebModelServerTests: XCTestCase {
                 XCTAssertTrue(prompt.contains("Exact currently offered local function names: functions.exec_command, functions.write_stdin\nExact currently offered custom names: (none)"))
                 let literalBoundary: String
                 switch provider {
-                case "claude", "kimi":
+                case "claude", "kimi", "grok":
                     literalBoundary = "\n" + ComputaAgentInstructions.literalFencedResponseBoundary
                 case "qwen":
                     let rawSpelling = #"In JSON use \u0060 for Markdown backticks and \u002a for asterisks. Example path value (use yours): "report-\u0060x\u0060-\u002a\u002ay\u002a\u002a.txt""#
@@ -5030,11 +5030,12 @@ private actor FixtureWebModelTransport: WebModelTransport {
             }
         }
         // Fixed synthetic menus, independent of the requested model. Concrete
-        // Groq and Kimi requests still require their exact observed choice;
+        // named-model requests still require their exact observed choice;
         // never reflect the request or repair contradictory evidence from
         // ChoiceWebModelTransport.
         let providerFixtureChoice: WebsiteModelChoice?
         switch currentProvider {
+        case "grok": providerFixtureChoice = syntheticGrokChoice
         case "groq": providerFixtureChoice = WebsiteModelChoice(provider: "groq", key: "openai/gpt-oss-120b", label: "GPT OSS 120B")
         case "kimi": providerFixtureChoice = syntheticKimiChoice
         case "qwen": providerFixtureChoice = syntheticQwenChoice
