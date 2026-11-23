@@ -1098,6 +1098,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         try await core.refreshInstalledCLIModels()
     }
 
+    func readCodexCLIUsage() async -> CodexCLIUsage.Report {
+        await core.readCodexCLIUsage()
+    }
+
     func hasBoundThread(taskID: String) async -> Bool { await core.hasBoundThread(taskID: taskID) }
 
     func loadTasks() async throws -> [AgentTask] { try await loadWorkspaceHistory(including: []).tasks }
@@ -1547,6 +1551,7 @@ private extension CodexAppServerRuntime {
         private var computerV2InFlight: [AgentTask.ID: UUID] = [:]
         private var computerGlobalInFlight: UUID?
         private var isReady = false
+        private var codexCLIUsage = CodexCLIUsage.Session()
         private var runtimeCapabilities: Set<ComputaRuntimeArtifact.Capability> = []
         private var isStartingServer = false
         private var isShuttingDown = false
@@ -3550,6 +3555,22 @@ private extension CodexAppServerRuntime {
             return try await installedCLIModels()
         }
 
+        func readCodexCLIUsage() async -> CodexCLIUsage.Report {
+            // Use the already initialized CLI; an optional quota check must not race a chat for startup.
+            guard configuration.usesInstalledCLI, isReady, !isShuttingDown, !isPreparingCommandShutdown,
+                  codexCLIUsage.readID == nil else { return codexCLIUsage.report }
+            let id = codexCLIUsage.beginRead()
+            let buckets: [CodexCLIUsage.Bucket]?
+            do {
+                let reply = try await request(method: "account/rateLimits/read", params: [:], timeout: .seconds(10))
+                buckets = try CodexCLIUsage.read(reply)
+            } catch {
+                // This optional account query must not fail a chat or surface raw provider errors.
+                buckets = nil
+            }
+            return codexCLIUsage.completeRead(id, buckets: buckets)
+        }
+
         private func installedCLIModels() async throws -> [LocalModelOption] {
             guard configuration.usesInstalledCLI else { throw InstalledCodexCLI.Failure.missing }
             let bytes = try await request(method: "account/read", params: [:], timeout: .seconds(15))
@@ -3881,6 +3902,20 @@ private extension CodexAppServerRuntime {
 
         private func handleNotification(method: String, params: [String: Any]) {
             guard !isShuttingDown else { return }
+            // Account notifications have no threadId.
+            if configuration.usesInstalledCLI {
+                switch method {
+                case "account/rateLimits/updated":
+                    if let bucket = CodexCLIUsage.notification(params) {
+                        events.yield(.codexCLIUsageUpdated(codexCLIUsage.apply(bucket)))
+                    }
+                    return
+                case "account/updated":
+                    events.yield(.codexCLIUsageUpdated(codexCLIUsage.invalidate()))
+                    return
+                default: break
+                }
+            }
             guard let threadID = params["threadId"] as? String,
                   let taskID = taskForThread[threadID]
             else { return }
@@ -8617,6 +8652,9 @@ private extension CodexAppServerRuntime {
 
         private func serverFailed(_ error: Error) {
             retireCrashCheckpoints()
+            if configuration.usesInstalledCLI {
+                events.yield(.codexCLIUsageUpdated(codexCLIUsage.invalidate()))
+            }
             if configuration.usesInstalledCLI, !isShuttingDown, !isPreparingCommandShutdown {
                 for taskID in threadForTask.keys where turnIdentity.activeTurnID(for: taskID) != nil {
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: TimelineEntry(kind: .system,

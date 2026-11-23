@@ -18,6 +18,7 @@ import { WorkspaceSidebar, sidebarIsCompact } from './WorkspaceSidebar';
 import { copyText } from './clipboard';
 import { ReviewPanel } from './ReviewPanel';
 import { ModelLabel, ModelSelector } from './ModelSelector';
+import { CodexCLIUsage, isCodexCLIModel } from './CodexCLIUsage';
 import { WebsiteSessionCleanupControl } from './WebsiteSessionCleanupControl';
 import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
@@ -558,6 +559,12 @@ function Composer({
               disabled={!task.modelSelectable}
               onSelect={(modelID) => post({ action: 'setTaskModel', taskID: task.id, modelID })}
             />
+            {isCodexCLIModel(task.model) ? (
+              <CodexCLIUsage key={task.id} buckets={snapshot.codexCLIUsage}
+                refreshing={snapshot.codexCLIUsageRefreshing === true}
+                blocked={snapshot.pendingApprovalCount > 0}
+                onRefresh={() => post({ action: 'refreshCodexCLIUsage', taskID: task.id })} />
+            ) : null}
             {/* Model refresh controls are temporarily hidden; retain the component for later restoration.
             <WebsiteModelsRefresh model={task.model} canRefresh={snapshot.canRefreshWebsiteModels === true} refreshing={snapshot.websiteModelsRefreshing}
               onRefresh={post} />

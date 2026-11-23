@@ -3,6 +3,30 @@ import XCTest
 
 final class WebSnapshotTests: XCTestCase {
     @MainActor
+    func testQuotaSnapshotIsOnlyVisibleInSelectedCodexCLIChatAndRejectsStaleUpdates() throws {
+        let codex = AgentTask(id: "codex", title: "Codex", summary: "", status: .completed,
+            workspace: "/tmp", model: InstalledCodexCLI.prefix + "test", entries: [])
+        let website = AgentTask(id: "website", title: "ChatGPT", summary: "", status: .completed,
+            workspace: "/tmp", model: "browser/chatgpt", entries: [])
+        let state = AppState(tasks: [codex, website], preferences: isolatedTestPreferences())
+        state.selectedTaskID = codex.id
+        let bucket = CodexCLIUsage.Bucket(id: "codex", label: nil,
+            primary: .init(usedPercent: 80, windowDurationMins: 300, resetsAt: nil), secondary: nil)
+        state.apply(.codexCLIUsageUpdated(.init(revision: 1, buckets: [bucket])))
+        let snapshot = WebUISnapshot(state: state)
+        XCTAssertEqual(snapshot.codexCLIUsage, [bucket])
+        XCTAssertEqual(try JSONDecoder().decode(WebUISnapshot.self,
+            from: JSONEncoder().encode(snapshot)), snapshot)
+        state.selectedTaskID = website.id
+        XCTAssertNil(WebUISnapshot(state: state).codexCLIUsage)
+        XCTAssertNil(WebUISnapshot(state: state).codexCLIUsageRefreshing)
+        state.selectedTaskID = codex.id
+        state.apply(.codexCLIUsageUpdated(.init(revision: 3, buckets: nil)))
+        state.apply(.codexCLIUsageUpdated(.init(revision: 2, buckets: [bucket])))
+        XCTAssertNil(WebUISnapshot(state: state).codexCLIUsage)
+    }
+
+    @MainActor
     func testFailedTaskRoundTripsWithRedStatusAndNoActiveTurn() throws {
         let task = AgentTask(id: "failed", title: "Failed task", summary: "", status: .running,
             workspace: "/tmp", model: "local", entries: [])
