@@ -44,7 +44,15 @@ and revokes inspection when a tool takes control of the tab.
 
 - `EmbeddedBrowserSession` owns tabs, WebViews, independent website data,
   navigation state and teardown on the main actor. Hiding a view does not
-  destroy its session. The default limit is eight tabs (configurable 1–32).
+  destroy its session. User-created tabs have no fixed count limit. Agent-owned
+  renderers and pending inference preparations share eight slots. Website pop-ups
+  have a separate four-window allowance.
+- The macOS workspace restores background tabs without allocating a WebView until
+  needed. On memory warnings it suspends eligible detached views. It can release
+  the renderer for a standalone, cacheable plain-text or raster-image GET with no
+  navigation history. Selecting that tab reloads it in place. Editable websites,
+  pop-ups, inspected pages and active tool sessions retain their documents.
+  Critical pressure also clears WebKit’s in-memory resource cache.
 - `EmbeddedBrowserPane` presents only human tabs from its injected session: tab strip, address field,
   history/reload/stop controls and errors. Only a human new-tab action focuses
   the address field.
@@ -130,9 +138,9 @@ those IDs; browser addresses start persisting with the first build that records 
 Human browser pages can open pop-ups as visible tabs, using WebKit's supplied
 configuration so the opener relationship and signed-in profile remain intact.
 Closing a child from the website returns selection to its surviving opener.
-At the tab limit, the selected page in the browser pane can open one additional
-temporary pop-up for flows such as Google Docs sign-in. Background pages and
-pop-ups cannot claim this extra slot. The same URL policy applies.
+Ordinary tabs and agent tasks do not consume the pop-up allowance, so opening
+more user tabs leaves room for flows such as Google Docs sign-in. Closing a
+pop-up releases its slot. The same URL policy applies.
 Inference-owned pages cannot create or close browser tabs this way.
 
 Browser tools also reject popups from a human document after attempting input on it, including delayed callbacks after task cleanup. Human popup use on that document requires a reload or fresh document navigation that commits; a SPA route change is insufficient. Untouched documents and declined tool actions retain normal human popup behavior. This is a conservative ownership boundary, not precise attribution of concurrent human and agent input.
@@ -141,8 +149,8 @@ Downloads, file selection, camera/microphone requests, external-app schemes and
 JavaScript modal dialogs are declined. Google can independently reject embedded
 browser OAuth; pop-up support alone does not establish sign-in compatibility.
 Website models accept text/Accessibility observations;
-image, screenshot and audio inputs are unsupported. A tab count
-limit does not guarantee bounded memory on arbitrarily heavy websites.
+image, screenshot and audio inputs are unsupported. Unsaved website edits are
+session-local and may be lost if macOS terminates a WebKit process.
 
 ## Validation
 

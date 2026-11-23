@@ -176,6 +176,8 @@ private final class InitialRequestLoadBoundary {
 final class InitialRequestHTTPFixture: @unchecked Sendable {
     private let listener: NWListener
     private let finalStatus: Int
+    private let finalMIME: String
+    private let cacheControl: String
     private let finalHTML: String?
     private let iconPath: String?
     private let iconDelay: DispatchTimeInterval
@@ -185,9 +187,11 @@ final class InitialRequestHTTPFixture: @unchecked Sendable {
     private var recorded: [APIModelServer.HTTPRequest] = []
     var requests: [APIModelServer.HTTPRequest] { lock.lock(); defer { lock.unlock() }; return recorded }
 
-    init(finalStatus: Int, finalHTML: String? = nil, iconPath: String? = nil, iconDelay: DispatchTimeInterval = .seconds(0)) throws {
+    init(finalStatus: Int, finalHTML: String? = nil, finalMIME: String = "text/html; charset=utf-8", cacheControl: String = "no-store", iconPath: String? = nil, iconDelay: DispatchTimeInterval = .seconds(0)) throws {
         self.iconPath = iconPath
         self.iconDelay = iconDelay
+        self.finalMIME = finalMIME
+        self.cacheControl = cacheControl
         self.finalHTML = finalHTML
         self.finalStatus = finalStatus
         let parameters = NWParameters.tcp
@@ -227,7 +231,7 @@ final class InitialRequestHTTPFixture: @unchecked Sendable {
                     self.respond(connection, status: 302, location: "/\(parts[0])/final", body: Data())
                 } else {
                     let html = self.finalHTML ?? "<!doctype html><meta charset=utf-8><link rel=icon href='data:,'><body>Synthetic final \(self.finalStatus)</body>"
-                    self.respond(connection, status: self.finalStatus, location: nil, body: Data(html.utf8))
+                    self.respond(connection, status: self.finalStatus, location: nil, body: Data(html.utf8), mimeType: self.finalMIME)
                 }
             } catch { connection.cancel() }
         }
@@ -235,7 +239,7 @@ final class InitialRequestHTTPFixture: @unchecked Sendable {
     private func respond(_ connection: NWConnection, status: Int, location: String?, body: Data, mimeType: String = "text/html; charset=utf-8") {
         let redirect = location.map { "Location: \($0)\r\n" } ?? ""
         let imageSources = iconPath == nil ? "data:" : "'self' data:"
-        var response = Data("HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n\(redirect)Content-Type: \(mimeType)\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; img-src \(imageSources)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+        var response = Data("HTTP/1.1 \(status) \(HTTPURLResponse.localizedString(forStatusCode: status))\r\n\(redirect)Content-Type: \(mimeType)\r\nCache-Control: \(cacheControl)\r\nContent-Security-Policy: default-src 'none'; img-src \(imageSources)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
         response.append(body)
         connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
     }

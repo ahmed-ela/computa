@@ -791,23 +791,23 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
     }
 
     func testFactoryReservationSurvivesCancellationAndBlocksTabAndMaintenanceAdmission() async throws {
-        let browser = EmbeddedBrowserSession(persistent: false, maximumTabs: 1)
+        let browser = EmbeddedBrowserSession(persistent: false, maximumAgentTabs: 1)
         defer { browser.shutdown() }
         let source = CookieSeedStore(), destination = CookieSeedStore(); source.holdReads = true
         browser.setCookieSeedFactoryForTesting { _, _ in ChatGPTInferenceCookieSeed(source: source, destination: destination) }
         let task = Task { try await browser.createChatGPTInferenceTab(admit: {}) }
         await yieldUntil { source.pendingReads.count == 1 }
         XCTAssertEqual(browser.pendingInferenceCookieSeedsForTesting, 1); XCTAssertTrue(browser.tabs.isEmpty)
-        XCTAssertThrowsError(try browser.createTab())
+        XCTAssertThrowsError(try browser.createUnloadedModelTabForTesting())
         let maintenance = await browser.withExclusiveCookieMaintenance { _, _, _ in true }
         XCTAssertNil(maintenance)
         task.cancel()
         do { _ = try await task.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertEqual(browser.pendingInferenceCookieSeedsForTesting, 1)
-        XCTAssertThrowsError(try browser.createTab())
+        XCTAssertThrowsError(try browser.createUnloadedModelTabForTesting())
         source.releaseRead()
         XCTAssertEqual(browser.pendingInferenceCookieSeedsForTesting, 0); XCTAssertTrue(browser.tabs.isEmpty)
-        XCTAssertNoThrow(try browser.createTab())
+        XCTAssertNoThrow(try browser.createUnloadedModelTabForTesting())
     }
 
     func testShutdownCancelsSeedWithoutPublishingOrReleasingAnIssuedCallback() async throws {
@@ -830,10 +830,10 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         XCTFail("The callback was not issued")
     }
 
-    private func prewarmBrowser(source: CookieSeedStore, destination: CookieSeedStore, maximumTabs: Int = 8,
+    private func prewarmBrowser(source: CookieSeedStore, destination: CookieSeedStore, maximumAgentTabs: Int = 8,
                                 onLoad: (() -> Void)? = nil,
                                 configureView: ((CookieSeedNoNavigationView) -> Void)? = nil) -> EmbeddedBrowserSession {
-        let browser = EmbeddedBrowserSession(persistent: false, maximumTabs: maximumTabs)
+        let browser = EmbeddedBrowserSession(persistent: false, maximumAgentTabs: maximumAgentTabs)
         browser.setCookieSeedFactoryForTesting { _, _ in ChatGPTInferenceCookieSeed(source: source, destination: destination) }
         browser.setCookieValidationSourceForTesting { _ in source }
         browser.setModelViewFactoryForTesting { configuration in
@@ -1014,7 +1014,7 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         for operation in ["pause", "expiry", "disable", "shutdown"] {
             let source = CookieSeedStore([try cookie()]), destination = CookieSeedStore()
             var loads = 0
-            let browser = prewarmBrowser(source: source, destination: destination, maximumTabs: 1, onLoad: { loads += 1 })
+            let browser = prewarmBrowser(source: source, destination: destination, maximumAgentTabs: 1, onLoad: { loads += 1 })
             defer { browser.shutdown() }
             browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
             let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
@@ -1034,7 +1034,7 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
             else { browser.shutdown() }
             XCTAssertEqual(browser.webView(for: id) != nil, operation == "pause", operation)
             XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 1)
-            XCTAssertThrowsError(try browser.createTab(), "An outstanding cookie callback retains capacity")
+            XCTAssertThrowsError(try browser.createUnloadedModelTabForTesting(), "An outstanding cookie callback retains capacity")
             browser.prepareChatGPTInferencePrewarmIfNeeded()
             source.holdReads = false; source.releaseRead(twice: true)
             _ = await browser.awaitChatGPTInferencePrewarmResumeForTesting()
@@ -1052,7 +1052,7 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         let auth = try cookie()
         let source = CookieSeedStore([auth]), destination = CookieSeedStore()
         var loads = 0
-        let browser = prewarmBrowser(source: source, destination: destination, maximumTabs: 1, onLoad: { loads += 1 })
+        let browser = prewarmBrowser(source: source, destination: destination, maximumAgentTabs: 1, onLoad: { loads += 1 })
         defer { browser.shutdown() }
         browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
         let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
@@ -1294,7 +1294,7 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
     func testClaimDeadlineDuringSeedReturnsWithoutLateNavigationAndRetainsCapacityUntilDrain() async throws {
         let source = CookieSeedStore(), destination = CookieSeedStore(); source.holdReads = true
         var loads = 0
-        let browser = prewarmBrowser(source: source, destination: destination, maximumTabs: 1, onLoad: { loads += 1 })
+        let browser = prewarmBrowser(source: source, destination: destination, maximumAgentTabs: 1, onLoad: { loads += 1 })
         defer { browser.shutdown() }
         browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
         await yieldUntil { source.pendingReads.count == 1 }
@@ -1302,19 +1302,19 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
         let taken = try await browser.takePrewarmedChatGPTInferenceTab(until: .now + .milliseconds(30), admit: {})
         XCTAssertNil(taken); XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
         XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 1)
-        XCTAssertThrowsError(try browser.createTab())
+        XCTAssertThrowsError(try browser.createUnloadedModelTabForTesting())
         let maintenance = await browser.withExclusiveCookieMaintenance { _, _, _ in true }
         XCTAssertNil(maintenance); XCTAssertEqual(loads, 0)
         source.releaseRead(twice: true)
         XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 0)
         XCTAssertEqual(destination.reads, 0); XCTAssertEqual(loads, 0)
-        XCTAssertNoThrow(try browser.createTab())
+        XCTAssertNoThrow(try browser.createUnloadedModelTabForTesting())
     }
 
     func testValidationDeadlineAndCallerCancellationRetainCallbackCapacityWithoutClaimingThePage() async throws {
         for cancelled in [false, true] {
             let source = CookieSeedStore(), destination = CookieSeedStore()
-            let browser = prewarmBrowser(source: source, destination: destination, maximumTabs: 1)
+            let browser = prewarmBrowser(source: source, destination: destination, maximumAgentTabs: 1)
             defer { browser.shutdown() }
             browser.setChatGPTInferencePrewarmingEnabled(true, admit: {})
             let prepared = await browser.awaitChatGPTInferencePrewarmForTesting()
@@ -1332,12 +1332,12 @@ final class ChatGPTInferenceCookieStoreTests: XCTestCase {
             XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
             XCTAssertNil(browser.webView(for: id))
             XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 1)
-            XCTAssertThrowsError(try browser.createTab())
+            XCTAssertThrowsError(try browser.createUnloadedModelTabForTesting())
             let maintenance = await browser.withExclusiveCookieMaintenance { _, _, _ in true }
             XCTAssertNil(maintenance)
             source.releaseRead(twice: true)
             XCTAssertEqual(browser.pendingChatGPTInferenceCookiePreparationCount, 0)
-            XCTAssertNoThrow(try browser.createTab())
+            XCTAssertNoThrow(try browser.createUnloadedModelTabForTesting())
         }
     }
 
