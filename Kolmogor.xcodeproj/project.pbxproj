@@ -398,6 +398,7 @@
 		E5523E6CD657942F884D2471 /* AgentRuntimeIsolation.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBEB9F66BF559D31FF28BE6C /* AgentRuntimeIsolation.swift */; };
 		E57AEA1AEFDDB564D9CEC303 /* ChatGPTResponseCompletionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA74BB79569AEFBB849F8322 /* ChatGPTResponseCompletionTests.swift */; };
 		E5B5AEC100A82F72E98323F7 /* WebsiteTurnFailureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3D544EAC778AD1AEC76FFEA /* WebsiteTurnFailureStore.swift */; };
+		E605CA84EFAB6E6F70B17139 /* FirstMessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F4D90F8A6E7A4A6F92D4739 /* FirstMessageStore.swift */; };
 		E7CEAEAD505E888184F190C5 /* WebsiteRequestFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1558DD75484B5021B12EBEF9 /* WebsiteRequestFixture.swift */; };
 		E88C36E39B89CD52290CA505 /* WebsiteModelEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B0DFF0980CCB63EC32CFBEF /* WebsiteModelEvidence.swift */; };
 		E9D962B579C95A7E3E676B94 /* WebModelServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1B78ABE6073A7F7890FD34 /* WebModelServer.swift */; };
@@ -751,6 +752,7 @@
 		9E1BD5C84C94DD0079A97341 /* SavedProviderServerFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedProviderServerFixture.swift; sourceTree = "<group>"; };
 		9E55E1ACC5EB5AF8085FE878 /* LocalModelServerPreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalModelServerPreflight.swift; sourceTree = "<group>"; };
 		9F2D23EBD53FD03DABED6705 /* RuntimeContextContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContextContractTests.swift; sourceTree = "<group>"; };
+		9F4D90F8A6E7A4A6F92D4739 /* FirstMessageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstMessageStore.swift; sourceTree = "<group>"; };
 		A03860176FAC927BFA3D8A94 /* NativePostActionExecutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePostActionExecutionTests.swift; sourceTree = "<group>"; };
 		A066DB0F67D0A33D963E2653 /* NativeVerificationRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeVerificationRuntimeTests.swift; sourceTree = "<group>"; };
 		A071CC405B4F6289D86B9D17 /* EmbeddedHumanVerificationStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedHumanVerificationStoreTests.swift; sourceTree = "<group>"; };
@@ -1110,6 +1112,7 @@
 				9B2F648D85D1C64A774E3C08 /* ApprovalResolutionResult.swift */,
 				BF3F7A210577CCC784901F80 /* AppState.swift */,
 				19143B36573F5DE745EED967 /* ChatUnreadCompletionStore.swift */,
+				9F4D90F8A6E7A4A6F92D4739 /* FirstMessageStore.swift */,
 				C17F7D931B82AF7F8BEC1C73 /* WorkspaceTabs.swift */,
 			);
 			path = State;
@@ -1995,6 +1998,7 @@
 				7195F4C73B059B2A017306D3 /* EmbeddedHumanVerificationStore.swift in Sources */,
 				68F0B91E9FB8EBE82A3E6B64 /* EmbeddedWebModelTransport.swift in Sources */,
 				DB5E6112E53BE5351167629B /* FileReviewModels.swift in Sources */,
+				E605CA84EFAB6E6F70B17139 /* FirstMessageStore.swift in Sources */,
 				5380FD881A488C973BDC4071 /* FixtureBunExecutable.swift in Sources */,
 				1FAFD17CF52AC17CDA172D1B /* GeminiCAPTCHADiagnostic.swift in Sources */,
 				2ED01A85C9A98795E482166B /* GeminiCAPTCHADiagnosticStore.swift in Sources */,

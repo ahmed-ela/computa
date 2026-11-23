@@ -130,6 +130,8 @@ final class AppState {
     }
     @ObservationIgnored private var waitingForWorkspaceHistory = false
     @ObservationIgnored private var restoredWorkspaceDraftIDs = Set<String>()
+    @ObservationIgnored private var firstMessages: [String: FirstMessageStore.Record] = [:]
+    @ObservationIgnored private var missingRuntimeThreads = Set<String>()
     var isReviewPresented = false
     private(set) var review: AppReviewState?
     @ObservationIgnored private let reviewService = WorkspaceReviewService()
@@ -251,8 +253,19 @@ final class AppState {
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         websiteModeChoices = WebsiteModeCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
+        var localRecords: [FirstMessageStore.Record] = []
+        do { localRecords = try runtime?.firstMessageStore?.load() ?? [] }
+        catch { FirstMessageStore.log.error("Local first-message history could not be loaded.") }
+        for record in localRecords {
+            if let thread = record.threadID {
+                workspaceTabs.restoreBinding(draft: record.localID.uuidString, thread: thread)
+                missingRuntimeThreads.insert(record.id)
+            }
+            firstMessages[record.id.lowercased()] = record
+        }
+        let recovered = localRecords.map(\.restoredTask).filter { local in !tasks.contains { $0.id == local.id } }
         let snapshot = workspaceTabs.saved
-        let existingIDs = Set(tasks.map(\.id))
+        let existingIDs = Set((tasks + recovered).map(\.id))
         let savedDrafts = snapshot?.drafts ?? [:]
         let openIDs = workspaceTabs.order.filter { $0.kind == .agent }.map(\.id)
         let closedIDs = Set(savedDrafts.keys).subtracting(openIDs).sorted()
@@ -261,10 +274,10 @@ final class AppState {
             return draft.task(id: id)
         }
         restoredWorkspaceDraftIDs = Set(drafts.map(\.id))
-        self.tasks = tasks + drafts
+        self.tasks = tasks + recovered + drafts
         waitingForWorkspaceHistory = tasks.isEmpty
         if tasks.isEmpty {
-            selectedTaskID = drafts.first { $0.id == snapshot?.selectedAgent }?.id
+            selectedTaskID = self.tasks.first { $0.id == snapshot?.selectedAgent }?.id
         } else {
             selectedTaskID = workspaceTabs.initialAgent(in: self.tasks)
         }
@@ -1189,6 +1202,7 @@ final class AppState {
                 || ChatUnreadCompletionStore.identity(tasks[index].runtimeThreadID) == stable else { return false }
         workspaceTabs.bindAgent(draft: taskID, thread: stable)
         tasks[index].runtimeThreadID = stable
+        bindFirstMessage(taskID: taskID, threadID: stable)
         saveWorkspace()
         return true
     }
@@ -1450,6 +1464,10 @@ final class AppState {
         rememberDefaultModel(modelID)
         guard tasks[index].model != modelID else { return true }
         tasks[index].model = modelID
+        if var record = firstMessages[taskID.lowercased()], tasks[index].runtimeThreadID == nil {
+            record.metadata = .init(tasks[index])
+            saveFirstMessage(record, taskID: taskID)
+        }
         saveWorkspace()
         requestAutomaticWebsiteModelRefresh(for: modelID)
         updateWebsitePrewarming()
@@ -2104,6 +2122,41 @@ final class AppState {
         return report
     }
 
+    private func bindFirstMessage(taskID: String, threadID: String) {
+        guard var record = firstMessages[taskID.lowercased()], record.threadID != threadID else { return }
+        record.threadID = threadID
+        saveFirstMessage(record, taskID: taskID)
+    }
+
+    @discardableResult
+    private func saveFirstMessage(_ record: FirstMessageStore.Record, taskID: String) -> Bool {
+        do {
+            try runtime?.firstMessageStore?.save(record)
+            firstMessages[taskID.lowercased()] = record
+            return true
+        } catch {
+            FirstMessageStore.log.error("A first-message record could not be written.")
+            return false
+        }
+    }
+
+    private func reconcileFirstMessage(with history: AgentTask) -> AgentTask {
+        let identity = (history.runtimeThreadID ?? history.id).lowercased()
+        guard let record = firstMessages[identity] else { return history }
+        missingRuntimeThreads.remove(record.id)
+        let prefix = record.entriesMissing(from: history)
+        if prefix.isEmpty {
+            firstMessages.removeValue(forKey: identity)
+            do { try runtime?.firstMessageStore?.remove(record.localID) }
+            catch { FirstMessageStore.log.error("A confirmed first-message record could not be retired.") }
+            return history
+        }
+        var visible = history
+        visible.entries.insert(contentsOf: prefix, at: 0)
+        if history.entries.isEmpty { visible.status = record.restoredTask.status }
+        return visible
+    }
+
     private func restoreStartupTasks(_ loadedTasks: [AgentTask], replacing baseline: [AgentTask],
                                      selectionRevisionBeforeLoading: UInt64) {
         let baselineByID = Dictionary(uniqueKeysWithValues: baseline.map { ($0.id, $0) })
@@ -2111,10 +2164,11 @@ final class AppState {
         let removedIDs = Set(baselineByID.keys).subtracting(currentIDs)
         // The MainActor can accept New Task, model edits, or runtime updates
         // while startup awaits disk history. Those newer task values win.
-        let loadedIDs = Set(loadedTasks.map(\.id))
+        let loadedTasks = loadedTasks.map { reconcileFirstMessage(with: $0) }
+        let loadedIDs = Set(loadedTasks.map { AgentTask.identityKey($0.runtimeThreadID ?? $0.id) })
         let changedTasks = tasks.filter { task in
-            baselineByID[task.id] != task || (!loadedIDs.contains(task.id) && task.status == .draft
-                && task.runtimeThreadID == nil && restoredWorkspaceDraftIDs.contains(task.id))
+            baselineByID[task.id] != task || (!loadedIDs.contains(AgentTask.identityKey(task.runtimeThreadID ?? task.id))
+                && (firstMessages[task.id.lowercased()] != nil || restoredWorkspaceDraftIDs.contains(task.id)))
         }
         let changedIDs = Set(changedTasks.map(\.id))
         let restoredTasks = changedTasks + loadedTasks.filter {
@@ -2220,6 +2274,7 @@ final class AppState {
                 if replacement.runtimeThreadID == nil { replacement.runtimeThreadID = tasks[index].runtimeThreadID }
                 if tasks[index].runtimeThreadID == nil, let thread = replacement.runtimeThreadID {
                     workspaceTabs.bindAgent(draft: task.id, thread: thread)
+                    bindFirstMessage(taskID: task.id, threadID: thread)
                 }
                 tasks[index] = replacement
             } else {
@@ -2574,6 +2629,9 @@ final class AppState {
             return .notDelivered("Submission was rejected before delivery.")
         }
 
+        guard !missingRuntimeThreads.contains(taskID) else {
+            return .notDelivered("This chat’s runtime history must load before sending another message.")
+        }
         let task = tasks[index]
         let newThread = task.runtimeThreadID == nil
         let instructions = newThread ? workspaceTabs.agent(for: task)?.instructions ?? "" : ""
@@ -2584,8 +2642,17 @@ final class AppState {
             title: "You",
             body: prompt
         )
-        websiteSessionCleanupReceipts.removeValue(forKey: taskID)
         entry.activityGroupID = entry.id
+        if newThread, runtime?.firstMessageStore != nil, let id = UUID(uuidString: taskID) {
+            var record = firstMessages[taskID.lowercased()] ?? .init(localID: id, threadID: nil,
+                metadata: .init(task), entries: [])
+            record.metadata = .init(task)
+            record.entries.append(entry)
+            guard saveFirstMessage(record, taskID: taskID) else {
+                return .notDelivered("The message could not be saved on this Mac. Check the available disk space and try again.")
+            }
+        }
+        websiteSessionCleanupReceipts.removeValue(forKey: taskID)
         tasks[index].entries.append(entry)
         if AgentRestartStore.originalRequest == nil { tasks[index].summary = userText }
         tasks[index].status = .waiting
@@ -2652,6 +2719,10 @@ final class AppState {
                     activityGroupID: entry.id
                 )
                 tasks[currentIndex].entries.append(failure)
+                if var record = firstMessages[taskID.lowercased()], record.entries.last?.id == entry.id {
+                    record.entries.append(failure)
+                    saveFirstMessage(record, taskID: taskID)
+                }
                 if selectedTaskID == taskID {
                     selectedEntryID = failure.id
                 }

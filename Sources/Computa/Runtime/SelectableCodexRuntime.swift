@@ -2,6 +2,7 @@ import Foundation
 
 /// Routes each chat to one app-server process for the lifetime of its thread.
 actor SelectableCodexRuntime: AgentRuntimeClient {
+    nonisolated let firstMessageStore: FirstMessageStore?
     nonisolated let restartStore: AgentRestartStore?
     nonisolated let providerName: String
     private let bundled: CodexAppServerRuntime
@@ -17,6 +18,8 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
 
     init(configuration: CodexAppServerRuntime.Configuration = .localQwen,
          providerCLISearchDirectories: [String] = ProviderCLI.directories()) {
+        firstMessageStore = FirstMessageStore(directory: URL(fileURLWithPath: configuration.codexHomePath)
+            .appendingPathComponent("FirstMessages-v1", isDirectory: true))
         restartStore = AgentRestartStore(directory: URL(fileURLWithPath: configuration.codexHomePath)
             .appendingPathComponent("InterruptedAgents-v1", isDirectory: true))
         let events = channel.continuation

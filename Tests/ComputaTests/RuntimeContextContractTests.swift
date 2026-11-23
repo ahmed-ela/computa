@@ -10,10 +10,11 @@ final class RuntimeContextContractTests: XCTestCase {
             return try JSONSerialization.data(withJSONObject: ["result": ["data": rows, "nextCursor": next as Any]])
         }
         let first = (1...100).map { "recent-\($0)" }
-        var list = WorkspaceThreadList(eagerThreadIDs: ["open"])
+        let openID = UUID().uuidString
+        var list = WorkspaceThreadList(eagerThreadIDs: [openID])
         XCTAssertEqual(try list.takePage(page(first, next: "page2")).compactMap { $0["id"] as? String }, first)
-        XCTAssertEqual(try list.takePage(page([first[0], "closed", "open", "running"], next: "page3"))
-            .compactMap { $0["id"] as? String }, ["open", "running"])
+        XCTAssertEqual(try list.takePage(page([first[0], "closed", openID.lowercased(), "running"], next: "page3"))
+            .compactMap { $0["id"] as? String }, [openID.lowercased(), "running"])
         XCTAssertEqual(list.cursor, "page3")
         XCTAssertTrue(try list.takePage(page(["closed", "oldest"])).isEmpty)
         XCTAssertNil(list.cursor)

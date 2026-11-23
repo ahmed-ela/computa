@@ -374,7 +374,7 @@ struct WorkspaceThreadList {
     private(set) var cursor: String?
     private(set) var savedChats: [SavedChatSummary] = []
 
-    init(eagerThreadIDs: Set<String>) { self.eagerThreadIDs = eagerThreadIDs }
+    init(eagerThreadIDs: Set<String>) { self.eagerThreadIDs = Set(eagerThreadIDs.map(AgentTask.identityKey)) }
 
     mutating func takePage(_ response: Data) throws -> [[String: Any]] {
         guard let object = try JSONSerialization.jsonObject(with: response) as? [String: Any],
@@ -383,9 +383,11 @@ struct WorkspaceThreadList {
         }
         let first = cursor == nil
         let selected = page.filter { record in
-            guard let id = record["id"] as? String, seenIDs.insert(id).inserted else { return false }
+            guard let id = record["id"] as? String else { return false }
+            let key = AgentTask.identityKey(id)
+            guard seenIDs.insert(key).inserted else { return false }
             let status = record["status"] as? [String: Any]
-            if first || eagerThreadIDs.contains(id) || status?["type"] as? String == "active" { return true }
+            if first || eagerThreadIDs.contains(key) || status?["type"] as? String == "active" { return true }
             savedChats.append(SavedChatSummary(id: id, title: AppServerThreadHistoryContract.displayTitle(
                 name: record["name"] as? String, preview: record["preview"] as? String),
                 workspace: record["cwd"] as? String ?? "", updatedAt: (record["updatedAt"] as? NSNumber)?.doubleValue ?? 0))
