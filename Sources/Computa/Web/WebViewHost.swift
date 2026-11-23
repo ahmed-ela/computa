@@ -129,6 +129,7 @@ struct WebWorkspaceView: View {
                         onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
                         canConfigureKimiProfile: state.canConfigureKimiProfile,
                         onSwitchKimiProfile: state.switchKimiSignInProfile(from:),
+                        onCloseTab: state.closeWorkspaceTab,
                         onClose: {
                             guard state.workspaceLayout.allowsBrowserSidePane else { return }
                             state.workspaceTabs.browserIsPrimary = false

@@ -63,7 +63,7 @@ extension FocusedValues {
     @Entry var tabWorkspace: AppState?
 }
 
-private struct WorkspaceCommands: Commands {
+struct WorkspaceCommands: Commands {
     let state: AppState
     let isTestHost: Bool
     @FocusedValue(\.focusBrowserAddress) private var focusBrowserAddress
@@ -96,6 +96,9 @@ private struct WorkspaceCommands: Commands {
                 }
                 .keyboardShortcut("w", modifiers: .command)
                 .disabled(workspaceUnavailable || tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil)
+                Button("Reopen Closed Tab") { tabWorkspace.reopenClosedTab() }
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
+                    .disabled(isTestHost || !tabWorkspace.canReopenClosedTab)
             }
             Button("Close Window") {
                 NSApp.sendAction(#selector(NSWindow.performClose(_:)), to: nil, from: nil)
