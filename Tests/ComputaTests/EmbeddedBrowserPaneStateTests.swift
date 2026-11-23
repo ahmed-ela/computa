@@ -252,7 +252,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let restored = await waitForScriptBool(on: web, script: fullChat)
         XCTAssertTrue(restored)
         XCTAssertFalse(state.isBrowserPresented)
-        XCTAssertEqual(window.titlebarAccessoryViewControllers.map(\.layoutAttribute), [.left])
+        XCTAssertTrue(window.titlebarAccessoryViewControllers.allSatisfy(\.isHidden))
         XCTAssertFalse(nativeViews(in: host).contains { $0.identifier?.rawValue == "chat-new" })
 
         state.connectModelProvider(route: "browser/chatgpt")
@@ -492,8 +492,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 eventNumber: 0, trackingNumber: 0, userData: nil))
             if entered { owner.mouseEntered(with: event) } else { owner.mouseExited(with: event) }
         }
-        let search = try XCTUnwrap(window.titlebarAccessoryViewControllers.compactMap { $0.view as? SidebarTitlebarSearch }.first)
-        XCTAssertTrue(search.field.isHidden)
+        try await requireDOM("!!document.querySelector('.sidebar-search-icon') && !document.querySelector('#task-search')")
         try hover(true, expectedWidth: 44)
         try await requireDOM("innerWidth === 230 && !!document.querySelector('.workspace-close')")
         XCTAssertTrue(prefs.bool(forKey: "taskSidebarCollapsed"))
@@ -502,7 +501,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
               return row.querySelector('.workspace-close').getBoundingClientRect().left >= row.querySelector('.task-row-title').getBoundingClientRect().right
                 && getComputedStyle(document.querySelector('.new-task-button')).borderTopWidth === '0px'; })()
             """)
-        XCTAssertFalse(search.field.isHidden)
+        try await requireDOM("!!document.querySelector('.sidebar-search-row #task-search')")
         try hover(false, expectedWidth: 230)
         try await requireDOM("innerWidth === 44 && !document.querySelector('.workspace-close')")
         XCTAssertTrue(state.isTaskSidebarCollapsed)
@@ -516,15 +515,18 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try await requireDOM("!!document.querySelector('.agent-rail')")
         _ = try await chat.evaluateJavaScript("document.dispatchEvent(new KeyboardEvent('keydown', {key:'k', metaKey:true, bubbles:true})); true")
         try await requireDOM("innerWidth === 230")
-        let editor = try XCTUnwrap(search.field.currentEditor() as? NSTextView)
-        editor.insertText("Trip agent", replacementRange: editor.selectedRange())
+        try await requireDOM("document.activeElement?.id === 'task-search'")
+        _ = try await chat.evaluateJavaScript("""
+            const input = document.activeElement; input.value = 'Trip agent';
+            input.dispatchEvent(new Event('input', {bubbles:true})); true
+            """)
         try await requireDOM("document.querySelectorAll('[data-tab-kind]').length === 1")
         state.isTaskSidebarCollapsed = true
         try await requireDOM("innerWidth === 44 && !!document.querySelector('.agent-rail') && !document.querySelector('.agent-rail .task-row')")
         _ = try await chat.evaluateJavaScript("document.dispatchEvent(new KeyboardEvent('keydown', {key:'k', metaKey:true, bubbles:true})); true")
         try await requireDOM("innerWidth === 230")
-        XCTAssertEqual(search.field.currentEditor()?.string, "Trip agent")
-        search.clear()
+        try await requireDOM("document.activeElement?.id === 'task-search' && document.activeElement.value === 'Trip agent'")
+        _ = try await chat.evaluateJavaScript("document.querySelector('.clear-search').click(); true")
         try await requireDOM("!!document.querySelector('.site-favicon') && innerWidth === 230")
         _ = try await chat.evaluateJavaScript("document.querySelector('[data-tab-kind=browser]').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowDown',altKey:true,bubbles:true})); true")
         try await requireDOM("document.querySelector('[data-tab-kind]')?.dataset.tabKind === 'agent'")
@@ -549,15 +551,18 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try await requireDOM("!!document.querySelector('nav[aria-label=\"Tabs\"] :not([draggable=true]).workspace-tab-row [data-tab-kind=agent]:not([aria-current])')")
         _ = try await chat.evaluateJavaScript("document.dispatchEvent(new KeyboardEvent('keydown', {key:'k', metaKey:true, bubbles:true})); true")
         await settleLayout(hosting)
-        let searchEditor = try XCTUnwrap(search.field.currentEditor() as? NSTextView)
-        searchEditor.insertText("An unmatched title", replacementRange: searchEditor.selectedRange())
+        try await requireDOM("document.activeElement?.id === 'task-search'")
+        _ = try await chat.evaluateJavaScript("""
+            const filter = document.activeElement; filter.value = 'An unmatched title';
+            filter.dispatchEvent(new Event('input', {bubbles:true})); true
+            """)
         try await requireDOM("!document.querySelector('[data-tab-kind]')")
         let taskCount = state.tasks.count
         let compose = try composeButton(in: chat)
         let composeRect = compose.convert(compose.bounds, to: nil)
         try await clickInWindow(at: NSPoint(x: composeRect.midX, y: composeRect.midY), window: window)
         try await requireDOM("!!document.querySelector('[data-tab-kind=agent][aria-current=page]')")
-        XCTAssertEqual(search.field.stringValue, "")
+        try await requireDOM("document.querySelector('#task-search')?.value === ''")
         XCTAssertEqual(state.tasks.count, taskCount + 1)
         let newAgent = try XCTUnwrap(state.selectedTaskID)
         XCTAssertNotEqual(newAgent, task.id)
@@ -789,7 +794,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                     const list = sidebar?.querySelector('.task-list');
                     return !!sidebar?.closest('[data-native-sidebar-controls=true]') && !!strip && !!list
                         && !sidebar.querySelector('.window-drag-strip button, .primary-nav')
-                        && !sidebar.querySelector('#task-search')
+                        && sidebar.querySelector('#task-search').getBoundingClientRect().top >= strip.getBoundingClientRect().bottom
                         && getComputedStyle(strip).backgroundColor !== getComputedStyle(sidebar).backgroundColor
                         && getComputedStyle(strip).borderBottomWidth === '1px'
                         && strip.getBoundingClientRect().bottom <= list.getBoundingClientRect().top
@@ -814,13 +819,6 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 })()
                 """)
             XCTAssertTrue(titleAligned, "The chat title and its divider should line up with the native title bar")
-
-            let search = try XCTUnwrap(leading as? SidebarTitlebarSearch).field
-            let searchRect = search.convert(search.bounds, to: nil)
-            XCTAssertEqual(searchRect.midY, trafficLight.midY, accuracy: 2)
-            XCTAssertGreaterThan(searchRect.minX, trafficLight.maxX)
-            try await clickInWindow(at: NSPoint(x: searchRect.midX, y: searchRect.midY), window: window)
-            XCTAssertNotNil(search.currentEditor(), "The title-bar search field should accept a click")
 
             let blankTitlebar = NSPoint(x: 300, y: trafficLight.midY)
             let dragTarget = try XCTUnwrap(frameView.hitTest(frameView.convert(blankTitlebar, from: nil)))
@@ -889,16 +887,18 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
-    func testClickingUnfocusedAddressSelectsTheWholeURLAndTypingReplacesIt() async throws {
-        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Address selection</title>")
+    func testSidebarAddressOpensCenteredSelectsReplacesAndNavigates() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<!doctype html><title>Address selection</title><button>Top control</button>")
         let url = try await site.start().appendingPathComponent("human/final")
         defer { site.stop() }
         let session = EmbeddedBrowserSession(persistent: false, defaults: isolatedTestPreferences())
         let tab = try session.createTab(url: url)
         let page = try XCTUnwrap(session.webView(for: tab))
-        let host = NSHostingView(rootView: EmbeddedBrowserPane(session: session, onClose: {}))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 540),
-                              styleMask: [.titled], backing: .buffered, defer: false)
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
+        state.selectWorkspaceTab(.browser(try XCTUnwrap(session.humanTab(id: tab)?.workspaceID)))
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 740),
+                              styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
@@ -907,29 +907,152 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(loaded)
         window.makeFirstResponder(page)
         await settleLayout(host)
-        let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
-            .first { $0.placeholderString == "Search or enter a website address" })
-        func clickAddress(line: UInt = #line) async throws -> NSTextView {
-            let point = field.convert(NSPoint(x: 30, y: field.bounds.midY), to: nil)
-            try await clickInWindow(at: point, window: window, throughApplication: true)
-            return try XCTUnwrap(field.currentEditor() as? NSTextView,
-                                 "Expected the address field to own focus. Responder: \(String(describing: window.firstResponder))", line: line)
+        let sidebar = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }
+            .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
+        let toggle = "document.querySelector('#task-sidebar-toggle')"
+        var expandedToggle: [Double]?
+        let pill = "document.querySelector('button.sidebar-address')"
+        func openAddress() async throws -> NSTextView {
+            _ = try await sidebar.evaluateJavaScript("\(pill).click(); true")
+            await settleLayout(host)
+            let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
+                .first { $0.identifier?.rawValue == "browser-address" })
+            XCTAssertEqual(field.convert(field.bounds, to: nil).midX, window.frame.width / 2, accuracy: 24)
+            XCTAssertEqual(field.convert(field.bounds, to: nil).midY, window.frame.height * 2 / 3, accuracy: 2)
+            return try XCTUnwrap(field.currentEditor() as? NSTextView)
         }
-        let full = NSRange(location: 0, length: url.absoluteString.utf16.count)
-        let first = try await clickAddress()
-        XCTAssertEqual(first.string, url.absoluteString)
-        XCTAssertEqual(first.selectedRange(), full)
-
-        window.makeFirstResponder(page)
+        func selectedURL(_ editor: NSTextView, _ expected: URL, line: UInt = #line) {
+            XCTAssertEqual(editor.string, expected.absoluteString, line: line)
+            XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: expected.absoluteString.utf16.count), line: line)
+        }
+        for (width, height, collapsed) in [(1100, 740, false), (980, 640, true), (1280, 820, false)] {
+            window.setContentSize(NSSize(width: width, height: height))
+            if state.isTaskSidebarCollapsed != collapsed {
+                _ = try await sidebar.evaluateJavaScript("\(toggle).click(); true")
+            }
+            await settleLayout(host)
+            let expectedWidth = collapsed ? 44 : 230
+            let inSidebar = await waitForScriptBool(on: sidebar, script: """
+                (() => {
+                    const field = \(pill), filter = document.querySelector('.sidebar-search-row');
+                    if (!field || !filter || !field.closest('.sidebar')) return false;
+                    const rect = field.getBoundingClientRect();
+                    return innerWidth === \(expectedWidth) && rect.top >= document.querySelector('.window-drag-strip').getBoundingClientRect().bottom - 1
+                        && rect.bottom <= filter.getBoundingClientRect().top && rect.right <= innerWidth;
+                })()
+                """)
+            XCTAssertTrue(inSidebar)
+            XCTAssertEqual(state.isTaskSidebarCollapsed, collapsed)
+            XCTAssertTrue(window.titlebarAccessoryViewControllers.allSatisfy(\.isHidden))
+            let navigationLayout = await waitForScriptBool(on: sidebar, script: """
+                (() => {
+                    const strip = document.querySelector('.window-drag-strip');
+                    const row = document.querySelector('.sidebar-controls-row');
+                    const button = \(toggle), nav = row?.querySelector('.sidebar-browser-navigation');
+                    if (!row || button?.parentElement !== row || strip.querySelector('button')) return false;
+                    const r = row.getBoundingClientRect(), t = button.getBoundingClientRect();
+                    if (r.top < strip.getBoundingClientRect().bottom || r.bottom > \(pill).getBoundingClientRect().top
+                        || t.left !== r.left || innerWidth - r.right > 8 || r.left > 8) return false;
+                    if (\(collapsed)) return !nav && row.querySelectorAll('button').length === 1;
+                    if (!nav) return false;
+                    const n = nav.getBoundingClientRect();
+                    return n.left > t.right && n.right === r.right && Math.abs((n.top+n.bottom-t.top-t.bottom)/2) <= 1
+                        && Array.from(nav.querySelectorAll('button'), b => b.ariaLabel).join(',') === 'Back,Forward,Reload';
+                })()
+                """)
+            XCTAssertTrue(navigationLayout)
+            let position = try await sidebar.evaluateJavaScript("(() => {const r = \(toggle).getBoundingClientRect(); return [r.x, r.y]})()")
+            let origin = try XCTUnwrap(position as? [Double])
+            if let expandedToggle { XCTAssertEqual(origin, expandedToggle) }
+            else { expandedToggle = origin }
+            let pageFrame = page.convert(page.bounds, to: nil)
+            XCTAssertEqual(pageFrame.maxY, window.frame.height, accuracy: 1)
+            XCTAssertEqual(pageFrame.minY, 0, accuracy: 1)
+            let point = NSPoint(x: pageFrame.minX + 25, y: pageFrame.maxY - 15)
+            let root = try XCTUnwrap(host.superview)
+            let hit = root.hitTest(root.convert(point, from: nil))
+            XCTAssertTrue(hit === page || hit?.isDescendant(of: page) == true)
+            let pageFillsWindow = await waitForScriptBool(on: page, script: """
+                Math.abs(innerHeight - \(pageFrame.height)) <= 1 && document.elementFromPoint(25, 15)?.tagName === 'BUTTON'
+                """)
+            XCTAssertTrue(pageFillsWindow, "The reclaimed header is part of the interactive website viewport")
+            let editor = try await openAddress()
+            selectedURL(editor, url)
+            editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+            await settleLayout(host)
+            XCTAssertEqual(page.url, url)
+        }
+        let editor = try await openAddress()
+        editor.moveRight(nil)
+        XCTAssertEqual(editor.selectedRange().length, 0)
+        BrowserAddressPalette.request(in: window) // The window-level ⌘L action.
         await settleLayout(host)
-        let replacement = try await clickAddress()
-        XCTAssertEqual(replacement.selectedRange(), full)
+        selectedURL(editor, url)
         let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
             characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6))
         window.sendEvent(key)
-        XCTAssertEqual(replacement.string, "z")
-        XCTAssertEqual(page.url, url)
+        XCTAssertEqual(editor.string, "z")
+        let destination = url.appendingPathComponent("next")
+        editor.insertText(destination.absoluteString, replacementRange: NSRange(location: 0, length: 1))
+        editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        let navigated = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/next')")
+        XCTAssertTrue(navigated)
+
+        let command = try await openAddress()
+        command.insertText("back", replacementRange: command.selectedRange())
+        await settleLayout(host)
+        let field = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "browser-address" })
+        XCTAssertEqual(field.convert(field.bounds, to: nil).midY, window.frame.height * 2 / 3, accuracy: 2)
+        command.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        await settleLayout(host)
+        command.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        let returned = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/human/final')")
+        XCTAssertTrue(returned, "Down and Return should execute the matching Back command")
+
+        func clickNavigation(_ label: String) async throws {
+            let control = "document.querySelector('.sidebar-browser-navigation button[aria-label=\"\(label)\"]:enabled')"
+            let enabled = await waitForScriptBool(on: sidebar, script: "!!\(control)")
+            XCTAssertTrue(enabled)
+            _ = try await sidebar.evaluateJavaScript("\(control).click(); true")
+        }
+        try await clickNavigation("Forward")
+        let wentForward = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/next')")
+        XCTAssertTrue(wentForward)
+        try await clickNavigation("Back")
+        let wentBack = await waitForScriptBool(on: page, script: "document.title === 'Address selection'")
+        XCTAssertTrue(wentBack)
+        _ = try await page.evaluateJavaScript("window.beforeReload = true")
+        try await clickNavigation("Reload")
+        let reloaded = await waitForScriptBool(on: page, script: "document.title === 'Address selection' && !window.beforeReload")
+        XCTAssertTrue(reloaded)
+
+        let other = try session.createTab(url: url.appendingPathComponent("alternate"))
+        let otherPage = try XCTUnwrap(session.webView(for: other))
+        let otherLoaded = await waitForScriptBool(on: otherPage, script: "location.pathname.endsWith('/alternate')")
+        XCTAssertTrue(otherLoaded)
+        let original = try XCTUnwrap(session.humanTab(id: tab))
+        state.selectWorkspaceTab(.browser(original.workspaceID))
+        await settleLayout(host)
+        let switcher = try await openAddress()
+        switcher.insertText("alternate", replacementRange: switcher.selectedRange())
+        await settleLayout(host)
+        switcher.doCommand(by: #selector(NSResponder.moveDown(_:)))
+        await settleLayout(host)
+        switcher.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(session.selectedTabID, other)
+        state.selectWorkspaceTab(.browser(original.workspaceID))
+        await settleLayout(host)
+
+        let search = try await openAddress()
+        search.insertText("cedar rail times", replacementRange: search.selectedRange())
+        search.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        for _ in 0..<100 where page.url?.host != "www.google.com" { try await Task.sleep(for: .milliseconds(20)) }
+        let request = try XCTUnwrap(page.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) })
+        XCTAssertEqual(session.selectedTabID, tab)
+        XCTAssertEqual(request.host, "www.google.com")
+        XCTAssertEqual(request.queryItems?.first { $0.name == "q" }?.value, "cedar rail times")
     }
 
     @MainActor
@@ -1057,12 +1180,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(read)
         XCTAssertFalse(state.hasUnreadCompletion(for: tasks[2].id))
         try await clickInWindow(at: toggle, window: window)
-        let nativeSearch = try XCTUnwrap(button as? SidebarTitlebarSearch)
-        let magnifier = try XCTUnwrap(nativeSearch.subviews.compactMap { $0 as? NSButton }.first)
-        XCTAssertFalse(magnifier.isHidden)
-        let magnifierCenter = magnifier.convert(NSPoint(x: magnifier.bounds.midX, y: magnifier.bounds.midY), to: nil)
-        try await clickInWindow(at: magnifierCenter, window: window)
-        XCTAssertNotNil(nativeSearch.field.currentEditor())
+        let hasMagnifier = await waitForScriptBool(on: chat, script: "!!document.querySelector('.sidebar-search-icon')")
+        XCTAssertTrue(hasMagnifier)
+        _ = try await chat.evaluateJavaScript("document.querySelector('.sidebar-search-icon').click(); true")
+        let searchFocused = await waitForScriptBool(on: chat, script: "document.activeElement?.id === 'task-search'")
+        XCTAssertTrue(searchFocused)
         XCTAssertFalse(state.isTaskSidebarCollapsed)
 
         let scrollable = await waitForScriptBool(on: chat, script: """

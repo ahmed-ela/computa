@@ -151,7 +151,10 @@ export interface ModelProviderSetup {
 }
 
 export interface WorkspaceTab { kind: 'agent' | 'browser'; id: string }
-export interface WorkspaceBrowser { id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean }
+export interface WorkspaceBrowser {
+  id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean;
+  canGoBack?: boolean; canGoForward?: boolean; canReload?: boolean; isLoading?: boolean;
+}
 
 export interface AppSnapshot {
   launcherChat?: { taskID: string; unsentDraft?: string };
@@ -196,7 +199,9 @@ export type NativeAction =
   | { action: 'selectTask'; id: string }
   | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }
-  | { action: 'createTask' | 'newWorkspaceBrowserTab' | 'openTabLauncher' | 'focusSidebarSearch' | 'clearSidebarSearch' }
+  | { action: 'createTask' | 'newWorkspaceBrowserTab' | 'openTabLauncher' }
+  | { action: 'openBrowserAddress'; id: string }
+  | { action: 'browserNavigation'; id: string; command: 'back' | 'forward' | 'reload' | 'stop' }
   | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab'; tab: WorkspaceTab }
   | { action: 'moveWorkspaceTab'; tab: WorkspaceTab; target: WorkspaceTab }
   | { action: 'chooseTaskWorkspace'; taskID: string }

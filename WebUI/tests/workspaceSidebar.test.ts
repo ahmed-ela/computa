@@ -58,6 +58,36 @@ test('a matching browser tab stays available at either width in mixed mode', () 
     expect(html).toContain('aria-label="Trips"');
   }
 });
+test('the browser address is separate from the tab filter and follows the active browser', () => {
+  const snapshot = fixture();
+  const render = () => renderToStaticMarkup(h(WorkspaceSidebar, {
+    snapshot, search: '', setSearch: () => {}, nativeHost: true, post: () => {},
+  })).html;
+  const expanded = render();
+  const controls = expanded.indexOf('class="sidebar-controls-row"');
+  const toggle = expanded.indexOf('id="task-sidebar-toggle"');
+  const navigation = expanded.indexOf('aria-label="Browser navigation"');
+  const address = expanded.indexOf('aria-label="Website address"');
+  expect(controls).toBeGreaterThan(expanded.indexOf('class="window-drag-strip"'));
+  expect(toggle).toBeGreaterThan(controls);
+  expect(navigation).toBeGreaterThan(toggle);
+  expect(address).toBeGreaterThan(navigation);
+  expect(address).toBeGreaterThan(expanded.indexOf('class="window-drag-strip"'));
+  expect(expanded.indexOf('id="task-search"')).toBeGreaterThan(address);
+  expect(expanded).toContain('www.rail.example');
+  snapshot.isTaskSidebarCollapsed = true;
+  expect(render()).toContain('aria-label="Expand chat sidebar"');
+  expect(render()).toContain('aria-label="Website address"');
+  expect(render()).not.toContain('aria-label="Browser navigation"');
+  snapshot.isTaskSidebarPeeked = true;
+  expect(render()).toContain('aria-label="Browser navigation"');
+  Object.assign(snapshot.workspaceBrowsers![0], { isLoading: true });
+  expect(render()).toContain('aria-label="Stop loading"');
+  snapshot.primaryBrowserID = undefined;
+  expect(render()).not.toContain('aria-label="Website address"');
+  expect(render()).not.toContain('aria-label="Browser navigation"');
+});
+
 test('a browser in the main pane does not acknowledge the previously selected agent', () => {
   const snapshot = fixture(), task = snapshot.tasks[0];
   Object.assign(task,{status:'Completed',hasUnreadCompletion:true,isBusy:false,unreadCompletionID:'completion'});
@@ -108,7 +138,7 @@ test('expanded chats have titles and activity indicators; the rail contains only
   expect(rows()).not.toContain('data-tab-kind="agent"');
 });
 
-test('search lives in the title bar and the compact fallback keeps an accessible search icon', () => {
+test('tab filtering lives below the title bar and keeps a compact search button', () => {
   const render = (nativeSidebarControls: boolean, isTaskSidebarCollapsed = false, search = '') =>
     renderToStaticMarkup(h(WorkspaceSidebar, {
       snapshot: { ...fixture(), mixesBrowserTabsInSidebar: false, nativeSidebarControls, isTaskSidebarCollapsed },
@@ -117,12 +147,13 @@ test('search lives in the title bar and the compact fallback keeps an accessible
   for (const nativeControls of [false, true]) {
     const html = render(nativeControls);
     const titlebar = html.split('class="window-drag-strip"')[1].split('</div>')[0];
-    expect(titlebar.includes('id="task-search"')).toBe(!nativeControls);
+    expect(titlebar).not.toContain('id="task-search"');
+    expect(html.indexOf('class="sidebar-search-row"')).toBeGreaterThan(html.indexOf('class="window-drag-strip"'));
     expect(titlebar.includes('aria-label="Collapse chat sidebar"')).toBe(!nativeControls);
-    if (!nativeControls) expect(render(false, true)).toContain('aria-label="Search chats"');
-    expect(html.match(/id="task-search"/g) ?? []).toHaveLength(nativeControls ? 0 : 1);
+    expect(render(nativeControls, true)).toContain('aria-label="Search chats"');
+    expect(html.match(/id="task-search"/g) ?? []).toHaveLength(1);
     expect(html).not.toContain('aria-label="Clear search"');
-    expect(render(nativeControls, false, 'Trip').includes('aria-label="Clear search"')).toBe(!nativeControls);
+    expect(render(nativeControls, false, 'Trip')).toContain('aria-label="Clear search"');
     expect(render(nativeControls, true)).not.toContain('id="task-search"');
   }
 });

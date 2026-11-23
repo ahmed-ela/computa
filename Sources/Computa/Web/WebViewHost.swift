@@ -8,7 +8,25 @@ struct WebWorkspaceView: View {
 
     @State private var sidebarPeeked = false
     @State private var launcherPresented = false
+    @State private var editingBrowserID: UUID?
+    @State private var addressFocusRequest = 0
     @State private var launcherChat: LauncherChat?
+
+    private var commandPanelPresented: Bool { launcherPresented || editingBrowserID != nil }
+
+    private func openBrowserAddress() {
+        guard launcherAllowed, !launcherPresented, let id = state.primaryBrowserID else { return }
+        editingBrowserID = id
+        addressFocusRequest &+= 1
+    }
+
+    private func closeBrowserAddress() {
+        let editedID = editingBrowserID
+        editingBrowserID = nil
+        guard launcherAllowed, editedID != nil, editedID == state.primaryBrowserID,
+              let tabID = state.browserSession.selectedTabID, let page = state.browserSession.webView(for: tabID) else { return }
+        page.window?.makeFirstResponder(page)
+    }
 
     private var launcherAllowed: Bool {
         state.presentedSheet == nil && !showsAccessModeSettings && !state.isAPIProvidersPresented
@@ -17,6 +35,7 @@ struct WebWorkspaceView: View {
 
     private func openLauncher() {
         guard launcherAllowed else { return }
+        editingBrowserID = nil
         launcherPresented = true
     }
 
@@ -49,17 +68,21 @@ struct WebWorkspaceView: View {
         }
         .focusedSceneValue(\.tabWorkspace, state)
         .onChange(of: state.isTaskSidebarCollapsed) { _, _ in sidebarPeeked = false }
-        .onChange(of: launcherPresented) { _, presented in if presented { sidebarPeeked = false } }
+        .onChange(of: state.primaryBrowserID) { _, current in
+            if current != editingBrowserID { editingBrowserID = nil }
+        }
+        .onChange(of: commandPanelPresented) { _, presented in if presented { sidebarPeeked = false } }
         .onChange(of: launcherAllowed) { _, allowed in
             if !allowed {
                 launcherPresented = false
+                editingBrowserID = nil
                 sidebarPeeked = false
             }
         }
     }
 
     private func workspace(topInset: CGFloat) -> some View {
-        // The web chat and native browser share one divider below the window controls.
+        // Align the sidebar and any visible pane controls with the native title bar.
         let rowHeight = topInset > 0 ? topInset : 32
         let browserPrimary = state.primaryBrowserID != nil && state.shouldPresentBrowserPane
         let compact = state.isTaskSidebarCollapsed && !sidebarPeeked
@@ -72,9 +95,10 @@ struct WebWorkspaceView: View {
                 CodexWebView(
                     state: state,
                     snapshot: snapshot,
-                    sidebarControlsEnabled: launcherAllowed && !launcherPresented,
+                    sidebarControlsEnabled: launcherAllowed && !commandPanelPresented,
                     setSidebarPeeked: { sidebarPeeked = $0 },
                     openTabLauncher: openLauncher,
+                    openBrowserAddress: openBrowserAddress,
                     consumeLauncherChat: { id in
                         guard launcherChat?.taskID == id else { return false }
                         launcherChat = nil
@@ -98,7 +122,6 @@ struct WebWorkspaceView: View {
                         tabRowHeight: rowHeight,
                         usesSidebarTabs: browserPrimary,
                         showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
-                        titlebarLeadingInset: browserPrimary && compact && topInset > 0 ? 92 : 0,
                         titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
                         canLoadModels: state.canRefreshWebsiteModels,
@@ -119,11 +142,20 @@ struct WebWorkspaceView: View {
                     .layoutPriority(1)
                 }
             }
-            .allowsHitTesting(!state.approvalGateBlocksInteraction && !launcherPresented)
-            .accessibilityHidden(state.approvalGateBlocksInteraction || launcherPresented)
+            .allowsHitTesting(!state.approvalGateBlocksInteraction && !commandPanelPresented)
+            .accessibilityHidden(state.approvalGateBlocksInteraction || commandPanelPresented)
             .disabled(state.approvalGateBlocksInteraction)
 
-            if launcherPresented && launcherAllowed {
+            if let editingBrowserID, launcherAllowed,
+               let tab = state.browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == editingBrowserID }) {
+                ZStack(alignment: Alignment(horizontal: .center, vertical: .commandFieldCenter)) {
+                    Color.black.opacity(0.10)
+                        .onTapGesture(perform: closeBrowserAddress)
+                        .alignmentGuide(.commandFieldCenter) { $0.height / 3 }
+                    BrowserAddressPalette(state: state, tab: tab, focusRequest: addressFocusRequest, close: closeBrowserAddress)
+                        .id(tab.id)
+                }
+            } else if launcherPresented && launcherAllowed {
                 Color.black.opacity(0.10).onTapGesture { launcherPresented = false }
                 WorkspaceTabLauncher(launch: launch, cancel: { launcherPresented = false })
             }
@@ -191,6 +223,7 @@ private struct CodexWebView: NSViewRepresentable {
     let sidebarControlsEnabled: Bool
     let setSidebarPeeked: (Bool) -> Void
     let openTabLauncher: () -> Void
+    let openBrowserAddress: () -> Void
     let consumeLauncherChat: (String) -> Bool
     let showAccessModeSettings: () -> Void
 
@@ -221,6 +254,7 @@ private struct CodexWebView: NSViewRepresentable {
 
         let webView = WindowConfiguredWebView(frame: .zero, configuration: configuration)
         webView.openTabLauncher = openTabLauncher
+        webView.openBrowserAddress = openBrowserAddress
         webView.configureTitlebarControls(state: state)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
@@ -229,7 +263,6 @@ private struct CodexWebView: NSViewRepresentable {
 #if DEBUG
         webView.isInspectable = true
 #endif
-        context.coordinator.sidebarSearch = webView.sidebarSearch
         webView.rail.onHover = setSidebarPeeked
         context.coordinator.attach(webView: webView)
         context.coordinator.update(snapshot: snapshot)
@@ -248,7 +281,6 @@ private struct CodexWebView: NSViewRepresentable {
         let compact = snapshot.isTaskSidebarCollapsed && !snapshot.isTaskSidebarPeeked
         let railWidth = compact ? SidebarRail.compactWidth : SidebarRail.expandedWidth
         shell?.trackSidebar(width: snapshot.isTaskSidebarCollapsed && sidebarControlsEnabled ? railWidth : 0)
-        shell?.sidebarSearch?.update(compact: compact, enabled: sidebarControlsEnabled)
         webView.needsLayout = true
         context.coordinator.update(snapshot: snapshot)
     }
@@ -275,8 +307,8 @@ private struct CodexWebView: NSViewRepresentable {
 
 @MainActor
 private final class WindowConfiguredWebView: WKWebView {
-    private(set) var sidebarSearch: SidebarTitlebarSearch?
     var openTabLauncher: (() -> Void)?
+    var openBrowserAddress: (() -> Void)?
     let rail = SidebarRail()
     private var trackedWidth: CGFloat = 0
     private var railArea: NSTrackingArea?
@@ -287,16 +319,9 @@ private final class WindowConfiguredWebView: WKWebView {
 
     func configureTitlebarControls(state: AppState) {
         self.state = state
-        let search = SidebarTitlebarSearch(state: state) { [weak self] query in
-            guard let self, WebUIResourceLocator.contains(self.url) else { return }
-            self.callAsyncJavaScript("document.dispatchEvent(new CustomEvent('kolmogor-tab-query', {detail: query}))",
-                                     arguments: ["query": query], in: nil, in: .page, completionHandler: nil)
+        if !state.mixesBrowserTabsInSidebar {
+            titlebarControls = [accessory(.left, SidebarTitlebarToggle(state: state))]
         }
-        sidebarSearch = search
-        let left = NSTitlebarAccessoryViewController()
-        left.layoutAttribute = .left
-        left.view = search
-        titlebarControls = [left]
         guard state.workspaceLayout.allowsBrowserSidePane else { return }
         titlebarControls.append(accessory(.right, BrowserTitlebarToggle(state: state)))
         compose.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
@@ -352,7 +377,7 @@ private final class WindowConfiguredWebView: WKWebView {
         guard let state, !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
         state.createTask()
         guard WebUIResourceLocator.contains(url) else { return }
-        sidebarSearch?.clear()
+        evaluateJavaScript("document.dispatchEvent(new Event('kolmogor-clear-chat-search'))")
     }
 
     private func accessory(_ edge: NSLayoutConstraint.Attribute, _ content: some View) -> NSTitlebarAccessoryViewController {
@@ -373,6 +398,8 @@ private final class WindowConfiguredWebView: WKWebView {
         return super.hitTest(point)
     }
 
+    @objc private func handleBrowserAddressRequest(_ notification: Notification) { openBrowserAddress?() }
+
     @objc private func handleTabLauncherRequest(_ notification: Notification) {
         openTabLauncher?()
     }
@@ -383,6 +410,7 @@ private final class WindowConfiguredWebView: WKWebView {
         if let window {
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
             NotificationCenter.default.removeObserver(self, name: WorkspaceTabLauncher.requestNotification, object: window)
+            NotificationCenter.default.removeObserver(self, name: BrowserAddressPalette.requestNotification, object: window)
         }
         if let window, window !== newWindow, window.styleMask.contains(.titled) {
             for control in titlebarControls {
@@ -398,6 +426,8 @@ private final class WindowConfiguredWebView: WKWebView {
         super.viewDidMoveToWindow()
         guard let window else { return }
         NotificationCenter.default.addObserver(self, selector: #selector(windowResignedKey(_:)), name: NSWindow.didResignKeyNotification, object: window)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleBrowserAddressRequest(_:)),
+                                               name: BrowserAddressPalette.requestNotification, object: window)
         NotificationCenter.default.addObserver(self, selector: #selector(handleTabLauncherRequest(_:)),
                                                name: WorkspaceTabLauncher.requestNotification, object: window)
         window.title = "Kolmogor"

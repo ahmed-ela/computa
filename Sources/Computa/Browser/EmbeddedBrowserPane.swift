@@ -10,7 +10,6 @@ struct EmbeddedBrowserPane: View {
     var tabRowHeight: CGFloat = 32
     var usesSidebarTabs = false
     var showsNewTabButton = true
-    var titlebarLeadingInset: CGFloat = 0
     var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
     var canLoadModels = false
@@ -30,10 +29,14 @@ struct EmbeddedBrowserPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            tabStrip
-            Divider()
-            navigationBar
-            Divider()
+            if !usesSidebarTabs || showsNewTabButton {
+                browserHeader
+                Divider()
+            }
+            if !usesSidebarTabs {
+                navigationBar
+                Divider()
+            }
 
             if let tab = selectedTab, let provider = tab.setupProvider,
                session.setupTab(for: provider)?.id == tab.id {
@@ -120,14 +123,9 @@ struct EmbeddedBrowserPane: View {
 
     private static let newTabIcon = tabIconAsset("new-browser-tab", fallback: "arrow.up.right.square")
 
-    private var tabStrip: some View {
+    private var browserHeader: some View {
         HStack(spacing: 4) {
-            if usesSidebarTabs {
-                Text(selectedTab?.title ?? "New tab").font(.system(size: 12, weight: .medium)).lineLimit(1)
-                Spacer()
-            } else {
-                tabPicker
-            }
+            if !usesSidebarTabs { tabPicker }
 
             if showsNewTabButton {
                 Button { createTab() } label: {
@@ -147,7 +145,6 @@ struct EmbeddedBrowserPane: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
         // The globe is a native accessory at the trailing edge of this row.
-        .padding(.leading, titlebarLeadingInset)
         .padding(.trailing, titlebarTrailingInset)
         .frame(height: tabRowHeight)
     }
@@ -181,31 +178,7 @@ struct EmbeddedBrowserPane: View {
 
     private var navigationBar: some View {
         HStack(spacing: 8) {
-            Button {
-                if let id = selectedTab?.id { session.goBack(tabID: id) }
-            } label: { Image(systemName: "chevron.left") }
-            .disabled(selectedTab?.canGoBack != true)
-            .help("Back")
-            .accessibilityLabel("Back")
-
-            Button {
-                if let id = selectedTab?.id { session.goForward(tabID: id) }
-            } label: { Image(systemName: "chevron.right") }
-            .disabled(selectedTab?.canGoForward != true)
-            .help("Forward")
-            .accessibilityLabel("Forward")
-
-            Button {
-                guard let tab = selectedTab else { return }
-                if tab.isLoading { session.stop(tabID: tab.id) }
-                else { session.reload(tabID: tab.id) }
-            } label: {
-                Image(systemName: selectedTab?.isLoading == true ? "xmark" : "arrow.clockwise")
-                    .frame(width: 16)
-            }
-            .disabled(selectedTab == nil || (selectedTab?.url == nil && selectedTab?.isLoading != true))
-            .help(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
-            .accessibilityLabel(selectedTab?.isLoading == true ? "Stop loading" : "Reload")
+            BrowserHistoryButtons(session: session)
 
             HStack(spacing: 7) {
                 Image(systemName: addressFocused || address.isEmpty ? "magnifyingglass" : "globe")

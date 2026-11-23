@@ -103,9 +103,12 @@ private struct WorkspaceCommands: Commands {
             .keyboardShortcut("w", modifiers: tabWorkspace == nil ? .command : [.command, .shift])
         }
         CommandGroup(after: .toolbar) {
-            Button("Focus Browser Address") { focusBrowserAddress?() }
+            Button("Focus Browser Address") {
+                if tabWorkspace?.primaryBrowserID != nil { BrowserAddressPalette.request(in: NSApp.keyWindow) }
+                else { focusBrowserAddress?() }
+            }
                 .keyboardShortcut("l", modifiers: .command)
-                .disabled(workspaceUnavailable || focusBrowserAddress == nil)
+                .disabled(workspaceUnavailable || (tabWorkspace?.primaryBrowserID == nil && focusBrowserAddress == nil))
             Group {
                 Button("Select Previous Workspace Tab") { state.selectAdjacentWorkspaceTab(.previous, inBrowserPane: usesBrowserShortcuts) }
                     .keyboardShortcut("[", modifiers: [.command, .shift])

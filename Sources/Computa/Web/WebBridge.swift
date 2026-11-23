@@ -28,7 +28,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private var latestContent: Data?
     private var nextRevision: UInt64 = 0
     private var pageIsReady = false
-    weak var sidebarSearch: SidebarTitlebarSearch?
     private let consumeLauncherChat: (String) -> Bool
     private let showAccessModeSettings: () -> Void
     private let openScreenRecordingSettings: (URL) -> Bool
@@ -105,7 +104,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 Self.diagnostic("client ready frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
             }
             pushLatestSnapshotIfReady()
-            sidebarSearch?.restoreQuery()
             state.refreshWebsiteModelsIfNeeded()
 
         case "webClientFailure":
@@ -115,6 +113,25 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             let kind = allowed.contains(reported) ? reported : "UnknownError"
             let line = body["line"] as? Int ?? 0
             Self.diagnostic("client failure kind=\(kind) line=\(line)")
+
+        case "openBrowserAddress":
+            guard let id = body["id"] as? String, id == state.primaryBrowserID?.uuidString,
+                  !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
+            BrowserAddressPalette.request(in: webView?.window)
+
+        case "browserNavigation":
+            guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
+                  let id = body["id"] as? String, id == state.primaryBrowserID?.uuidString,
+                  let tabID = state.browserSession.selectedTabID, let tab = state.browserSession.humanTab(id: tabID),
+                  tab.workspaceID.uuidString == id else { return }
+            let session = state.browserSession
+            switch body["command"] as? String {
+            case "back" where tab.canGoBack: session.goBack(tabID: tabID)
+            case "forward" where tab.canGoForward: session.goForward(tabID: tabID)
+            case "reload" where !tab.isLoading: session.reload(tabID: tabID)
+            case "stop" where tab.isLoading: session.stop(tabID: tabID)
+            default: break
+            }
 
         case "openTabLauncher":
             WorkspaceTabLauncher.request(in: webView?.window)
@@ -231,12 +248,6 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "toggleInspector":
             state.isInspectorPresented.toggle()
 #endif
-
-        case "focusSidebarSearch":
-            sidebarSearch?.focusSearch()
-
-        case "clearSidebarSearch":
-            sidebarSearch?.clear()
 
         case "setTaskSidebarCollapsed":
             guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
