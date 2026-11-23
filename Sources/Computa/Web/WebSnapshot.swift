@@ -73,6 +73,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let isBrowserPresented: Bool
     let isReviewPresented: Bool
     let review: AppReviewState?
+    let chromeProfileImportStatus: String?
+    let importingChromeProfile: Bool
     let isSettingsPresented: Bool
     let promptReceipts: [PromptReceipt]
 
@@ -155,6 +157,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         isBrowserPresented = state.isBrowserPresented
         isReviewPresented = state.isReviewPresented
         review = state.review
+        chromeProfileImportStatus = state.chromeProfileImportStatus
+        importingChromeProfile = state.importingChromeProfile
         isSettingsPresented = state.presentedSheet == .settings
         promptReceipts = state.promptReceipts
     }

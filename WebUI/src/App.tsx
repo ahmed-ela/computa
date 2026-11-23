@@ -836,6 +836,15 @@ function SettingsModal({ snapshot, nativeHost }: { snapshot: AppSnapshot; native
               </NativeSelect>
             </label>
           </section>
+          {nativeHost && <section>
+            <h2>Browser</h2>
+            <div className="setting-row">
+              <span><strong>Import browser data</strong><small>Choose a Chrome profile to bring in history, bookmarks, and saved passwords. Find imported pages in the address bar. Use View → Fill Saved Login on a sign-in page.</small></span>
+              <Button variant="outline" disabled={snapshot.importingChromeProfile}
+                onClick={() => post({ action: 'importChromeProfile' })}>Import from Chrome…</Button>
+            </div>
+            {snapshot.chromeProfileImportStatus && <p className="model-note" role="status">{snapshot.chromeProfileImportStatus}</p>}
+          </section>}
           <section>
             <h2>Models and runtime</h2>
             <label className="setting-row">

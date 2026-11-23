@@ -332,6 +332,15 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             state.refreshAutomationPermissions()
             state.presentedSheet = .settings
 
+        case "importChromeProfile":
+            guard Set(body.keys) == ["action"], state.presentedSheet == .settings, !state.approvalGateBlocksInteraction,
+                  let window = webView?.window, let profile = state.browserSession.workspaceProfileID,
+                  let library = ChromeProfileLibrary(profile: profile) else { return }
+            Task { @MainActor in
+                await ChromeProfileImport.run(in: window, state: state, root: state.chromeImportSourceRoot,
+                                              library: library, vault: .forProfile(profile))
+            }
+
         case "showAccessModeSettings":
             guard Set(body.keys) == ["action"], state.presentedSheet == .settings,
                   !state.approvalGateBlocksInteraction else { return }

@@ -103,6 +103,11 @@ private struct WorkspaceCommands: Commands {
             .keyboardShortcut("w", modifiers: tabWorkspace == nil ? .command : [.command, .shift])
         }
         CommandGroup(after: .toolbar) {
+            Button("Fill Saved Login…") {
+                guard let tabWorkspace, let window = NSApp.keyWindow else { return }
+                Task { @MainActor in await BrowserLoginControls.fill(in: tabWorkspace, window: window) }
+            }
+            .disabled(workspaceUnavailable || tabWorkspace.flatMap { BrowserLoginControls.selectedPage(in: $0) } == nil)
             Button("Focus Browser Address") {
                 if tabWorkspace?.primaryBrowserID != nil { BrowserAddressPalette.request(in: NSApp.keyWindow) }
                 else { focusBrowserAddress?() }
