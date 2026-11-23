@@ -215,6 +215,42 @@ final class NativeVerificationRuntimeTests: XCTestCase {
         }
     }
 
+    func testDeniedAccessibilityKeepsExplanationButNeverCertifiesAnOutcome() async throws {
+        for mode in ["bind-denied-explained", "bind-denied-with-claim", "bind-denied-claim-only"] {
+            try await withHarness(mode: mode) { runtime, root, audit, _, background in
+                try await self.start(runtime, root: root, background: background, prompt: "Inspect the app.")
+                try await self.waitFor { audit.status == .waiting || audit.status == .completed }
+                XCTAssertEqual(audit.status, .waiting, mode)
+                let result = try XCTUnwrap(try self.results(root).first)
+                XCTAssertEqual(result["success"] as? Bool, false)
+                XCTAssertTrue((result["text"] as? String)?.contains("dispatch=not_dispatched") == true)
+                XCTAssertTrue(audit.deltas.isEmpty)
+                let rows = audit.entries.filter { $0.toolEvent?.name == NativeAccessibilityDenial.tool && $0.toolEvent?.status == .failed }
+                XCTAssertEqual(rows.map(\.body), [NativeAccessibilityDenial.error])
+                let record = try XCTUnwrap(try NativeFailureEvidenceStore(directory: root.appendingPathComponent("heydash-native-failures"))
+                    .load(threadID: self.taskID).last)
+                let restored = NativeFailureEvidenceStore.restoringFailures([record], in: rows)
+                XCTAssertEqual(restored.filter { $0.kind == .tool }.count, 1)
+                let expected = mode == "bind-denied-claim-only" ? [] : [NativeAccessibilityDenial.explanation + " " + NativeAccessibilityDenial.nextStep]
+                XCTAssertEqual(audit.assistant, expected)
+                XCTAssertEqual(restored.filter { $0.kind == .assistant }.map(\.body), expected)
+                XCTAssertFalse(restored.contains { $0.body.contains("I read the screen.") || $0.body.contains("The screen is empty.") })
+            }
+        }
+    }
+
+    func testAccessibilityDenialCannotExcuseAnIndependentFailedRead() async throws {
+        try await withHarness(mode: "bind-denied-other-debt") { runtime, root, audit, _, background in
+            try await self.start(runtime, root: root, background: background, prompt: "Inspect the app.")
+            try await self.waitFor { audit.status == .waiting || audit.status == .completed }
+            XCTAssertEqual(try self.results(root).map { $0["success"] as? Bool }, [false, false])
+            XCTAssertTrue(audit.entries.contains { $0.toolEvent?.status == .failed && $0.body == NativeAccessibilityDenial.error })
+            XCTAssertTrue(audit.assistant.isEmpty)
+            XCTAssertTrue(audit.entries.contains { $0.title == "Outcome not verified" })
+            XCTAssertEqual(audit.status, .waiting)
+        }
+    }
+
     private func checkSelection(mode: String, expectedReads: Int,
                                 configure: (Backend) -> Void = { _ in }) async throws {
         try await withHarness(mode: mode) { runtime, root, audit, backend, background in
@@ -360,6 +396,7 @@ final class NativeVerificationRuntimeTests: XCTestCase {
         config.codexHomePath = root.path
         config.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
         config.computerInteractionPolicy = .backgroundOnly
+        config.fixtureDenyAppBindAccessibility = mode.hasPrefix("bind-denied")
         if let gate { config.fixtureBeforeNativeVerificationRead = { await gate.pauseOnce() } }
         let runtime = CodexAppServerRuntime(configuration: config, visualGrounder: NoModelGrounder())
         let backend = Backend()

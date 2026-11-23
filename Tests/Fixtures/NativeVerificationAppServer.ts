@@ -47,6 +47,15 @@ function received(message: any) {
   rows.push({ tool: lastTool, success, text });
   persist();
   const previousStep = step++;
+  if (mode.startsWith("bind-denied")) {
+    if (mode === "bind-denied-other-debt" && previousStep === 0) return call("computer_v2_snapshot");
+    const match = /reply exactly: ([^\n]+)/.exec(rows[0].text);
+    const reply = match?.[1] ?? "missing denial receipt";
+    notify("item/agentMessage/delta", { turnId, itemId: "native-answer", delta: "I read the screen." });
+    answer(mode === "bind-denied-claim-only" ? "The screen is empty." :
+      mode === "bind-denied-with-claim" ? reply + " I read the screen." : reply);
+    return finish();
+  }
   if (previousStep === 0) {
     snapshot = /AXSNAPSHOT id=([0-9A-F-]+)/i.exec(text)?.[1] ?? "";
     if (!success || !snapshot) {
@@ -105,7 +114,8 @@ input.on("line", line => {
         if (!existsSync(join(root, "continue"))) return;
         clearInterval(waiting);
         waiting = undefined;
-        call("computer_v2_snapshot");
+        if (mode.startsWith("bind-denied")) call("computer_v2_open", { bundle_id: "com.example.readonly", activation: "none" });
+        else call("computer_v2_snapshot");
       }, 5);
       break;
     }

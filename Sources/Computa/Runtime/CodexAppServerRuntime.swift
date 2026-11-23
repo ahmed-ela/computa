@@ -1051,6 +1051,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         /// Synthetic failure at the native boundary, only with an explicit
         /// fixture transport. Never enabled for a bundled production runtime.
         var fixtureActivationFailurePID: Int32? = nil
+        var fixtureDenyAppBindAccessibility = false
         var fixtureBeforeNativeVerificationRead: (@Sendable () async throws -> Void)? = nil
         /// Metadata/read substitutes only for owned JSON-RPC fixtures. Neither
         /// is consulted by a bundled production runtime.
@@ -4245,6 +4246,11 @@ private extension CodexAppServerRuntime {
                 guard let item = params["item"] as? [String: Any],
                       let type = item["type"] as? String
                 else { return }
+                if type == "dynamicToolCall", let ledger = computerEvidence[taskID],
+                   ledger.turnID == params["turnId"] as? String,
+                   ledger.operations.contains(where: { $0.id == item["id"] as? String && $0.failureCode == NativeAccessibilityDenial.code }) {
+                    return // The host already published this exact failed tool call.
+                }
                 if (type == "fileChange" || type == "commandExecution"), let itemID = item["id"] as? String {
                     invalidateRepeatedGroqCompletion(taskID: taskID, params: params, itemID: itemID)
                 }
@@ -4300,7 +4306,7 @@ private extension CodexAppServerRuntime {
                    let text = item["text"] as? String,
                    !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    let diagnostic = computerCompletionDiagnostic(taskID: taskID) {
-                    emitComputerOutcomeDiagnostic(taskID: taskID, turnID: params["turnId"] as? String ?? "unknown", message: diagnostic)
+                    emitComputerOutcomeDiagnostic(taskID: taskID, turnID: params["turnId"] as? String ?? "unknown", message: diagnostic, finalText: text)
                     return
                 }
                 // An exhausted native failure ends the action turn. Late
@@ -4989,7 +4995,7 @@ private extension CodexAppServerRuntime {
                 + (try computerEvidence[taskID]?.checkpointText() ?? ""))] + freshContent
         }
 
-        private func emitComputerOutcomeDiagnostic(taskID: AgentTask.ID, turnID: String, message: String) {
+        private func emitComputerOutcomeDiagnostic(taskID: AgentTask.ID, turnID: String, message: String, finalText: String? = nil) {
             guard computerFinalDiagnostics[taskID] != turnID else { return }
             computerFinalDiagnostics[taskID] = turnID
             events.yield(.assistantMessagesDiscarded(taskID: taskID))
@@ -5000,6 +5006,21 @@ private extension CodexAppServerRuntime {
             var displayed = message + " You can continue in this chat."
             do {
                 let unresolved = computerEvidence[taskID]?.unresolvedOutcomeOperations ?? []
+                if let operation = unresolved.first, unresolved.count == 1,
+                   computerEvidence[taskID]?.turnID == turnID,
+                   computerEvidence[taskID]?.unresolvedOperations.count == 1,
+                   operation.failureCode == NativeAccessibilityDenial.code, operation.tool == NativeAccessibilityDenial.tool,
+                   operation.dispatch == .notDispatched, operation.foregroundEffect == nil,
+                   computerSearchEvidence[taskID]?.completionDiagnostic == nil,
+                   nativeMessageEvidence[taskID]?.completionDiagnostic == nil {
+                    let record = try NativeAccessibilityDenial.record(threadID: threadForTask[taskID] ?? taskID,
+                        turnID: turnID, callID: operation.id, reply: finalText)
+                    try nativeFailureStore().append(record)
+                    // The tool row was emitted at the failed bind. The separate
+                    // final entry survives draft discard and is never a success receipt.
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: record.entry))
+                    return
+                }
                 let diagnostic = try ComputerOutcomeDiagnostic.make(kind: .unverified,
                     unresolvedOperations: max(1, unresolved.count), failedOperations: unresolved.filter { $0.failureCode != nil }.count)
                 _ = try nativeFailureStore().append(.init(threadID: threadForTask[taskID] ?? taskID, turnID: turnID,
@@ -5388,6 +5409,15 @@ private extension CodexAppServerRuntime {
                                 try? computerEvidence[taskID]?.recordFailure(operationID: callID,
                                     code: "pending_input_blocked", message: message, dispatch: .notDispatched)
                             }
+                        } else if error is NativeAccessibilityDenial, tool == NativeAccessibilityDenial.tool,
+                                  operation.dispatch == .notDispatched, operation.foregroundEffect == nil {
+                            try? computerEvidence[taskID]?.recordFailure(operationID: callID,
+                                code: NativeAccessibilityDenial.code, message: NativeAccessibilityDenial.error, dispatch: .notDispatched)
+                            message = NativeAccessibilityDenial.toolGuidance
+                            if let turnID = params["turnId"] as? String, turnIdentity.activeTurnID(for: taskID) == turnID {
+                                events.yield(.timelineEntryAppended(taskID: taskID,
+                                    entry: NativeAccessibilityDenial.failedTool(callID: callID, turnID: turnID, time: Date())))
+                            }
                         } else if operation.dispatch == .notDispatched, operation.foregroundEffect == nil,
                            let kind = computerPreflightKind(error) {
                             try? computerEvidence[taskID]?.recordPreflightRejection(operationID: callID,
@@ -5676,7 +5706,7 @@ private extension CodexAppServerRuntime {
 
         private func nativeFailureEntries(threadID: String) -> [TimelineEntry] {
             do {
-                return try nativeFailureStore().load(threadID: threadID).map(\.entry)
+                return try nativeFailureStore().load(threadID: threadID).flatMap(\.presentation)
             } catch {
                 return [TimelineEntry(kind: .system, title: "Native failure evidence unavailable",
                     body: "Saved native failure evidence could not be verified: \(error.localizedDescription)")]
@@ -6801,7 +6831,17 @@ private extension CodexAppServerRuntime {
             let application: ActivatedApplication
             var nonActivatingWindow: ApplicationWindowIdentity?
             if activationMode == .none {
-                let bound = try await RunningApplicationBinder().bindWhenReady(bundleIdentifier: bundleID)
+                let bound: RunningApplicationBinding
+                do {
+                    #if DEBUG
+                    if case .fixture = configuration.executable, configuration.fixtureDenyAppBindAccessibility {
+                        throw AutomationError.permissionNotGranted(.accessibility)
+                    }
+                    #endif
+                    bound = try await RunningApplicationBinder().bindWhenReady(bundleIdentifier: bundleID)
+                } catch AutomationError.permissionNotGranted(.accessibility) {
+                    throw NativeAccessibilityDenial()
+                }
                 _ = try computerV2Session(taskID: taskID, epoch: epoch)
                 application = bound.application
                 nonActivatingWindow = bound.window.identity
