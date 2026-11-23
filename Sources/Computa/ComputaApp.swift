@@ -60,16 +60,24 @@ private struct InertTestHostPermissions: AutomationPermissionClient {
 extension FocusedValues {
     @Entry var focusBrowserAddress: (() -> Void)?
     @Entry var browserPaneFocused: Bool?
+    @Entry var browserPageCommandsAllowed: Bool?
     @Entry var tabWorkspace: AppState?
 }
 
-private struct WorkspaceCommands: Commands {
+struct WorkspaceCommands: Commands {
     let state: AppState
     let isTestHost: Bool
     @FocusedValue(\.focusBrowserAddress) private var focusBrowserAddress
     @FocusedValue(\.tabWorkspace) private var tabWorkspace
 
     @FocusedValue(\.browserPaneFocused) private var browserPaneFocused
+
+    @FocusedValue(\.browserPageCommandsAllowed) private var browserPageCommandsAllowed
+
+    private var reloadTabID: UUID? {
+        guard !workspaceUnavailable, browserPageCommandsAllowed == true else { return nil }
+        return tabWorkspace?.reloadableBrowserTabID(inBrowserPane: usesBrowserShortcuts)
+    }
 
     private var usesBrowserShortcuts: Bool {
         !state.mixesBrowserTabsInSidebar && state.shouldPresentBrowserPane
@@ -108,6 +116,11 @@ private struct WorkspaceCommands: Commands {
                 Task { @MainActor in await BrowserLoginControls.fill(in: tabWorkspace, window: window) }
             }
             .disabled(workspaceUnavailable || tabWorkspace.flatMap { BrowserLoginControls.selectedPage(in: $0) } == nil)
+            Button("Reload Page") {
+                if let id = reloadTabID { tabWorkspace?.browserSession.reload(tabID: id) }
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(reloadTabID == nil)
             Button("Focus Browser Address") {
                 if tabWorkspace?.primaryBrowserID != nil { BrowserAddressPalette.request(in: NSApp.keyWindow) }
                 else { focusBrowserAddress?() }

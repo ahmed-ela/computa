@@ -47,6 +47,38 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testReloadTargetsOnlyTheSelectedVisibleWorkspacePage() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Reload fixture</title>")
+        let url = try await site.start().appendingPathComponent("human/final")
+        defer { site.stop() }
+        let preferences = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: preferences)
+        defer { session.shutdown() }
+        let agent = AgentTask(title: "Agent", summary: "", status: .draft, workspace: "", model: "local")
+        let state = AppState(tasks: [agent], preferences: preferences, browserSession: session, workspaceLayout: .mixedTabs)
+        let id = try session.createTab(url: url)
+        let tab = try XCTUnwrap(session.humanTab(id: id))
+        let page = try XCTUnwrap(session.webView(for: id))
+        state.selectWorkspaceTab(.browser(tab.workspaceID))
+        let loaded = await waitForScriptBool(on: page, script: "document.title === 'Reload fixture' && document.readyState === 'complete'")
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(state.reloadableBrowserTabID(inBrowserPane: false), id)
+
+        state.selectTask(agent.id)
+        XCTAssertNil(state.reloadableBrowserTabID(inBrowserPane: false))
+        state.selectWorkspaceTab(.browser(tab.workspaceID))
+        state.presentedSheet = .settings
+        XCTAssertNil(state.reloadableBrowserTabID(inBrowserPane: true))
+        state.presentedSheet = nil
+        let blank = try session.createTab()
+        state.selectWorkspaceTab(.browser(try XCTUnwrap(session.humanTab(id: blank)).workspaceID))
+        XCTAssertNil(state.reloadableBrowserTabID(inBrowserPane: false))
+        state.selectWorkspaceTab(.browser(tab.workspaceID))
+        state.pendingApprovals = [.init(id: "gate", taskID: nil, kind: .computerUse, title: "Approve", summary: "", details: "")]
+        XCTAssertNil(state.reloadableBrowserTabID(inBrowserPane: false))
+    }
+
+    @MainActor
     func testCycleWorkspaceTabsFollowsMixedOrderAndWraps() throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

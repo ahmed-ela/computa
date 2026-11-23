@@ -67,6 +67,7 @@ struct WebWorkspaceView: View {
             workspace(topInset: geometry.safeAreaInsets.top)
         }
         .focusedSceneValue(\.tabWorkspace, state)
+        .focusedSceneValue(\.browserPageCommandsAllowed, launcherAllowed && !commandPanelPresented)
         .onChange(of: state.isTaskSidebarCollapsed) { _, _ in sidebarPeeked = false }
         .onChange(of: state.primaryBrowserID) { _, current in
             if current != editingBrowserID { editingBrowserID = nil }
