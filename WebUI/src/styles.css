@@ -117,10 +117,6 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 /* Let WebKit draw the macOS overlay and honor the user’s scrollbar preference. */
 .task-list { min-height: 0; flex: 1; overflow: hidden auto; padding-block: 2px 14px; }
 .task-row { width: 100%; height: calc(var(--sidebar-row-height) - 1px); margin-bottom: 1px; padding: 0 6px 0 0; border: 0; border-radius: 6px; background: transparent; color: var(--text); }
-.task-row[data-tab-kind="agent"]:not(.agent-rail-button) {
-  grid-template-columns: minmax(0, 1fr) auto; padding-inline-start: 16px; column-gap: 6px;
-}
-.task-row > .task-row-title:first-child { justify-self: stretch; }
 .task-row:hover { background: var(--surface-hover); }
 .task-row:active, .window-drag-strip button:active, .sidebar-controls-row button:active { translate: none; }
 .task-row.selected { background: var(--surface-selected); }
@@ -137,7 +133,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .app-shell[data-sidebar-collapsed] .sidebar { width: 44px; flex-basis: 44px; }
 .app-shell[data-native-sidebar-controls][data-sidebar-collapsed] .task-toolbar { padding-left: 92px; }
 .agent-rail-button { color: var(--text-secondary); }
-.agent-rail-button .agent-status-icon { width: 20px; height: 20px; }
+.task-row .agent-status-icon { width: 20px; height: 20px; }
 @property --sparkle-phase {
   syntax: "<angle>";
   inherits: true;
@@ -162,7 +158,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .sparkle-front { stroke-width: calc(.88px / var(--size)); }
 @media (prefers-reduced-motion: no-preference) {
   /* The upright stars are identical. Each half-turn ends in the next one's starting pose. */
-  .bot-sparkle-pass { animation: bot-sparkle-pass 1.6s linear infinite; }
+  [data-agent-status="working"] .bot-sparkle-pass { animation: bot-sparkle-pass 1.6s linear infinite; }
   @keyframes bot-sparkle-pass { to { --sparkle-phase: 180deg; } }
 }
 
@@ -549,3 +545,13 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 @keyframes favicon-spin { to { transform: rotate(1turn); } }
 .site-initial { display: grid; place-content: center; border-radius: 4px; background: var(--surface-selected); font-size: 11px; font-weight: 600; }
 .new-browser-tab-icon { background: currentColor; mask: url('/icons/new-browser-tab.svg') center / contain no-repeat; }
+
+.agent-rail-button[data-agent-status="ready"]::after { content: ""; position: absolute; left: 18px; top: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
+.agent-settings { width: min(360px, 90vw); padding: 18px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.agent-settings::backdrop { background: rgb(0 0 0 / .22); }
+.agent-settings form, .agent-settings label { display: grid; gap: 8px; }
+.agent-settings form { gap: 14px; }
+.agent-settings input, .agent-settings textarea { padding: 7px; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+.agent-settings footer { display: flex; justify-content: flex-end; gap: 6px; }
+.agent-history-list { display: grid; gap: 4px; max-height: 50vh; overflow: auto; }
+.agent-history-list button { justify-content: start; text-align: left; }

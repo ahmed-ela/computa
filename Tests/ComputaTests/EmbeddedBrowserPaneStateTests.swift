@@ -158,6 +158,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
         state.startRuntimeIfNeeded()
         do {
+            try await require("!!document.querySelector('.task-row') && document.querySelectorAll('.task-row').length === 1")
+            _ = try await web.evaluateJavaScript("const field = document.querySelector('#task-search'); field.value = 'Saved chat'; field.dispatchEvent(new Event('input', {bubbles:true})); true")
             try await require("document.querySelector('nav[aria-label=Chats]')?.scrollHeight >= 1717 * 28")
             XCTAssertEqual(state.tasks.count + state.savedChats.count, 1717)
             try await require("document.querySelectorAll('.task-row').length < 80")
@@ -239,7 +241,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         })
         let fullChat = """
             !!document.querySelector('#task-prompt') && innerWidth > 1000 &&
-              !document.querySelector('[data-browser-primary], [data-browser-pane], [aria-label="New chat"], [aria-label="Toggle browser"]')
+              !document.querySelector('[data-browser-primary], [data-browser-pane], [aria-label="New agent"], [aria-label="Toggle browser"]')
             """
         let restored = await waitForScriptBool(on: web, script: fullChat)
         XCTAssertTrue(restored)
@@ -431,7 +433,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             XCTAssertTrue(ok, script, line: line)
             if !ok { throw CocoaError(.coderInvalidValue) }
         }
-        try await requireDOM("!!document.querySelector('.composer-shell textarea') && document.querySelector('.task-list')?.scrollHeight >= 1717 * 28")
+        try await requireDOM("!!document.querySelector('.composer-shell textarea') && document.querySelectorAll('.task-row').length === 1")
         let iconURL = try XCTUnwrap(WebUIResourceLocator.indexURL?.deletingLastPathComponent()
             .appendingPathComponent("icons/new-browser-tab.svg"))
         XCTAssertNotNil(NSImage(contentsOf: iconURL))
@@ -519,11 +521,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         for _ in 0..<3 {
             try hover(true, expectedWidth: 44)
             try await requireDOM("""
-                innerWidth === 230 && document.querySelector('.task-list').scrollHeight >= 1717 * 28
+                innerWidth === 230 && document.querySelectorAll('.task-row').length === 2
                   && document.querySelectorAll('.workspace-tab-row').length < 80
                 """)
             try hover(false, expectedWidth: 230)
-            try await requireDOM("innerWidth === 44 && document.querySelectorAll('.agent-rail .task-row').length === 1")
+            try await requireDOM("innerWidth === 44 && document.querySelectorAll('.agent-rail .task-row').length === 2")
         }
         let fieldPreserved = try await page.evaluateJavaScript("document.querySelector('input').value === 'B12' && location.hash === '#seat'") as? Bool
         XCTAssertEqual(fieldPreserved, true)
@@ -546,7 +548,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             """)
         try await requireDOM("document.querySelectorAll('[data-tab-kind]').length === 1")
         state.isTaskSidebarCollapsed = true
-        try await requireDOM("innerWidth === 44 && !!document.querySelector('.agent-rail') && !document.querySelector('.agent-rail .task-row')")
+        try await requireDOM("innerWidth === 44 && document.querySelectorAll('.agent-rail .task-row').length === 1 && !!document.querySelector('.agent-rail [aria-label=\"Trip agent\"]')")
         _ = try await chat.evaluateJavaScript("document.dispatchEvent(new KeyboardEvent('keydown', {key:'k', metaKey:true, bubbles:true})); true")
         try await requireDOM("innerWidth === 230")
         try await requireDOM("document.activeElement?.id === 'task-search' && document.activeElement.value === 'Trip agent'")
@@ -557,6 +559,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.closeWorkspaceTab(.agent(task.id))
         XCTAssertEqual(state.primaryBrowserID, ref)
         XCTAssertEqual(state.tasks.first?.id, task.id)
+        try await requireDOM("!document.querySelector('[data-tab-kind=agent]')")
+        _ = try await chat.evaluateJavaScript("const search = document.querySelector('#task-search'); search.value = 'Trip agent'; search.dispatchEvent(new Event('input', {bubbles:true})); true")
         try await requireDOM("!!document.querySelector('nav[aria-label=\"Tabs\"] :not([draggable=true]).workspace-tab-row [data-tab-kind=agent]')")
         _ = try await chat.evaluateJavaScript("document.querySelector('[data-tab-kind=agent]').click(); true")
         try await requireDOM("!!document.querySelector('nav[aria-label=\"Tabs\"] [draggable=true] [data-tab-kind=agent]') && !document.querySelector('[data-browser-primary]')")
@@ -1081,7 +1085,54 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
-    func testCollapsedSidebarShowsOnlyWorkingChatsAndExpandedRowsShowUnread() async throws {
+    func testAgentMenuStartsFreshAndOpensOriginalFromHistoryInWebKit() async throws {
+        let threadID = UUID().uuidString.lowercased()
+        let task = AgentTask(runtimeThreadID: threadID, title: "Earlier review", summary: "",
+            status: .completed, workspace: "/tmp", model: LocalModelCatalog.defaultModelID,
+            entries: [.init(kind: .assistant, title: "Kolmogor", body: "Original conversation marker")])
+        let state = AppState(tasks: [task], preferences: isolatedTestPreferences())
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close(); state.browserSession.shutdown() }
+        await settleLayout(host)
+        let web = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        func require(_ expression: String) async throws {
+            let matched = await waitForScriptBool(on: web, script: expression)
+            XCTAssertTrue(matched, expression)
+            if !matched { throw CocoaError(.coderInvalidValue) }
+        }
+        func choose(_ label: String) async throws {
+            try await require("!!document.querySelector('[aria-label=\"Agent menu\"]')")
+            _ = try await web.evaluateJavaScript("document.querySelector('[aria-label=\"Agent menu\"]').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); true")
+            let item = "[...document.querySelectorAll('[role=menuitem]')].find(item => item.textContent.trim() === '\(label)')"
+            try await require("!!(\(item))")
+            _ = try await web.evaluateJavaScript("(\(item)).click(); true")
+        }
+        try await choose("Agent settings")
+        try await require("!!document.querySelector('dialog[open] input')")
+        _ = try await web.evaluateJavaScript("""
+            const nameField = document.querySelector('dialog input'); nameField.value = 'Release reviewer';
+            nameField.dispatchEvent(new Event('input', {bubbles:true}));
+            document.querySelector('dialog form').requestSubmit(); true
+            """)
+        try await require("document.querySelector('.toolbar-title-block strong')?.textContent === 'Release reviewer'")
+        try await choose("Start fresh")
+        try await require("!!document.querySelector('.empty-conversation') && !document.querySelector('main.workspace')?.textContent.includes('Original conversation marker')")
+        XCTAssertNotEqual(state.selectedTaskID, task.id)
+        try await choose("History")
+        try await require("!!document.querySelector('dialog[open] .agent-history-list button')")
+        _ = try await web.evaluateJavaScript("document.querySelector('.agent-history-list button').click(); true")
+        try await require("document.querySelector('main.workspace')?.textContent.includes('Original conversation marker') === true")
+        XCTAssertEqual(state.selectedTaskID, task.id)
+    }
+
+    @MainActor
+    func testBothSidebarWidthsPreserveAgentRowsAndAnimateOnlyWorkingAgents() async throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         defer { session.shutdown() }
@@ -1094,6 +1145,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             AgentTask(title: "Failed", summary: "", status: .failed, workspace: "", model: "local")
         ] + (1...20).map { AgentTask(title: "Archived \($0)", summary: "", status: .completed, workspace: "", model: "local") }
         let state = AppState(tasks: tasks, preferences: prefs, browserSession: session)
+        for task in tasks.reversed() { state.workspaceTabs.open(.agent(task.id)) }
         let hosting = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 700),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -1105,7 +1157,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         await settleLayout(hosting)
         let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }
             .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
-        let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 25 && !document.querySelector('.task-row svg') && !!document.querySelector('[aria-label=\"Archived 20\"]') && !document.querySelector('.agent-rail')")
+        let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 25 && document.querySelectorAll('.task-row .agent-status-icon').length === 25 && !!document.querySelector('[aria-label=\"Archived 20\"]') && !document.querySelector('.agent-rail')")
         XCTAssertTrue(expanded)
         let titleFits = await waitForScriptBool(on: chat, script: """
             (() => {
@@ -1114,7 +1166,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 const title = row.querySelector('.task-row-title').getBoundingClientRect();
                 const elapsed = row.querySelector('.task-row-elapsed').getBoundingClientRect();
                 const inset = title.left - row.getBoundingClientRect().left;
-                return inset > 0 && inset < 24 && title.width > 100 && title.right <= elapsed.left;
+                return inset > 0 && inset <= 48 && elapsed.left - title.left > 100 && title.right <= elapsed.left;
             })()
             """)
         XCTAssertTrue(titleFits)
@@ -1138,10 +1190,10 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(state.isTaskSidebarCollapsed)
         let compactEnd = button.convert(button.bounds, to: nil).maxX
         let working = await waitForScriptBool(on: chat, script: """
-            document.querySelectorAll('.agent-rail .task-row').length === 2
+            document.querySelectorAll('.agent-rail .task-row').length === 25
                 && document.querySelectorAll('[data-agent-status="working"]').length === 2
-                && document.querySelectorAll('.bot-sparkle-star').length === 4
-                && getComputedStyle(document.querySelector('.bot-sparkle-pass')).animationName
+                && document.querySelectorAll('.bot-sparkle-star').length === 50
+                && getComputedStyle(document.querySelector('[data-agent-status=working] .bot-sparkle-pass')).animationName
                     === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-pass')
                 && document.querySelector('.sidebar').getBoundingClientRect().width === 44
                 && document.querySelector('.toolbar-title-block').getBoundingClientRect().left >= \(compactEnd)
@@ -1187,14 +1239,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.apply(.taskCompletionObserved(taskID: tasks[2].id, threadID: thread, turnID: UUID().uuidString.lowercased()))
         state.apply(.taskStatusChanged(taskID: tasks[2].id, status: .completed))
         let finished = await waitForScriptBool(on: chat, script: """
-            document.querySelectorAll('.agent-rail .task-row').length === 1
-                && document.querySelector('.agent-rail .task-row')?.getAttribute('aria-label') === 'Research — Working'
+            document.querySelectorAll('.agent-rail .task-row').length === 25
+                && document.querySelectorAll('[data-agent-status=working]').length === 1 && !!document.querySelector('.agent-rail [data-agent-status=ready]')
             """)
         XCTAssertTrue(finished)
         XCTAssertTrue(state.hasUnreadCompletion(for: tasks[2].id))
         try await clickInWindow(at: toggle, window: window)
         let reopened = await waitForScriptBool(on: chat, script: """
-            document.querySelectorAll('.task-row').length === 25 && !document.querySelector('.task-row svg')
+            document.querySelectorAll('.task-row').length === 25 && document.querySelectorAll('.task-row .agent-status-icon').length === 25
                 && !!document.querySelector('[aria-label="Review — Ready to read"] .task-row-unread')
             """)
         XCTAssertTrue(reopened)
@@ -1237,7 +1289,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertEqual(collapsedHistoryCenters, scrolledCenters)
         state.apply(.taskStatusChanged(taskID: tasks[1].id, status: .completed))
         let idle = await waitForScriptBool(on: chat, script: """
-            !!document.querySelector('.agent-rail') && !document.querySelector('.agent-rail button')
+            !!document.querySelector('.agent-rail') && document.querySelectorAll('.agent-rail .agent-status-icon').length === 25 && !document.querySelector('[data-agent-status=working]') && getComputedStyle(document.querySelector('.agent-rail .bot-sparkle-pass')).animationName === 'none'
                 && !!document.querySelector('[data-native-sidebar-controls=true]') && !document.querySelector('.sidebar [aria-label="New agent"]')
             """)
         XCTAssertTrue(idle)
@@ -1828,7 +1880,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 button.getAttribute('aria-label') || button.textContent.trim())
             """) as? [String]
         let buttons = try XCTUnwrap(toolbarButtons)
-        XCTAssertTrue(buttons.contains("New chat"), "Borderless workspaces use the chat header compose button")
+        XCTAssertTrue(buttons.contains("New agent"), "Borderless workspaces use the chat header compose button")
         XCTAssertFalse(buttons.contains("Toggle browser"), "The window title bar owns the browser toggle")
         XCTAssertFalse(buttons.contains("Toggle inspector"))
         XCTAssertFalse(buttons.contains("Toggle changes"))

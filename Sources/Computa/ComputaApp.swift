@@ -82,7 +82,7 @@ private struct WorkspaceCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
-            Button("New Chat") { state.createTask() }
+            Button("New Agent") { state.createTask() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(workspaceUnavailable)
             Button("New Tab") { WorkspaceTabLauncher.request(in: NSApp.keyWindow) }

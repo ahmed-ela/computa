@@ -156,7 +156,16 @@ export interface WorkspaceBrowser {
   canGoBack?: boolean; canGoForward?: boolean; canReload?: boolean; isLoading?: boolean;
 }
 
+export interface AgentProfile {
+  name: string;
+  instructions: string;
+  history: {id: string; title: string}[];
+}
+
 export interface AppSnapshot {
+  selectedAgentProfile?: AgentProfile;
+  agentNames?: Record<string, string>;
+  canStartFresh?: boolean;
   launcherChat?: { taskID: string; unsentDraft?: string };
   nativeSidebarControls?: boolean;
   revision: number;
@@ -195,6 +204,9 @@ export interface AppSnapshot {
 }
 
 export type NativeAction =
+  | {action: 'startFresh'; taskID: string}
+  | {action: 'saveAgentSettings'; taskID: string; name: string; instructions: string}
+  | {action: 'openAgentHistory'; taskID: string; conversationID: string}
   | { action: 'ready' }
   | { action: 'selectTask'; id: string }
   | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }

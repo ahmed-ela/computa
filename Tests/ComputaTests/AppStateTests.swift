@@ -16,6 +16,80 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(snapshot.showToolPayloads)
     }
 
+    @MainActor
+    func testReusableAgentStartsIsolatedThreadInSameSlotAndRetainsHistoryAcrossLaunch() async throws {
+        let prefs = isolatedTestPreferences()
+        let runtime = FreshConversationFixture()
+        let original = AgentTask(runtimeThreadID: UUID().uuidString.lowercased(), title: "First review", summary: "",
+            status: .completed, workspace: "/tmp", model: LocalModelCatalog.defaultModelID,
+            entries: [.init(kind: .user, title: "You", body: "old-private-marker")])
+        let second = AgentTask(title: "Other", summary: "", status: .draft, workspace: "", model: "other")
+        let state = AppState(tasks: [original, second], runtime: runtime, preferences: prefs)
+        state.selectTask(second.id)
+        state.selectTask(original.id)
+        let order = state.openWorkspaceTabs
+        state.saveAgentSettings(taskID: original.id, name: "Reviewer", instructions: "Prefer concise answers.")
+        let identity = try XCTUnwrap(WebUISnapshot(state: state).selectedAgentProfile?.id)
+        state.startFresh(taskID: second.id)
+        XCTAssertEqual(state.selectedTaskID, original.id)
+        state.startFresh(taskID: original.id)
+        let fresh = try XCTUnwrap(state.selectedTask)
+        XCTAssertNotEqual(fresh.id, original.id)
+        XCTAssertEqual(state.openWorkspaceTabs, order.map { $0 == .agent(original.id) ? .agent(fresh.id) : $0 })
+        XCTAssertTrue(fresh.entries.isEmpty)
+        XCTAssertNil(fresh.runtimeThreadID)
+        XCTAssertEqual(fresh.model, original.model)
+        XCTAssertEqual(fresh.workspace, original.workspace)
+        state.startFresh(taskID: original.id)
+        XCTAssertEqual(state.tasks.count, 3)
+        let restored = AppState(tasks: [original, second], runtime: runtime, preferences: prefs)
+        XCTAssertEqual(restored.selectedTaskID, fresh.id)
+        XCTAssertEqual(WebUISnapshot(state: restored).selectedAgentProfile?.id, identity)
+        let sent = await restored.submit(prompt: "Review this", toTaskID: fresh.id)
+        XCTAssertTrue(sent)
+        let delivery = await runtime.delivery
+        XCTAssertEqual(delivery?.id, fresh.id)
+        XCTAssertEqual(delivery?.model, original.model)
+        XCTAssertEqual(delivery?.prompt, "Review this\n\nSaved agent instructions\nPrefer concise answers.")
+        let directory = await runtime.workspace
+        XCTAssertEqual(directory?.path, original.workspace)
+        XCTAssertEqual(directory?.id, fresh.id)
+        let bound = UUID().uuidString.lowercased()
+        restored.apply(.taskThreadBound(taskID: fresh.id, threadID: bound))
+        let loaded = AgentTask(id: bound, runtimeThreadID: bound, title: "Review this", summary: "",
+            status: .completed, workspace: fresh.workspace, model: fresh.model)
+        let reopened = AppState(tasks: [original, loaded, second], runtime: runtime, preferences: prefs)
+        let profile = try XCTUnwrap(WebUISnapshot(state: reopened).selectedAgentProfile)
+        XCTAssertEqual(profile.id, identity)
+        XCTAssertEqual(profile.name, "Reviewer")
+        XCTAssertEqual(profile.history, [.init(id: try XCTUnwrap(original.runtimeThreadID), title: original.title)])
+        reopened.openAgentHistory(taskID: bound, conversationID: "unrelated")
+        XCTAssertEqual(reopened.selectedTaskID, bound)
+        reopened.openAgentHistory(taskID: bound, conversationID: profile.history[0].id)
+        XCTAssertEqual(reopened.selectedTask?.entries.first?.body, "old-private-marker")
+        XCTAssertTrue(reopened.openWorkspaceTabs.contains(.agent(bound)))
+        XCTAssertNil(WebUISnapshot(state: reopened).selectedAgentProfile)
+    }
+
+    @MainActor
+    func testStartFreshRefusesActiveQueuedOrUnboundConversations() {
+        let task = AgentTask(runtimeThreadID: UUID().uuidString.lowercased(), title: "Active", summary: "",
+            status: .running, workspace: "", model: "fixture")
+        let state = AppState(tasks: [task], preferences: isolatedTestPreferences())
+        state.startFresh(taskID: task.id)
+        XCTAssertEqual(state.selectedTaskID, task.id)
+        state.apply(.taskStatusChanged(taskID: task.id, status: .completed))
+        state.queuedPrompts[task.id] = [QueuedPrompt(text: "pending")]
+        state.startFresh(taskID: task.id)
+        XCTAssertEqual(state.selectedTaskID, task.id)
+        state.queuedPrompts[task.id] = []
+        state.startFresh(taskID: task.id)
+        let fresh = state.selectedTaskID!
+        state.startFresh(taskID: fresh)
+        XCTAssertEqual(state.selectedTaskID, fresh)
+        XCTAssertEqual(state.tasks.count, 2)
+    }
+
     func testLocalQwenConfigurationFitsAConstrainedLocalContext() {
         let configuration = CodexAppServerRuntime.Configuration.localQwen
 
@@ -1484,3 +1558,15 @@ private actor EventLifetimeRuntime: AgentRuntimeClient {
 }
 
 private enum EventLifetimeSyntheticStartupFailure: Error { case failed }
+
+private actor FreshConversationFixture: AgentRuntimeClient {
+    nonisolated let providerName = "Fresh conversation fixture"
+    var delivery: (id: String, model: String, prompt: String)?
+    var workspace: (id: String, path: String)?
+    nonisolated func events() -> AsyncStream<AgentRuntimeEvent> { AsyncStream { $0.finish() } }
+    func loadTasks() async throws -> [AgentTask] { [] }
+    func configureWorkspace(path: String, forTaskID id: String) async throws { workspace = (id, path) }
+    func submit(prompt: String, toTaskID id: String, modelID: String) async throws { delivery = (id, modelID, prompt) }
+    func interrupt(taskID: String) async throws {}
+    func resolveApproval(requestID: String, approved: Bool) async throws {}
+}

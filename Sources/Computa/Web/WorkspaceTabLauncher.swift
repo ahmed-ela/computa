@@ -4,7 +4,7 @@ import SwiftUI
 enum NewTabDestination: CaseIterable {
     case browser, chat
 
-    var label: String { self == .browser ? "Browser" : "Chat" }
+    var label: String { self == .browser ? "Browser" : "New agent" }
     var symbol: String { self == .browser ? "globe" : "square.and.pencil" }
 }
 
@@ -24,7 +24,7 @@ struct WorkspaceTabLauncher: View {
 
     var body: some View {
         WorkspaceCommandPanel(width: 360) {
-            WorkspaceCommandField(text: $text, placeholder: "Search Google or start a chat", label: "New tab",
+            WorkspaceCommandField(text: $text, placeholder: "Search Google or start an agent", label: "New tab",
                                   identifier: "workspace-tab-launcher", move: { selection = $0 > 0 ? .chat : .browser },
                                   submit: { launch(selection, $0) }, cancel: cancel)
         } choices: {

@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from '@octanejs/shadcn/DropdownMenu';
 import { Icon } from './Icon';
+import { AgentMenu } from './AgentMenu';
 import { useConversationDrafts } from './conversationDrafts';
 import { WorkspaceSidebar, sidebarIsCompact } from './WorkspaceSidebar';
 import { copyText } from './clipboard';
@@ -88,11 +89,11 @@ const toolNames: Record<string, string> = {
   computer_v2_keypress: 'Press keys', computer_v2_type: 'Type text',
 };
 
-function TaskToolbar({ task, rowHeight, onNewChat }: { task?: TaskSnapshot; rowHeight?: number; onNewChat?: () => void }) {
+function TaskToolbar({ task, snapshot, allowFresh, rowHeight, onNewChat }: { snapshot: AppSnapshot; allowFresh: boolean; task?: TaskSnapshot; rowHeight?: number; onNewChat?: () => void }) {
   return (
     <header className="task-toolbar" style={rowHeight ? { height: `${rowHeight}px` } : undefined}>
       <div className="toolbar-title-block">
-        {task ? <strong>{task.title === 'Untitled task' ? 'New task' : task.title}</strong> : null}
+        {task ? <strong>{snapshot.agentNames?.[task.id] || (task.title === 'Untitled task' ? 'New agent' : task.title)}</strong> : null}
         {task?.workspace && task.workspace !== 'No workspace selected' ? <span className="toolbar-workspace" title={task.workspace}>{task.workspace.split('/').filter(Boolean).at(-1) ?? task.workspace}</span> : null}
       </div>
       <div className="toolbar-actions">
@@ -117,7 +118,9 @@ function TaskToolbar({ task, rowHeight, onNewChat }: { task?: TaskSnapshot; rowH
           <Icon name="info" size={18} />
         </Button>
         */}
-        {onNewChat && <Button variant="ghost" size="icon-xs" aria-label="New chat" title="New chat (⇧⌘N)" onClick={onNewChat}>
+        {task && <AgentMenu key={task.id} taskID={task.id} name={task.title} profile={snapshot.selectedAgentProfile}
+          canStartFresh={Boolean(snapshot.canStartFresh && allowFresh)} post={post} />}
+        {onNewChat && <Button variant="ghost" size="icon-xs" aria-label="New agent" title="New agent (⇧⌘N)" onClick={onNewChat}>
           <Icon name="compose" size={16} />
         </Button>}
       </div>
@@ -1031,7 +1034,7 @@ export function App() {
           onClick={() => post({ action: 'toggleBrowser' })}>
           <Icon name="browser" size={18} />
         </Button>}
-        <TaskToolbar task={task} rowHeight={snapshot.titlebarHeight} onNewChat={snapshot.allowsBrowserSidePane && !snapshot.nativeSidebarControls ? createChat : undefined} />
+        <TaskToolbar task={task} snapshot={snapshot} allowFresh={Boolean(task && !draftState.drafts[task.id] && !draftState.pendingSubmissions[task.id])} rowHeight={snapshot.titlebarHeight} onNewChat={snapshot.allowsBrowserSidePane && !snapshot.nativeSidebarControls ? createChat : undefined} />
         {snapshot.savedChatSelection ? (
           <div className="no-task-view" role={snapshot.savedChatSelection.error ? 'alert' : 'status'}>
             {snapshot.savedChatSelection.error ? <>

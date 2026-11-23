@@ -1,4 +1,4 @@
-import type { AppSnapshot, EntrySnapshot, NativeAction, ReviewScope, ReviewState, TaskSnapshot } from './types';
+import type { AgentProfile, AppSnapshot, EntrySnapshot, NativeAction, ReviewScope, ReviewState, TaskSnapshot } from './types';
 import { reorderQueuedPrompts } from './promptQueue';
 
 const previewWorkspace = '/Users/preview/Projects/localcodex-demo';
@@ -305,8 +305,14 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
   let snapshot = previewSnapshot;
   let nextID = 0;
   const issueID = () => `preview-action-${++nextID}`;
+  const profiles = new Map<string, AgentProfile>();
   const publish = (next: AppSnapshot) => {
-    snapshot = { ...next, revision: snapshot.revision + 1 };
+    const task = next.tasks.find(item => item.id === next.selectedTaskID);
+    snapshot = {
+      ...next, revision: snapshot.revision + 1, selectedAgentProfile: task && profiles.get(task.id),
+      canStartFresh: !!task && !next.primaryBrowserID && !task.isBusy && !task.queuedPrompts.length && task.status === 'Completed',
+      agentNames: Object.fromEntries(Array.from(profiles, ([id, agent]) => [id, agent.name])),
+    };
     receive(snapshot);
   };
   const selectedTask = () => snapshot.tasks.find((task) => task.id === snapshot.selectedTaskID);
@@ -400,16 +406,42 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         return;
       }
 
+      case 'saveAgentSettings': {
+        const task = selectedTask();
+        if (!task || task.id !== action.taskID || !action.name.trim()) return;
+        profiles.set(task.id, {name: action.name, instructions: action.instructions, history: profiles.get(task.id)?.history ?? []});
+        publish(snapshot);
+        return;
+      }
+      case 'openAgentHistory': {
+        const task = selectedTask();
+        if (!task || task.id !== action.taskID || !profiles.get(task.id)?.history.some(row => row.id === action.conversationID)) return;
+        const id = action.conversationID;
+        const order = snapshot.workspaceOrder ?? [];
+        publish({...snapshot, selectedTaskID: id, selectedEntryID: undefined,
+          workspaceOrder: order.some(tab => tab.kind === 'agent' && tab.id === id) ? order : [{kind: 'agent', id}, ...order]});
+        return;
+      }
+      case 'startFresh':
       case 'createTask': {
+        const previous = action.action === 'startFresh' ? selectedTask() : undefined;
+        if (action.action === 'startFresh' && (!previous || previous.id !== action.taskID || !snapshot.canStartFresh)) return;
         const task: TaskSnapshot = {
-          id: issueID(), title: 'New preview task',
+          id: issueID(), title: 'Untitled task',
           summary: 'Draft task in the browser preview.', status: 'Draft', statusTone: 'neutral',
-          updatedAt: Math.floor(Date.now() / 1000), workspace: previewWorkspace,
-          model: snapshot.defaultModel, modelSelectable: true, entries: [],
+          updatedAt: Math.floor(Date.now() / 1000), workspace: previous?.workspace ?? previewWorkspace,
+          model: previous?.model ?? snapshot.defaultModel, modelSelectable: true, entries: [],
           queuedPrompts: [], queuePaused: false, canSteer: false, isBusy: false, hasUnreadCompletion: false,
         };
+        const order = snapshot.workspaceOrder ?? [];
+        if (previous) {
+          const profile = profiles.get(previous.id) ?? {name: previous.title, instructions: '', history: []};
+          profiles.delete(previous.id);
+          profiles.set(task.id, {...profile, history: [{id: previous.id, title: previous.title}, ...profile.history]});
+        }
         publish({ ...snapshot, tasks: [task, ...snapshot.tasks], selectedTaskID: task.id, selectedEntryID: undefined,
-          primaryBrowserID: undefined, workspaceOrder: [{ kind: 'agent', id: task.id }, ...(snapshot.workspaceOrder ?? [])] });
+          primaryBrowserID: undefined, workspaceOrder: previous ? order.map(tab =>
+            tab.kind === 'agent' && tab.id === previous.id ? {...tab, id: task.id} : tab) : [{kind: 'agent', id: task.id}, ...order] });
         return;
       }
 
@@ -662,6 +694,6 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
   };
 
   window.addEventListener('localcodex-preview-action', onAction);
-  receive(snapshot);
+  publish(snapshot);
   return () => window.removeEventListener('localcodex-preview-action', onAction);
 }
