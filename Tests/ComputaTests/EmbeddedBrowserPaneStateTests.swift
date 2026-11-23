@@ -511,6 +511,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try await requireDOM("!!document.querySelector('.sidebar-search-icon') && !document.querySelector('#task-search')")
         try hover(true, expectedWidth: 44)
         try await requireDOM("innerWidth === 230 && !!document.querySelector('.workspace-close')")
+        let peekedCenters = try await sidebarIconCenters(in: chat)
+        XCTAssertEqual(peekedCenters, expandedCenters)
         try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=false] .lucide-panel-left-open')")
         XCTAssertTrue(prefs.bool(forKey: "taskSidebarCollapsed"))
         try await requireDOM("""
@@ -535,7 +537,16 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertEqual(fieldPreserved, true)
         XCTAssertTrue(session.webView(for: id) === page)
         let collapsedCenters = try await sidebarIconCenters(in: chat)
-        XCTAssertEqual(collapsedCenters.mapValues { $0.first }, expandedCenters.mapValues { $0.first })
+        XCTAssertEqual(collapsedCenters, expandedCenters)
+        let center = try XCTUnwrap(collapsedCenters["Trip agent"])
+        let crop = WKSnapshotConfiguration()
+        crop.rect = NSRect(x: center[0] - 10, y: center[1] - 10, width: 20, height: 20)
+        let icon = try await chat.takeSnapshot(configuration: crop)
+        let pixels = try XCTUnwrap(NSBitmapImageRep(data: XCTUnwrap(icon.tiffRepresentation)))
+        let shades = (0..<pixels.pixelsHigh).flatMap { y in
+            (0..<pixels.pixelsWide).compactMap { x in pixels.colorAt(x: x, y: y)?.usingColorSpace(.deviceGray)?.whiteComponent }
+        }
+        XCTAssertGreaterThan(try XCTUnwrap(shades.max()) - XCTUnwrap(shades.min()), 0.2, "The idle agent must be painted in the compact rail")
         _ = try await chat.evaluateJavaScript("document.querySelector('\(toggle)').click(); true")
         try await requireDOM("!document.querySelector('.agent-rail') && innerWidth === 230")
         try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=true] .lucide-panel-left-close')")
@@ -1303,10 +1314,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     private func sidebarIconCenters(in webView: WKWebView) async throws -> [String: [Double]] {
         let centers = try await webView.evaluateJavaScript("""
             (() => {
-                const icons = document.querySelectorAll('.primary-nav button > :first-child, [data-tab-kind=browser] > :first-child');
-                return Object.fromEntries(Array.from(icons, icon => {
+                const controls = document.querySelectorAll('.primary-nav button, [data-tab-kind], #task-sidebar-toggle, .sidebar-address');
+                const icons = Array.from(controls, control => [control.id || control.getAttribute('aria-label'), control.firstElementChild]);
+                icons.push(['Search', document.querySelector('.task-search > svg, .sidebar-search-icon > svg')]);
+                return Object.fromEntries(icons.map(([label, icon]) => {
                     const rect = icon.getBoundingClientRect();
-                    const label = icon.closest('[aria-label]')?.getAttribute('aria-label');
                     return [label, [rect.x + rect.width / 2, rect.y + rect.height / 2]];
                 }));
             })()
