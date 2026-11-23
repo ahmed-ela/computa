@@ -64,11 +64,19 @@ test('the browser address is separate from the tab filter and follows the active
     snapshot, search: '', setSearch: () => {}, nativeHost: true, post: () => {},
   })).html;
   const expanded = render();
+  const controls = expanded.indexOf('class="sidebar-controls-row"');
+  const toggle = expanded.indexOf('id="task-sidebar-toggle"');
+  const navigation = expanded.indexOf('aria-label="Browser navigation"');
   const address = expanded.indexOf('aria-label="Website address"');
+  expect(controls).toBeGreaterThan(expanded.indexOf('class="window-drag-strip"'));
+  expect(toggle).toBeGreaterThan(controls);
+  expect(navigation).toBeGreaterThan(toggle);
+  expect(address).toBeGreaterThan(navigation);
   expect(address).toBeGreaterThan(expanded.indexOf('class="window-drag-strip"'));
   expect(expanded.indexOf('id="task-search"')).toBeGreaterThan(address);
   expect(expanded).toContain('www.rail.example');
   snapshot.isTaskSidebarCollapsed = true;
+  expect(render()).toContain('aria-label="Expand chat sidebar"');
   expect(render()).toContain('aria-label="Website address"');
   expect(render()).not.toContain('aria-label="Browser navigation"');
   snapshot.isTaskSidebarPeeked = true;
