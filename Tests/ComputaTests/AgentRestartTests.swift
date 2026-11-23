@@ -45,6 +45,21 @@ final class AgentRestartTests: XCTestCase {
         }
     }
 
+    func testContinuationPreservesConfirmedRenameAndRequiresCompleteBoundedEvidence() throws {
+        var entry = TimelineEntry(id: "rename", kind: .tool, title: "File edit", body: "",
+            toolEvent: .init(name: "apply_patch", summary: "Renamed file", status: .succeeded, input: ""),
+            fileChanges: [.init(path: "old.txt", kind: "update", movePath: "new.txt", diff: "private diff")])
+        let text = try XCTUnwrap(AgentRestartStore.continuation(for: [entry][...]))
+        XCTAssertTrue(text.contains(#""paths":["old.txt","new.txt"]"#))
+        XCTAssertFalse(text.contains("private diff"))
+        XCTAssertNil(AgentRestartStore.continuation(for: Array(repeating: entry, count: 65)[...]))
+        entry.toolEvent?.summary = String(repeating: "é", count: 5_000)
+        XCTAssertNil(AgentRestartStore.continuation(for: [entry][...]))
+        entry.toolEvent?.summary = "Renamed file"
+        entry.toolEvent?.status = .running
+        XCTAssertNil(AgentRestartStore.continuation(for: [entry][...]))
+    }
+
     func testColdStartupResumesIndependentChatsOnceAndLeavesUncertainOrStaleWorkAlone() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

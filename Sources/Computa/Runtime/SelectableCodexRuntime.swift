@@ -22,7 +22,9 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         let events = channel.continuation
         providerChats = ProviderCLIChats(root: URL(fileURLWithPath: configuration.codexHomePath)
             .appendingPathComponent("ProviderCLIChats", isDirectory: true), searchDirectories: providerCLISearchDirectories) { events.yield($0) }
-        bundled = CodexAppServerRuntime(configuration: configuration)
+        var hosted = configuration
+        hosted.crashRestartStore = restartStore
+        bundled = CodexAppServerRuntime(configuration: hosted)
         providerName = bundled.providerName
         var native = configuration
         #if DEBUG

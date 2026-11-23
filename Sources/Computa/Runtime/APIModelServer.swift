@@ -35,6 +35,8 @@ actor APIModelServer {
     private var correctionsUsed: [String: Context] = [:]
     private var capsules: APIReasoningCapsules?
     private var providers: [APIProviderDefinition] = []
+    private var crashAdmission: AgentRestartStore.Inference.Admission?
+    func setCrashAdmission(_ admission: @escaping AgentRestartStore.Inference.Admission) { crashAdmission = admission }
     private var browserToolStateProvider: EmbeddedBrowserAPIToolStateProvider?
     private var browserToolStateProviderRevision = UUID()
     private var listener: NWListener?
@@ -657,6 +659,13 @@ actor APIModelServer {
             failureStage = .requestTransport
             let laneID = UUID()
             let inferenceDeadline = ContinuousClock.now.advanced(by: inferenceTimeout)
+            let crashWindow = nativeRequest.requestKind == nil || nativeRequest.requestKind == "turn"
+                ? try await crashAdmission?(taskID, context.identity.threadID, context.identity.turnID, context.preparationID) : nil
+            guard !Task.isCancelled, !stopped, !retiring.contains(taskID), contexts[taskID] == context,
+                  admissions[taskID] == admissionID, lanes[taskID] == nil else {
+                try crashWindow?.retire()
+                throw Failure.cancelled
+            }
             let requestTask = Task<APIModelResponseCodec.Reply, Error> {
                 try await withThrowingTaskGroup(of: APIModelResponseCodec.Reply.self) { group in
                     group.addTask { try await self.performInference(prepared, key: key, taskID: taskID,
@@ -676,7 +685,9 @@ actor APIModelServer {
             defer { if lanes[taskID]?.id == lane.id { lanes.removeValue(forKey: taskID) } }
             let reply: APIModelResponseCodec.Reply
             do {
-                reply = try await withTaskCancellationHandler { try await requestTask.value } onCancel: { requestTask.cancel() }
+                reply = try await AgentRestartStore.Inference.during(crashWindow) {
+                    try await withTaskCancellationHandler { try await requestTask.value } onCancel: { requestTask.cancel() }
+                }
             } catch {
                 let cause = (error as? StagedFailure)?.cause ?? error
                 if let failure = cause as? APIProviderHTTPClient.Failure,

@@ -1973,6 +1973,34 @@ final class WebModelServerTests: XCTestCase {
         }
     }
 
+    func testWebsiteCrashCheckpointRetiresBeforeReleasingAChatGPTToolCall() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AgentRestartStore(directory: root)
+        let base = FixtureWebModelTransport(replyTexts: [#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"fixture"}}]}"#])
+        let gate = WebListenerStartupGate()
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        let model = syntheticChatGPTModelID
+        await server.setCrashAdmission { _, thread, turn, _ in
+            try .init(store: store, receipt: .init(threadID: thread, turnID: turn, model: model,
+                accessMode: .askEveryTime, requestDigest: AgentRestartStore.digest("Test website recovery")))
+        }
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(
+            GatedLeaseFixtureTransport(base: base, operation: "webProviderFinish", gate: gate), defaultChatChoice: syntheticChatGPTChoice))
+        let request = try turnRequest(input: [["role": "user", "content": "Test website recovery"]], model: model)
+        let inference = Task { try await server.fixtureInfer(request, taskID: "site-checkpoint") }
+        try await gate.waitUntilEntered()
+        let before = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        XCTAssertEqual(before.filter { $0.hasSuffix(".inference") }.count, 1)
+        XCTAssertTrue(try store.pending().isEmpty)
+        await gate.resume()
+        let output = try responseOutput(await inference.value)
+        XCTAssertEqual(output.first?["type"] as? String, "function_call")
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        let issues = await server.fixtureFinish(taskID: "site-checkpoint")
+        XCTAssertTrue(issues.isEmpty)
+    }
+
     func testChatCancellationDuringFreshClosureWithholdsOutputAndClosesOnlyThatLease() async throws {
         let base = FixtureWebModelTransport(replyTexts: [#"{"type":"tool_calls","calls":[{"name":"exec_command","arguments":{"cmd":"fixture"}}]}"#])
         let gate = WebListenerStartupGate()

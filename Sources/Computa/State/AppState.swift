@@ -1950,12 +1950,13 @@ final class AppState {
               restored.restartInterruptedTurnID == receipt.turnID, !isBusy(taskID: restored.id),
               restored.model == receipt.model || restored.restartModelFromReceipt == true,
               receipt.accessMode == .fullAccess || accessMode == .askEveryTime,
-              let request = restored.entries.last(where: {
+              let original = restored.entries.lastIndex(where: {
                   $0.kind == .user && AgentRestartStore.digest($0.body) == receipt.requestDigest
-              })?.body else { return }
+              }), let continuation = AgentRestartStore.continuation(for: restored.entries[original...]) else { return }
+        let request = restored.entries[original].body
         tasks[index].model = receipt.model
         await AgentRestartStore.$originalRequest.withValue(request) {
-            _ = await submitDelivery(prompt: AgentRestartStore.continuation, toTaskID: restored.id)
+            _ = await submitDelivery(prompt: continuation, toTaskID: restored.id)
         }
     }
 

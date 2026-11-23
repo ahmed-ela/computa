@@ -13,19 +13,45 @@ final class APIProviderHarnessLiveTests: XCTestCase {
     /// Each phase runs in a new host process with its own provider connection,
     /// sharing only the task directory on disk. The installed app is untouched.
     func testAgentContinuesAcrossColdProcesses() async throws {
+        try await exerciseRelaunch(firstPhase: "interrupt")
+    }
+
+    func testAgentContinuesOnceAfterHostSIGKILL() async throws {
+        try await exerciseRelaunch(firstPhase: "crash")
+    }
+
+    func testRecoveryWhenBothHostAndBundledEngineAreKilled() async throws {
+        try await exerciseRelaunch(firstPhase: "host-and-engine")
+    }
+
+    func testHostCrashDuringCommandPausesWithoutRepeatingTheWrite() async throws {
+        try await exerciseRelaunch(firstPhase: "command")
+    }
+
+    func testHostCrashAfterCommandResumesWithoutRepeatingTheWrite() async throws {
+        try await exerciseRelaunch(firstPhase: "after-command")
+    }
+
+    func testUserStopFollowedByHostCrashStaysStopped() async throws {
+        try await exerciseRelaunch(firstPhase: "stopped")
+    }
+
+    private func exerciseRelaunch(firstPhase: String) async throws {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["COMPUTA_API_ENGINE_TEST"] == "1")
         guard let temp = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CocoaError(.fileReadUnknown) }
         defer { free(temp) }
         let root = URL(fileURLWithPath: String(cString: temp)).appendingPathComponent("KolmogorRelaunch-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        for phase in ["interrupt", "resume", "reopen"] {
+        let phases = ["command", "stopped"].contains(firstPhase) ? [firstPhase, "paused"] : [firstPhase, "resume", "reopen"]
+        for phase in phases {
             let child = Process()
             child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
             child.arguments = ["xctest", "-XCTest", "ComputaTests.APIProviderHarnessLiveTests/testAgentRelaunchPhase",
                                Bundle(for: Self.self).bundleURL.path]
             var env = ProcessInfo.processInfo.environment
             env["KOLMOGOR_TEST_PHASE"] = phase
+            env["KOLMOGOR_TEST_FIRST_PHASE"] = firstPhase
             env["KOLMOGOR_TEST_RELAUNCH_HOME"] = root.path
             child.environment = env
             let output = root.appendingPathComponent(phase + ".log")
@@ -35,7 +61,33 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             child.standardError = handle
             try child.run()
             let deadline = ContinuousClock.now.advanced(by: .seconds(50))
-            while child.isRunning && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(100)) }
+            var killed = false
+            while child.isRunning && ContinuousClock.now < deadline {
+                if phase == firstPhase && phase != "interrupt", !killed, FileManager.default.fileExists(atPath: root.appendingPathComponent("kill-ready").path) {
+                    if phase == "host-and-engine" {
+                        // Stop the isolated host before killing its own engine, so neither
+                        // process can run cleanup or acknowledge a cancellation.
+                        guard kill(child.processIdentifier, SIGSTOP) == 0 else { throw APIHarnessFailure("Cannot stop test host") }
+                        var children = [pid_t](repeating: 0, count: 64)
+                        let bytes = Int32(MemoryLayout<pid_t>.size * children.count)
+                        _ = proc_listchildpids(child.processIdentifier, &children, bytes)
+                        let expected = try ComputaRuntimeArtifact.resolve().executableURL.resolvingSymlinksInPath()
+                        let matches = children.filter { pid in
+                            guard pid > 1 else { return false }
+                            var buffer = [CChar](repeating: 0, count: 4096)
+                            guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return false }
+                            return URL(fileURLWithPath: String(cString: buffer)).resolvingSymlinksInPath() == expected
+                        }
+                        guard matches.count == 1, let pid = matches.first else {
+                            kill(child.processIdentifier, SIGKILL)
+                            throw APIHarnessFailure("Expected the test host's own bundled engine")
+                        }
+                        if kill(pid, SIGKILL) != 0 { kill(child.processIdentifier, SIGKILL); throw APIHarnessFailure("Cannot kill fixture engine") }
+                    }
+                    killed = kill(child.processIdentifier, SIGKILL) == 0
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
             if child.isRunning {
                 child.terminate()
                 try await Task.sleep(for: .milliseconds(250))
@@ -51,6 +103,14 @@ final class APIProviderHarnessLiveTests: XCTestCase {
                 succeeded = saved.count == 1 && FileManager.default.fileExists(atPath: root.appendingPathComponent("quit-requested").path)
             } else {
                 succeeded = log.contains("Executed 1 test") && FileManager.default.fileExists(atPath: root.appendingPathComponent(phase + ".passed").path)
+            }
+            if phase == firstPhase && phase != "interrupt" {
+                guard killed, child.terminationReason == .uncaughtSignal, child.terminationStatus == SIGKILL,
+                      !log.contains(": error:") else {
+                    XCTFail("The crash fixture did not reach the requested kill point. " + log.suffix(6500))
+                    return
+                }
+                continue
             }
             guard child.terminationStatus == 0, succeeded else {
                 XCTFail("Cold restart phase " + phase + " failed. " + log.suffix(6500))
@@ -69,13 +129,36 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         let project = root.appendingPathComponent("project")
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
         let received = root.appendingPathComponent(phase + ".received")
+        let effect = project.appendingPathComponent("effect")
         let upstream = try APIHarnessHTTPFixture { request in
             do {
                 try request.body.write(to: received)
-                if phase == "interrupt" { try await Task.sleep(for: .seconds(35)) }
+                var delta: [String: Any] = ["role": "assistant", "content": "RELAUNCH-COMPLETE"]
+                var finish = "stop"
+                if ["command", "after-command"].contains(phase) {
+                    let wire = try JSONSerialization.jsonObject(with: request.body) as? [String: Any]
+                    let messages = wire?["messages"] as? [[String: Any]] ?? []
+                    if messages.contains(where: { $0["tool_call_id"] as? String == "write-once" }) {
+                        try Data().write(to: root.appendingPathComponent("tool-returned"))
+                        try await Task.sleep(for: .seconds(35))
+                    } else {
+                        let functions = (wire?["tools"] as? [[String: Any]] ?? []).compactMap { $0["function"] as? [String: Any] }
+                        let command = functions.first { function in
+                            let fields = (function["parameters"] as? [String: Any])?["properties"] as? [String: Any]
+                            return fields?["cmd"] != nil
+                        }
+                        guard let name = command?["name"] as? String else { throw APIHarnessFailure("Missing command tool") }
+                        let cmd = "echo once >> effect" + (phase == "command" ? " && sleep 4" : "")
+                        let args = try JSONSerialization.data(withJSONObject: ["cmd": cmd, "workdir": project.path, "yield_time_ms": 6000])
+                        delta = ["role": "assistant", "tool_calls": [["index": 0, "id": "write-once", "type": "function",
+                            "function": ["name": name, "arguments": String(decoding: args, as: UTF8.self)]]]]
+                        finish = "tool_calls"
+                    }
+                }
+                if ["interrupt", "crash", "host-and-engine", "stopped"].contains(phase) { try await Task.sleep(for: .seconds(35)) }
                 let frames: [[String: Any]] = [
-                    ["choices": [["index": 0, "delta": ["role": "assistant", "content": "RELAUNCH-COMPLETE"], "finish_reason": NSNull()]]],
-                    ["choices": [["index": 0, "delta": [:], "finish_reason": "stop"]]],
+                    ["choices": [["index": 0, "delta": delta, "finish_reason": NSNull()]]],
+                    ["choices": [["index": 0, "delta": [:], "finish_reason": finish]]],
                     ["choices": [], "usage": ["prompt_tokens": 80, "completion_tokens": 12, "total_tokens": 92]],
                 ]
                 var data = Data()
@@ -96,6 +179,7 @@ final class APIProviderHarnessLiveTests: XCTestCase {
         let preferences = isolatedTestPreferences()
         try APIProviderCatalog.save([provider], to: preferences)
         preferences.set(model, forKey: "LocalCodex.defaultModelID")
+        preferences.set(AccessMode.fullAccess.rawValue, forKey: "HeyDash.accessMode")
         var config = CodexAppServerRuntime.Configuration.externalLocalQwen
         config.codexHomePath = home.path
         config.workspacePath = project.path
@@ -118,12 +202,27 @@ final class APIProviderHarnessLiveTests: XCTestCase {
             let store = try XCTUnwrap(runtime.restartStore)
             let request = "Return the marker RELAUNCH-COMPLETE when this synthetic review is finished."
             switch phase {
-            case "interrupt":
+            case "interrupt", "crash", "host-and-engine", "command", "after-command", "stopped":
                 state.createTask()
                 let id = try XCTUnwrap(state.selectedTaskID)
                 let accepted = await state.submit(prompt: request, toTaskID: id)
                 XCTAssertTrue(accepted)
                 try await wait { FileManager.default.fileExists(atPath: received.path) && state.selectedTask?.status == .running }
+                if phase != "interrupt" {
+                    if phase == "command" { try await wait { FileManager.default.fileExists(atPath: effect.path) } }
+                    if phase == "after-command" { try await wait { FileManager.default.fileExists(atPath: root.appendingPathComponent("tool-returned").path) } }
+                    if phase == "stopped" {
+                        let stopped = await state.interrupt(taskID: id)
+                        XCTAssertTrue(stopped)
+                        let files = try FileManager.default.contentsOfDirectory(atPath: store.directory.path)
+                        XCTAssertFalse(files.contains { $0.hasSuffix(".inference") })
+                    }
+                    // A simultaneous launch must leave the live owner's request alone.
+                    XCTAssertTrue(try store.pending().isEmpty)
+                    try Data().write(to: root.appendingPathComponent("kill-ready"))
+                    try await Task.sleep(for: .seconds(40))
+                    XCTFail("The parent did not kill the running host")
+                }
                 let app = NSApplication.shared
                 let delegate = ComputaAppDelegate()
                 delegate.state = state
@@ -133,12 +232,27 @@ final class APIProviderHarnessLiveTests: XCTestCase {
                 // Deliver Quit as an AppKit event, outside the XCTest MainActor job.
                 RunLoop.main.perform { MainActor.assumeIsolated { app.terminate(nil) } }
                 try await wait { (try? store.pending().count) == 1 }
+            case "paused":
+                let paused = try XCTUnwrap(state.tasks.first(where: { $0.entries.contains { $0.body == request } }))
+                XCTAssertFalse(state.isBusy(taskID: paused.id))
+                XCTAssertTrue([TaskStatus.failed, .waiting].contains(paused.status))
+                if env["KOLMOGOR_TEST_FIRST_PHASE"] == "command" {
+                    XCTAssertEqual(try String(contentsOf: effect, encoding: .utf8), "once\n")
+                } else {
+                    XCTAssertFalse(FileManager.default.fileExists(atPath: effect.path))
+                }
+                XCTAssertTrue(try store.pending().isEmpty)
+                XCTAssertFalse(state.tasks.flatMap(\.entries).contains { $0.body.hasPrefix(AgentRestartStore.continuation) })
+                XCTAssertFalse(FileManager.default.fileExists(atPath: received.path))
             case "resume", "reopen":
+                if FileManager.default.fileExists(atPath: effect.path) {
+                    XCTAssertEqual(try String(contentsOf: effect, encoding: .utf8), "once\n")
+                }
                 try await wait { state.tasks.contains { $0.status == .completed && $0.entries.last?.body == "RELAUNCH-COMPLETE" } }
                 let task = try XCTUnwrap(state.tasks.first(where: { $0.status == .completed }))
                 XCTAssertEqual(task.model, model)
                 XCTAssertEqual(task.entries.filter { $0.kind == .user && $0.body == request }.count, 1)
-                XCTAssertEqual(task.entries.filter { $0.body == AgentRestartStore.continuation }.count, 1)
+                XCTAssertEqual(task.entries.filter { $0.body.hasPrefix(AgentRestartStore.continuation) }.count, 1)
                 XCTAssertEqual(try store.pending().count, 0)
                 XCTAssertEqual(FileManager.default.fileExists(atPath: received.path), phase == "resume")
                 if phase == "resume" {
@@ -150,8 +264,11 @@ final class APIProviderHarnessLiveTests: XCTestCase {
                             .compactMap { $0["text"] as? String }.joined(separator: "\n")
                     }
                     let original = try XCTUnwrap(userTexts.firstIndex(of: request), "Provider lost the interrupted request")
-                    let continuation = try XCTUnwrap(userTexts.lastIndex(of: AgentRestartStore.continuation))
+                    let continuation = try XCTUnwrap(userTexts.lastIndex { $0.hasPrefix(AgentRestartStore.continuation) })
                     XCTAssertLessThan(original, continuation)
+                    if FileManager.default.fileExists(atPath: effect.path) {
+                        XCTAssertTrue(userTexts[continuation].contains("echo once >> effect"), "Missing saved command receipt: " + userTexts[continuation])
+                    }
                 }
             default: XCTFail("Unexpected test phase")
             }
