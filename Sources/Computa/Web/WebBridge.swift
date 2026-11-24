@@ -23,6 +23,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     """
 
     private weak var state: AppState?
+    private let windowTabs: WorkspaceTabs
     private weak var webView: WKWebView?
     private var latestSnapshot: WebUISnapshot?
     private var nextRevision: UInt64 = 0
@@ -38,11 +39,13 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     init(
         state: AppState,
+        window: WorkspaceTabs? = nil,
         openScreenRecordingSettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
         consumeLauncherChat: @escaping (String) -> Bool = { _ in false },
         showAccessModeSettings: @escaping () -> Void = {}
     ) {
         self.state = state
+        windowTabs = window ?? state.workspaceTabs
         self.consumeLauncherChat = consumeLauncherChat
         self.showAccessModeSettings = showAccessModeSettings
         self.openScreenRecordingSettings = openScreenRecordingSettings
@@ -74,7 +77,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        receive(message)
+        guard let state, !windowTabs.isClosed else { return }
+        state.workspaceWindows.withWindow(windowTabs) { receive(message) }
     }
 
     private func receive(_ message: WKScriptMessage) {
@@ -90,7 +94,19 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
         guard let state else { return }
 
+        if let taskID = body["taskID"] as? String,
+           let owner = state.workspaceWindows.owner(of: .agent(taskID)), owner !== windowTabs { return }
         switch action {
+        case "acknowledgeDraftHandoff":
+            guard let id = body["id"] as? String, windowTabs.draftHandoff?.id.uuidString == id else { return }
+            windowTabs.draftHandoff = nil
+        case "setComposerDraft":
+            guard let id = body["taskID"] as? String, windowTabs.order.contains(.agent(id)),
+                  let text = body["text"] as? String, text.utf16.count <= 200_000 else { return }
+            state.composerDrafts[id] = text.isEmpty ? nil : text
+        case "beginWorkspaceTabDrag":
+            guard let tab = Self.workspaceTab(body["tab"]), let webView else { return }
+            state.windowHosting.beginTabDrag(tab, from: windowTabs, sidebar: webView)
         case "ready":
             pageIsReady = true
             if let webView {
@@ -115,8 +131,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "browserNavigation":
             guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
                   let id = body["id"] as? String, id == state.primaryBrowserID?.uuidString,
-                  let tabID = state.browserSession.selectedTabID, let tab = state.browserSession.humanTab(id: tabID),
+                  let tab = state.displayedBrowserTab,
                   tab.workspaceID.uuidString == id else { return }
+            let tabID = tab.id
             let session = state.browserSession
             switch body["command"] as? String {
             case "back" where tab.canGoBack: session.goBack(tabID: tabID)
@@ -211,13 +228,16 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 _ = state.acceptPrompt(prompt: prompt, taskID: taskID, requestID: requestID)
             }
 
-        case "beginQueueEdit", "editQueuedPrompt", "cancelQueueEdit", "deleteQueuedPrompt", "moveQueuedPrompt", "sendQueuedPrompt", "steerQueuedPrompt":
+        case "beginQueueEdit", "setQueueEditDraft", "editQueuedPrompt", "cancelQueueEdit", "deleteQueuedPrompt", "moveQueuedPrompt", "sendQueuedPrompt", "steerQueuedPrompt":
             guard let taskID = body["taskID"] as? String,
                   let id = body["id"] as? String,
                   state.tasks.contains(where: { $0.id == taskID }) else { return }
             switch action {
             case "beginQueueEdit":
                 state.beginQueueEdit(taskID: taskID, id: id)
+            case "setQueueEditDraft":
+                guard windowTabs.selectedTaskID == taskID, let text = body["text"] as? String else { return }
+                state.updateQueueEditDraft(taskID: taskID, id: id, text: text)
             case "editQueuedPrompt":
                 guard let prompt = body["prompt"] as? String else { return }
                 state.editQueuedPrompt(taskID: taskID, id: id, prompt: prompt)

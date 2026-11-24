@@ -9,6 +9,7 @@ struct EmbeddedBrowserPane: View {
     let session: EmbeddedBrowserSession
     var tabRowHeight: CGFloat = 32
     var usesSidebarTabs = false
+    var workspacePageID: UUID?
     var showsNewTabButton = true
     var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
@@ -25,7 +26,7 @@ struct EmbeddedBrowserPane: View {
     @FocusState private var addressFocused: Bool
 
     private var selectedTab: EmbeddedBrowserTab? {
-        session.humanTabs.first { $0.id == session.selectedTabID }
+        session.humanTabs.first { $0.id == (workspacePageID ?? session.selectedTabID) }
     }
 
     var body: some View {
@@ -79,7 +80,7 @@ struct EmbeddedBrowserPane: View {
                 Divider()
             }
 
-            if let error = addressError ?? selectedTab?.error ?? session.errorMessage {
+            if let error = addressError ?? selectedTab?.error ?? (workspacePageID == nil ? session.errorMessage : nil) {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.circle")
                     Text(error).font(.callout).textSelection(.enabled)
@@ -109,7 +110,7 @@ struct EmbeddedBrowserPane: View {
         .focusedValue(\.browserPaneFocused, true)
         .focusedSceneValue(\.focusBrowserAddress, { addressFocused = true })
         .onAppear { synchronizeAddress() }
-        .onChange(of: session.selectedTabID) { _, _ in
+        .onChange(of: selectedTab?.id) { _, _ in
             addressError = nil
             address = selectedTab?.url?.absoluteString ?? ""
         }

@@ -29,9 +29,12 @@ final class AppState {
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
     @ObservationIgnored private var runtimeShutdown: Task<RuntimeShutdownReport, Never>?
     @ObservationIgnored private var runtimeEventConsumer: Task<Void, Never>?
-    @ObservationIgnored private var isShuttingDown = false
+    @ObservationIgnored private(set) var isShuttingDown = false
     @ObservationIgnored private var taskSnapshotRevision: UInt64 = 0
-    @ObservationIgnored private var taskSelectionRevision: UInt64 = 0
+    private var taskSelectionRevision: UInt64 {
+        get { workspaceTabs.selectionRevision }
+        set { workspaceTabs.selectionRevision = newValue }
+    }
     @ObservationIgnored private let permissionClient: any AutomationPermissionClient
     @ObservationIgnored private let preferences: UserDefaults
     @ObservationIgnored private let unreadCompletionStore: ChatUnreadCompletionStore?
@@ -101,24 +104,40 @@ final class AppState {
 
     var tasks: [AgentTask]
     private(set) var savedChats: [SavedChatSummary] = []
-    var savedChatSelection: SavedChatSelection?
-    var selectedTaskID: AgentTask.ID? {
-        didSet { if selectedTaskID != oldValue { workspaceTabs.onChange?() } }
+    var savedChatSelection: SavedChatSelection? {
+        get { workspaceTabs.savedChatSelection }
+        set { workspaceTabs.savedChatSelection = newValue }
     }
-    var selectedEntryID: TimelineEntry.ID?
+    var selectedTaskID: AgentTask.ID? {
+        get { workspaceTabs.selectedTaskID }
+        set { workspaceTabs.selectedTaskID = newValue }
+    }
+    var selectedEntryID: TimelineEntry.ID? {
+        get { workspaceTabs.selectedEntryID }
+        set { workspaceTabs.selectedEntryID = newValue }
+    }
     var composerText = ""
     var isInspectorPresented = false
     private static let sidebarCollapsedKey = "taskSidebarCollapsed"
     var isTaskSidebarCollapsed: Bool {
-        didSet { preferences.set(isTaskSidebarCollapsed, forKey: Self.sidebarCollapsedKey) }
+        get { workspaceTabs.isSidebarCollapsed }
+        set {
+            workspaceTabs.isSidebarCollapsed = newValue
+            if workspaceTabs === workspaceWindows.primary { preferences.set(newValue, forKey: Self.sidebarCollapsedKey) }
+        }
     }
-    var browserTabOpenError: String?
+    var browserTabOpenError: String? {
+        get { workspaceTabs.browserTabOpenError }
+        set { workspaceTabs.browserTabOpenError = newValue }
+    }
     var chromeProfileImportStatus: String?
     var importingChromeProfile = false
     @ObservationIgnored var chromeImportSourceRoot = ChromeProfileLibrary.chromeRoot
     let workspaceLayout: WorkspaceLayout
     var mixesBrowserTabsInSidebar: Bool { workspaceLayout.mixesBrowserTabs }
-    let workspaceTabs: WorkspaceTabs
+    let workspaceWindows: WorkspaceWindows
+    var workspaceTabs: WorkspaceTabs { workspaceWindows.current }
+    @ObservationIgnored lazy var windowHosting = WorkspaceWindowHosting(state: self)
     private var browserSidePaneOpen = false
     var isBrowserPresented: Bool {
         get { browserSidePaneOpen }
@@ -128,26 +147,38 @@ final class AppState {
             workspaceTabs.onChange?()
         }
     }
+    @ObservationIgnored var transferringWorkspaceTabs = false
+    // Unsubmitted editor text can cross windows, but never enters workspace preferences or the runtime.
+    @ObservationIgnored var composerDrafts: [String: String] = [:]
     @ObservationIgnored private var waitingForWorkspaceHistory = false
     @ObservationIgnored private var restoredWorkspaceDraftIDs = Set<String>()
     @ObservationIgnored private var firstMessages: [String: FirstMessageStore.Record] = [:]
     @ObservationIgnored private var missingRuntimeThreads = Set<String>()
-    var isReviewPresented = false
-    private(set) var review: AppReviewState?
+    var isReviewPresented: Bool {
+        get { workspaceTabs.isReviewPresented }
+        set { workspaceTabs.isReviewPresented = newValue }
+    }
+    private(set) var review: AppReviewState? {
+        get { workspaceTabs.review }
+        set { workspaceTabs.review = newValue }
+    }
     @ObservationIgnored private let reviewService = WorkspaceReviewService()
-    @ObservationIgnored private var reviewGeneration: UInt64 = 0
-    @ObservationIgnored private var reviewRefresh: Task<Void, Never>?
+    private var reviewGeneration: UInt64 {
+        get { workspaceTabs.reviewGeneration }
+        set { workspaceTabs.reviewGeneration = newValue }
+    }
+    private var reviewRefresh: Task<Void, Never>? {
+        get { workspaceTabs.reviewRefresh }
+        set { workspaceTabs.reviewRefresh = newValue }
+    }
     private var reviewMutationTaskIDs: Set<String> = []
     @ObservationIgnored private var reviewNeedsRefresh: Set<String> = []
     let browserSession: EmbeddedBrowserSession
     @ObservationIgnored private lazy var embeddedBrowserTools = EmbeddedBrowserToolController(
         transport: EmbeddedBrowserTabTransport(session: browserSession))
     var presentedSheet: SheetDestination? {
-        didSet {
-            if presentedSheet != nil, approvalGateBlocksInteraction {
-                presentedSheet = nil
-            }
-        }
+        get { workspaceTabs.presentedSheet }
+        set { workspaceTabs.presentedSheet = approvalGateBlocksInteraction ? nil : newValue }
     }
 
     var appearance: AppAppearance = .system
@@ -157,7 +188,10 @@ final class AppState {
     private(set) var apiProviders: [APIProviderDefinition] = []
     @ObservationIgnored private(set) var apiProviderSettings: APIProviderSettings!
     private(set) var alibabaSetupID: String?
-    var isAPIProvidersPresented = false
+    var isAPIProvidersPresented: Bool {
+        get { workspaceTabs.isAPIProvidersPresented }
+        set { workspaceTabs.isAPIProvidersPresented = newValue }
+    }
     private(set) var websiteModelsRefreshing = false
     private(set) var websiteModelsError: String?
     var showToolPayloads = false
@@ -186,6 +220,7 @@ final class AppState {
     private(set) var websiteSessionCleanupTaskIDs: Set<AgentTask.ID> = []
     private(set) var websiteSessionCleanupReceipts: [AgentTask.ID: WebsiteSessionCleanupReceipt] = [:]
     var queuedPrompts: [AgentTask.ID: [QueuedPrompt]] = [:]
+    @ObservationIgnored private var queueEditDrafts: [String: String] = [:]
     var pausedQueueTaskIDs: Set<AgentTask.ID> = []
     var promptReceipts: [PromptReceipt] = []
     @ObservationIgnored private var promptReceiptRevision: UInt64 = 0
@@ -223,8 +258,8 @@ final class AppState {
         self.permissionClient = permissionClient
         self.preferences = preferences
         self.workspaceLayout = workspaceLayout
-        workspaceTabs = WorkspaceTabs(defaults: preferences)
-        isTaskSidebarCollapsed = preferences.bool(forKey: Self.sidebarCollapsedKey)
+        workspaceWindows = WorkspaceWindows(defaults: preferences)
+        workspaceWindows.primary.isSidebarCollapsed = preferences.bool(forKey: Self.sidebarCollapsedKey)
         self.unreadCompletionStore = unreadCompletionStore
         do { unreadCompletions = try unreadCompletionStore?.load() ?? [:] }
         catch {
@@ -258,16 +293,16 @@ final class AppState {
         catch { FirstMessageStore.log.error("Local first-message history could not be loaded.") }
         for record in localRecords {
             if let thread = record.threadID {
-                workspaceTabs.restoreBinding(draft: record.localID.uuidString, thread: thread)
+                workspaceWindows.primary.restoreBinding(draft: record.localID.uuidString, thread: thread)
                 missingRuntimeThreads.insert(record.id)
             }
             firstMessages[record.id.lowercased()] = record
         }
         let recovered = localRecords.map(\.restoredTask).filter { local in !tasks.contains { $0.id == local.id } }
-        let snapshot = workspaceTabs.saved
+        let snapshot = workspaceWindows.primary.saved
         let existingIDs = Set((tasks + recovered).map(\.id))
         let savedDrafts = snapshot?.drafts ?? [:]
-        let openIDs = workspaceTabs.order.filter { $0.kind == .agent }.map(\.id)
+        let openIDs = workspaceWindows.primary.order.filter { $0.kind == .agent }.map(\.id)
         let closedIDs = Set(savedDrafts.keys).subtracting(openIDs).sorted()
         let drafts = (openIDs + closedIDs).compactMap { id -> AgentTask? in
             guard !existingIDs.contains(id), let draft = savedDrafts[id] else { return nil }
@@ -306,14 +341,33 @@ final class AppState {
             isBrowserPresented = snapshot.showsBrowserPane || (!mixesBrowserTabsInSidebar && restoredPrimary)
         }
         for tab in self.browserSession.workspaceBrowserTabs { workspaceTabs.open(.browser(tab.workspaceID)) }
+        workspaceTabs.selectedPage = self.browserSession.workspaceBrowserTabs.first { $0.id == self.browserSession.selectedTabID }?.workspaceID
         if !self.cookieMaintenanceOnlyLaunch {
             workspaceTabs.onChange = { [weak self] in self?.saveWorkspace() }
             self.browserSession.onWorkspacePageChanged = workspaceTabs.onChange
         }
-        self.browserSession.onWorkspaceTabOpened = { [weak self] id in self?.workspaceTabs.open(.browser(id)) }
-        self.browserSession.onWorkspaceTabClosed = { [weak self] id, needsAdjacentSelection in
+        self.browserSession.onWorkspaceTabOpened = { [weak self] page, opener in
             guard let self else { return }
-            removeWorkspaceTab(.browser(id), wasSelected: needsAdjacentSelection && workspaceTabs.browserIsPrimary)
+            let owner = opener.flatMap { workspaceWindows.owner(of: .browser($0)) } ?? workspaceTabs
+            owner.open(.browser(page))
+        }
+        self.browserSession.onWorkspacePageSelected = { [weak self] page in
+            guard let self, let owner = workspaceWindows.owner(of: .browser(page)), owner.selectedPage != page else { return }
+            owner.selectedPage = page
+            if owner === workspaceWindows.primary { saveWorkspace() }
+        }
+        self.browserSession.onWorkspaceTabClosed = { [weak self] id, opener in
+            guard let self, let owner = workspaceWindows.owner(of: .browser(id)) else { return }
+            workspaceWindows.withWindow(owner) {
+                let closingSelection = owner.selectedPage == id
+                let localOpener = opener.flatMap { owner.order.contains(.browser($0)) ? $0 : nil }
+                if closingSelection { owner.selectedPage = localOpener }
+                removeWorkspaceTab(.browser(id), wasSelected: closingSelection && owner.browserIsPrimary && localOpener == nil)
+                if owner.selectedPage == nil {
+                    owner.selectedPage = owner.order.first { $0.kind == .browser }.flatMap { UUID(uuidString: $0.id) }
+                }
+                saveWorkspace()
+            }
         }
         self.browserSession.onHumanVerificationRecoveryCandidate = { [weak self] candidate in
             Task { @MainActor [weak self] in await self?.recoverWebsiteModels(candidate) }
@@ -324,15 +378,18 @@ final class AppState {
         if !tasks.isEmpty { saveWorkspace() }
     }
 
-    private func saveWorkspace() {
-        guard !isShuttingDown, !cookieMaintenanceOnlyLaunch else { return }
+    func saveWorkspace() {
+        guard !isShuttingDown, !cookieMaintenanceOnlyLaunch, !transferringWorkspaceTabs else { return }
+        let workspaceTabs = workspaceWindows.primary
         let previous = workspaceTabs.saved
         let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
-        let pages = browserSession.restorablePages
+        let temporaryDrafts = Set(workspaceWindows.temporary.flatMap(\.temporaryDraftIDs))
+        let primaryTabs = Set(workspaceTabs.order)
+        let pages = browserSession.restorablePages.filter { primaryTabs.contains(.browser($0.id)) }
         let pageIDs = Set(pages.map { $0.id.uuidString })
         var drafts = waitingForWorkspaceHistory ? (previous?.drafts ?? [:]).filter { byID[$0.key] == nil } : [:]
         for task in tasks where task.status == .draft && task.runtimeThreadID == nil && task.entries.isEmpty
-            && workspaceTabs.agent(for: task) != nil {
+            && workspaceTabs.agent(for: task) != nil && !temporaryDrafts.contains(task.id) {
             drafts[task.id] = SavedWorkspace.Draft(task)
         }
         let order = workspaceTabs.order.compactMap { tab -> WorkspaceTabID? in
@@ -346,11 +403,12 @@ final class AppState {
             }
             return .agent(task.runtimeThreadID ?? tab.id)
         }
-        let selected = selectedTaskID.map { byID[$0]?.runtimeThreadID ?? $0 }
-            ?? (waitingForWorkspaceHistory && taskSelectionRevision == 0 ? previous?.selectedAgent : nil)
-        let selectedPage = browserSession.workspaceBrowserTabs.first { $0.id == browserSession.selectedTabID }
-            .flatMap { pageIDs.contains($0.workspaceID.uuidString) ? $0.workspaceID : nil }
-        workspaceTabs.save(SavedWorkspace(agents: workspaceTabs.agents.isEmpty ? nil : workspaceTabs.agents, order: order, selectedAgent: selected, drafts: drafts,
+        let selected = workspaceTabs.selectedTaskID.map { byID[$0]?.runtimeThreadID ?? $0 }
+            ?? (waitingForWorkspaceHistory && workspaceTabs.selectionRevision == 0 ? previous?.selectedAgent : nil)
+        let selectedPage = workspaceTabs.selectedPage.flatMap { pageIDs.contains($0.uuidString) ? $0 : nil }
+        let temporaryKeys = Set(temporaryDrafts.map { $0.lowercased() })
+        let profiles = workspaceTabs.agents.filter { !temporaryKeys.contains($0.key) }
+        workspaceTabs.save(SavedWorkspace(agents: profiles.isEmpty ? nil : profiles, order: order, selectedAgent: selected, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
             pages: pages, selectedPage: selectedPage, browserIsPrimary: workspaceTabs.browserIsPrimary && selectedPage != nil,
             showsBrowserPane: isBrowserPresented))
@@ -1107,6 +1165,11 @@ final class AppState {
 
     func selectSidebarChat(_ id: String) {
         guard !approvalGateBlocksInteraction, presentedSheet == nil, !isShuttingDown else { return }
+        if let owner = workspaceWindows.owner(of: .agent(id)), owner !== workspaceTabs {
+            windowHosting.bringForward(owner)
+            workspaceWindows.withWindow(owner) { selectTask(id) }
+            return
+        }
         if tasks.contains(where: { $0.id == id }) { selectTask(id); return }
         guard savedChats.contains(where: { $0.id == id }), let runtime,
               savedChatSelection?.id != id || savedChatSelection?.error != nil else { return }
@@ -1129,6 +1192,7 @@ final class AppState {
     }
 
     func selectTask(_ id: AgentTask.ID?) {
+        guard !workspaceTabs.isClosed, id.flatMap({ workspaceWindows.owner(of: .agent($0)) }).map({ $0 === workspaceTabs }) != false else { return }
         workspaceTabs.browserIsPrimary = false
         if let id { workspaceTabs.open(.agent(id)) }
         updateSelectedConversation(id, acknowledging: true)
@@ -1240,8 +1304,10 @@ final class AppState {
 
     private func dismissSettingsIfApprovalBlocksInteraction() {
         if approvalGateBlocksInteraction {
-            presentedSheet = nil
-            isAPIProvidersPresented = false
+            for window in workspaceWindows.all {
+                window.presentedSheet = nil
+                window.isAPIProvidersPresented = false
+            }
         }
     }
 
@@ -1255,6 +1321,7 @@ final class AppState {
     func startFresh(taskID: String) {
         guard let old = selectedTask, old.id == taskID, canStartFresh(old) else { return }
         let fresh = AgentTask(title: "Untitled task", summary: "", status: .draft, workspace: old.workspace, model: old.model)
+        if workspaceTabs !== workspaceWindows.primary { workspaceTabs.temporaryDraftIDs.insert(fresh.id) }
         tasks.insert(fresh, at: 0)
         workspaceTabs.startConversation(after: old, newID: fresh.id)
         updateSelectedConversation(fresh.id, acknowledging: false)
@@ -1287,6 +1354,7 @@ final class AppState {
             workspace: "No workspace selected",
             model: defaultModel
         )
+        if workspaceTabs !== workspaceWindows.primary { workspaceTabs.temporaryDraftIDs.insert(task.id) }
         tasks.insert(task, at: 0)
         savedChatSelection = nil
         taskSelectionRevision &+= 1
@@ -1970,8 +2038,8 @@ final class AppState {
             await runtime.configureEmbeddedWebModelTransport(websiteTransport())
             await runtime.configureEmbeddedBrowserTools(embeddedBrowserTools)
             guard !Task.isCancelled, !isShuttingDown else { return }
-            let openThreads = workspaceTabs.order.compactMap { tab -> String? in
-                guard tab.kind == .agent, workspaceTabs.saved?.drafts[tab.id] == nil else { return nil }
+            let openThreads = workspaceWindows.all.flatMap(\.order).compactMap { tab -> String? in
+                guard tab.kind == .agent, workspaceWindows.primary.saved?.drafts[tab.id] == nil else { return nil }
                 return tab.id
             }
             let unreadThreads = unreadCompletions.compactMap { $1.hasUnreadCompletion ? $0 : nil }
@@ -2198,8 +2266,6 @@ final class AppState {
         // A newer authoritative snapshot supersedes any pending startup load,
         // including deletions of IDs absent from that load's original baseline.
         taskSnapshotRevision &+= 1
-        let priorSelection = selectedTaskID
-        let priorEntry = selectedEntryID
         let cleanupReceipts = websiteSessionCleanupReceipts.values.sorted {
             $0.timestamp == $1.timestamp ? $0.attemptID < $1.attemptID : $0.timestamp < $1.timestamp
         }
@@ -2214,18 +2280,20 @@ final class AppState {
         }
         waitingForWorkspaceHistory = false
         restoredWorkspaceDraftIDs.removeAll()
-        let firstOpenAgent = workspaceTabs.initialAgent(in: tasks)
-        selectedTaskID = preserveEmptySelection || newTasks.contains(where: { $0.id == priorSelection })
-            ? priorSelection
-            : firstOpenAgent
+        for window in workspaceWindows.all {
+            let prior = window.selectedTaskID
+            let foreign = Set(workspaceWindows.all.filter { $0 !== window }.flatMap(\.order))
+            let first = window.initialAgent(in: tasks.filter { !foreign.contains(.agent($0.id)) })
+            if !(preserveEmptySelection && prior == nil) && !tasks.contains(where: { $0.id == prior }) {
+                window.selectedTaskID = first
+            }
+            let selected = tasks.first { $0.id == window.selectedTaskID }
+            if let selected, retainedTaskIDs.contains(selected.id),
+               selected.entries.contains(where: { $0.id == window.selectedEntryID }) { continue }
+            window.selectedEntryID = selected?.entries.last?.id
+        }
         saveWorkspace()
         updateWebsitePrewarming()
-        if let task = selectedTask, retainedTaskIDs.contains(task.id),
-           task.entries.contains(where: { $0.id == priorEntry }) {
-            selectedEntryID = priorEntry
-        } else {
-            selectedEntryID = selectedTask?.entries.last?.id
-        }
         interruptingTaskIDs.formIntersection(
             Set(newTasks.filter { $0.status == .running }.map(\.id))
         )
@@ -2250,6 +2318,13 @@ final class AppState {
     }
 
     func apply(_ event: AgentRuntimeEvent) {
+        guard !workspaceWindows.temporary.isEmpty, let taskID = event.workspaceTaskID,
+              let owner = workspaceWindows.owner(of: .agent(taskID))
+        else { applyRuntimeEvent(event); return }
+        workspaceWindows.withWindow(owner) { applyRuntimeEvent(event) }
+    }
+
+    private func applyRuntimeEvent(_ event: AgentRuntimeEvent) {
         switch event {
         case .websiteSessionCleanupUpdated(let receipt):
             guard !isShuttingDown, receipt.isValid else { return }
@@ -2848,7 +2923,12 @@ final class AppState {
         promptReceipts.append(PromptReceipt(id: requestID, taskID: taskID, accepted: accepted, revision: promptReceiptRevision))
         if promptReceipts.count > 64 { promptReceipts.removeFirst(promptReceipts.count - 64) }
         profile?.mark(accepted ? .promptAccepted : .promptRejected)
-        if accepted { scheduleQueueDrain(taskID: taskID, profile: profile) }
+        if accepted {
+            if composerDrafts[taskID]?.trimmingCharacters(in: .whitespacesAndNewlines) == prompt.trimmingCharacters(in: .whitespacesAndNewlines) {
+                composerDrafts.removeValue(forKey: taskID)
+            }
+            scheduleQueueDrain(taskID: taskID, profile: profile)
+        }
         return accepted
     }
 
@@ -2894,6 +2974,22 @@ final class AppState {
         }
     }
 
+    // The original queue item remains the only dispatchable text until Save.
+    func updateQueueEditDraft(taskID: String, id: String, text: String) {
+        guard text.utf16.count <= 200_000, let item = queuedPrompts[taskID]?.first(where: { $0.id == id }),
+              item.status == .editing else { return }
+        queueEditDrafts[id] = text
+    }
+
+    func queuedPromptsForDisplay(taskID: String) -> [QueuedPrompt] {
+        queuedPrompts[taskID, default: []].map { item in
+            guard item.status == .editing, let draft = queueEditDrafts[item.id] else { return item }
+            var display = item
+            display.text = draft
+            return display
+        }
+    }
+
     @discardableResult
     func beginQueueEdit(taskID: String, id: String) -> Bool {
         guard let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
@@ -2907,6 +3003,7 @@ final class AppState {
         guard let text = validatedPrompt(prompt),
               let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
         queuedDispatchProfiles.removeValue(forKey: id)
+        queueEditDrafts.removeValue(forKey: id)
         queuedPrompts[taskID]?[index].text = text
         if let item = queuedPrompts[taskID]?[index], item.error != nil, item.deliveryUncertain != false {
             // Editing the text cannot establish whether the previous send arrived.
@@ -2923,6 +3020,7 @@ final class AppState {
     func cancelQueueEdit(taskID: String, id: String) -> Bool {
         guard let index = editableQueueIndex(taskID: taskID, id: id),
               queuedPrompts[taskID]?[index].status == .editing else { return false }
+        queueEditDrafts.removeValue(forKey: id)
         let restoredStatus: QueuedPrompt.Status = queuedPrompts[taskID]?[index].error == nil ? .queued : .failed
         queuedPrompts[taskID]?[index].status = restoredStatus
         scheduleQueueDrain(taskID: taskID)
@@ -2933,6 +3031,7 @@ final class AppState {
     func deleteQueuedPrompt(taskID: String, id: String) -> Bool {
         guard let index = editableQueueIndex(taskID: taskID, id: id) else { return false }
         queuedDispatchProfiles.removeValue(forKey: id)
+        queueEditDrafts.removeValue(forKey: id)
         queuedPrompts[taskID]?.remove(at: index)
         retireWebsiteModelSelections()
         scheduleQueueDrain(taskID: taskID)

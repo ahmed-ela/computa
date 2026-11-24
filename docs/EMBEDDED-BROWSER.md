@@ -28,6 +28,13 @@ Use **⇧⌘N** for a new agent chat or **⌘N** for a new window. Press **⌘�
 previous open tab and **⌘⇧]** for the next. Both follow the sidebar order across
 agent and browser tabs and wrap at either end.
 
+Drag a browser or agent tab out of the sidebar to open it in a temporary window.
+You can open more tabs there. Drag a tab onto another window’s sidebar to place it
+between its tabs, or drag the window by its title bar onto that sidebar to move
+all its tabs in order. The source window closes after a merge. Closing a temporary
+window discards its open-tab layout. Tabs moved back to the main window reopen on
+the next launch. Sent conversations stay in agent history.
+
 Click the address bar once to select the entire URL. Type a web address or search term to replace it,
 then press **Return**. Click again within the selected URL to place the cursor and edit it.
 Each tab has its own history and reload control. Select a chat in the sidebar to return

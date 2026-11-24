@@ -950,6 +950,33 @@ final class EmbeddedBrowserSessionTests: XCTestCase {
         XCTAssertTrue(session.webView(for: openerID) === opener)
     }
 
+    func testClosingDetachedPopupLeavesOtherWindowsSelectedPageAlone() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
+        let primary = state.workspaceWindows.primary
+        let detached = state.workspaceWindows.createTemporary()
+        let openerID = try session.createTab()
+        let opener = try XCTUnwrap(session.webView(for: openerID))
+        let openerPage = try XCTUnwrap(session.humanTab(id: openerID))
+        let secondID = try session.createTab()
+        let secondPage = try XCTUnwrap(session.humanTab(id: secondID))
+        state.selectWorkspaceTab(.browser(openerPage.workspaceID))
+        try await loadPopupFixture(opener)
+        _ = try await script(opener, "document.getElementById('blank-link').click(); return true;")
+        try await waitForPopupCount(3, session: session)
+        let popup = try XCTUnwrap(session.tabs.first(where: \.isPopup))
+        XCTAssertTrue(state.transferTabs([.browser(popup.workspaceID)], from: primary, to: detached))
+        state.selectWorkspaceTab(.browser(secondPage.workspaceID))
+        state.focusWorkspace(detached)
+        let child = try XCTUnwrap(session.webView(for: popup.id))
+        _ = try await script(child, "window.close(); return true;")
+        try await waitForPopupCount(2, session: session)
+        XCTAssertEqual(primary.selection, .browser(secondPage.workspaceID))
+        XCTAssertTrue(detached.order.isEmpty)
+        XCTAssertNil(detached.selection)
+    }
+
     func testTargetBlankPopupAndCloseCallbacksPreserveOpenerAndBackgroundSelection() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

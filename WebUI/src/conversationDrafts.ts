@@ -5,10 +5,15 @@ import type { AppSnapshot } from './types';
 const noReceipts: AppSnapshot['promptReceipts'] = [];
 
 // Drafts and in-flight submission receipts belong to conversations, including closed tabs.
-export function useConversationDrafts(receipts = noReceipts) {
+export function useConversationDrafts(receipts = noReceipts, handoff?: AppSnapshot['draftHandoff'], acknowledge?: (id: string) => void) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [pendingSubmissions, setPendingSubmissions] = useState<Record<string, PendingPromptSubmission>>({});
   const [submissionErrors, setSubmissionErrors] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (!handoff) return;
+    setDrafts(current => ({ ...current, ...handoff.drafts }));
+    acknowledge?.(handoff.id);
+  }, [handoff?.id]);
   useEffect(() => {
     const resolved = Object.entries(pendingSubmissions).flatMap(([taskID, pending]) => {
       const matching = receipts.filter((receipt) => receipt.taskID === taskID);

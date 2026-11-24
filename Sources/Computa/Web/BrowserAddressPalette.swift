@@ -11,6 +11,7 @@ struct BrowserAddressPalette: View {
     }
 
     let state: AppState
+    let window: WorkspaceTabs
     let tab: EmbeddedBrowserTab
     let focusRequest: Int
     let close: () -> Void
@@ -19,8 +20,9 @@ struct BrowserAddressPalette: View {
     @State private var error: String?
     @State private var imported = ChromeProfileLibrary.Results()
 
-    init(state: AppState, tab: EmbeddedBrowserTab, focusRequest: Int, close: @escaping () -> Void) {
+    init(state: AppState, window: WorkspaceTabs, tab: EmbeddedBrowserTab, focusRequest: Int, close: @escaping () -> Void) {
         self.state = state
+        self.window = window
         self.tab = tab
         self.focusRequest = focusRequest
         self.close = close
@@ -47,7 +49,7 @@ struct BrowserAddressPalette: View {
                             symbol: search ? "magnifyingglass" : "arrow.up.right"))
         }
         func matches(_ candidate: String) -> Bool { query.isEmpty || candidate.localizedCaseInsensitiveContains(query) }
-        for other in state.browserSession.workspaceBrowserTabs where other.id != tab.id {
+        for other in state.browserSession.workspaceBrowserTabs where other.id != tab.id && window.order.contains(.browser(other.workspaceID)) {
             let title = other.title.isEmpty ? other.url?.host ?? "New tab" : other.title
             if matches(title) || matches(other.url?.absoluteString ?? "") {
                 rows.append(Row(id: .switchTab(other.workspaceID), title: "Switch to \(title)", symbol: "rectangle.on.rectangle"))
@@ -98,8 +100,8 @@ struct BrowserAddressPalette: View {
 
     private func perform(_ choice: Choice, _ input: String) {
         let session = state.browserSession
-        guard state.primaryBrowserID == tab.workspaceID, session.selectedTabID == tab.id,
-              !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { close(); return }
+        guard !window.isClosed, window.browserIsPrimary, window.selectedPage == tab.workspaceID,
+              !state.approvalGateBlocksInteraction, window.presentedSheet == nil else { close(); return }
         switch choice {
         case .navigate:
             do { try session.navigate(tabID: tab.id, to: EmbeddedBrowserURLPolicy.normalize(input)) }
@@ -107,7 +109,7 @@ struct BrowserAddressPalette: View {
         case .importedPage(let url):
             do { try session.navigate(tabID: tab.id, to: url) }
             catch { self.error = error.localizedDescription; return }
-        case .switchTab(let id): state.selectWorkspaceTab(.browser(id))
+        case .switchTab(let id): state.workspaceWindows.withWindow(window) { state.selectWorkspaceTab(.browser(id)) }
         case .back: session.goBack(tabID: tab.id)
         case .forward: session.goForward(tabID: tab.id)
         case .reload: if tab.isLoading { session.stop(tabID: tab.id) } else { session.reload(tabID: tab.id) }
