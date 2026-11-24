@@ -1,9 +1,84 @@
 import AppKit
+import WebKit
 import XCTest
 @testable import Computa
 
 @MainActor
 final class WorkspaceWindowTests: XCTestCase {
+    func testCloseShortcutClosesOnlyItsLastTabAndWindow() throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let main = state.workspaceWindows.primary
+        let other = state.workspaceWindows.createTemporary()
+        state.createTask()
+        let agent = try XCTUnwrap(state.selectedTaskID)
+        state.apply(.taskStatusChanged(taskID: agent, status: .running))
+        state.activeTurnTaskIDs.insert(agent)
+        let first = try session.createTab()
+        let firstPage = try XCTUnwrap(session.humanTab(id: first))
+        state.selectWorkspaceTab(.browser(firstPage.workspaceID))
+        let second = try state.workspaceWindows.withWindow(other) {
+            let id = try session.createTab()
+            let page = try XCTUnwrap(session.humanTab(id: id))
+            state.selectWorkspaceTab(.browser(page.workspaceID))
+            return page
+        }
+        let mainWindow = showWindow(main, state: state)
+        let otherWindow = showWindow(other, state: state)
+        defer { mainWindow.close(); otherWindow.close() }
+
+        state.focusWorkspace(other)
+        state.windowHosting.closeTabOrWindow(mainWindow, inBrowserPane: false)
+        XCTAssertTrue(mainWindow.isVisible)
+        XCTAssertEqual(main.order, [.agent(agent)])
+        XCTAssertNil(session.humanTab(id: first))
+        XCTAssertEqual(other.selection, .browser(second.workspaceID))
+
+        state.windowHosting.closeTabOrWindow(mainWindow, inBrowserPane: false)
+        XCTAssertFalse(mainWindow.isVisible)
+        XCTAssertTrue(main.order.isEmpty)
+        XCTAssertEqual(main.recentlyClosed.last?.content.tab, .agent(agent))
+        XCTAssertTrue(otherWindow.isVisible)
+        XCTAssertNotNil(session.humanTab(id: second.id))
+        XCTAssertTrue(state.isBusy(taskID: agent))
+
+        state.windowHosting.closeTabOrWindow(otherWindow, inBrowserPane: false)
+        XCTAssertFalse(otherWindow.isVisible)
+        XCTAssertTrue(other.isClosed)
+        XCTAssertNil(session.humanTab(id: second.id))
+    }
+
+    func testCloseShortcutClosesAnEmptyWindowAndHonorsSettings() {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let tabs = state.workspaceWindows.primary
+        let window = showWindow(tabs, state: state)
+        defer { window.close() }
+        XCTAssertTrue(tabs.order.isEmpty)
+        tabs.presentedSheet = .settings
+        state.windowHosting.closeTabOrWindow(window, inBrowserPane: false)
+        XCTAssertTrue(window.isVisible)
+        tabs.presentedSheet = nil
+        state.windowHosting.closeTabOrWindow(window, inBrowserPane: false)
+        XCTAssertFalse(window.isVisible)
+    }
+
+    private func showWindow(_ tabs: WorkspaceTabs, state: AppState) -> NSWindow {
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 240, height: 180),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
+        let sidebar = WKWebView()
+        window.contentView = sidebar
+        state.windowHosting.attach(window, tabs: tabs, sidebar: sidebar, width: { 200 })
+        window.orderBack(nil)
+        return window
+    }
+
     func testMoveLiveTabsAndMergePreservesPageStateAgentQueueAndPrimaryRestore() async throws {
         let defaults = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(defaults: defaults)

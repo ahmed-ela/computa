@@ -26,7 +26,8 @@ composer. If you entered text, Kolmogor sends it as the first message using your
 selected default model. **↑** moves back to Browser and **Esc** dismisses the launcher.
 Use **⇧⌘N** for a new agent chat or **⌘N** for a new window. Press **⌘⇧[** for the
 previous open tab and **⌘⇧]** for the next. Both follow the sidebar order across
-agent and browser tabs and wrap at either end.
+agent and browser tabs and wrap at either end. **⌘W** closes the selected tab.
+If it was the last tab, or the window was already empty, **⌘W** closes that window.
 
 Drag a browser or agent tab out of the sidebar to open it in a temporary window.
 You can open more tabs there. Drag a tab onto another window’s sidebar to place it

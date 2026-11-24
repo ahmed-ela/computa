@@ -104,9 +104,22 @@ final class WorkspaceWindowHosting: NSObject {
 
     func bringForward(_ tabs: WorkspaceTabs) { hosts[tabs.id]?.window?.makeKeyAndOrderFront(nil) }
 
+    func closeTabOrWindow(_ window: NSWindow?, inBrowserPane: Bool) {
+        guard let state, let window, let host = host(for: window), window.attachedSheet == nil,
+              !state.approvalGateBlocksInteraction, host.tabs.presentedSheet == nil, !host.tabs.isAPIProvidersPresented else { return }
+        state.workspaceWindows.withWindow(host.tabs) {
+            if let tab = state.commandTab(inBrowserPane: inBrowserPane) { state.closeWorkspaceTab(tab) }
+        }
+        if host.tabs.order.isEmpty { window.performClose(nil) }
+    }
+
+    private func host(for window: NSWindow) -> Host? {
+        hosts.values.first { $0.window === window }
+    }
+
     private func host(_ notification: Notification) -> Host? {
         guard let window = notification.object as? NSWindow else { return nil }
-        return hosts.values.first { $0.window === window }
+        return host(for: window)
     }
 
     @objc private func focused(_ note: Notification) {
@@ -190,7 +203,7 @@ final class WorkspaceWindowHosting: NSObject {
     private func destination(at point: CGPoint) -> Host? {
         for window in NSApp.orderedWindows where window.isVisible && !window.isMiniaturized && !window.ignoresMouseEvents && window.frame.contains(point) {
             if case .window = drag, window === source?.window { continue }
-            guard window.attachedSheet == nil, let host = hosts.values.first(where: { $0.window === window }),
+            guard window.attachedSheet == nil, let host = host(for: window),
                   host.sidebarFrame?.contains(point) == true, let source, let state,
                   state.canTransferTabs(from: source.tabs, to: host.tabs) else { return nil }
             return host

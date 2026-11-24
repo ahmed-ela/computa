@@ -107,10 +107,11 @@ struct WorkspaceCommands: Commands {
         CommandGroup(replacing: .saveItem) {
             if let tabWorkspace {
                 Button("Close Tab") {
-                    if let tab = tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) { tabWorkspace.closeWorkspaceTab(tab) }
+                    tabWorkspace.windowHosting.closeTabOrWindow(NSApp.keyWindow, inBrowserPane: usesBrowserShortcuts)
                 }
                 .keyboardShortcut("w", modifiers: .command)
-                .disabled(workspaceUnavailable || tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil)
+                .disabled(workspaceUnavailable || (!tabWorkspace.workspaceTabs.order.isEmpty
+                    && tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil))
             }
             Button("Reopen Closed Tab") { state.reopenClosedTab() }
                 .keyboardShortcut("t", modifiers: [.command, .shift])
