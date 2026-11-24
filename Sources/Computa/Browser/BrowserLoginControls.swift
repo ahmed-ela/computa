@@ -24,7 +24,7 @@ enum BrowserLoginControls {
 
     static func selectedPage(in state: AppState) -> Page? {
         guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil, state.shouldPresentBrowserPane,
-              let id = state.browserSession.selectedTabID,
+              let id = state.workspaceTabs.browserIsPrimary ? state.displayedBrowserTab?.id : state.browserSession.selectedTabID,
               let tab = state.browserSession.workspaceBrowserTabs.first(where: { $0.id == id }),
               let view = state.browserSession.webView(for: id), !view.isLoading, view.hasOnlySecureContent,
               let origin = BrowserSavedLogins.origin(for: view.url) else { return nil }

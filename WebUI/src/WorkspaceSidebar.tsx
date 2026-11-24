@@ -114,7 +114,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     aria-label={toggleLabel} title={toggleLabel} aria-expanded={!snapshot.isTaskSidebarCollapsed}
     onClick={() => post({ action: 'setTaskSidebarCollapsed', collapsed: !snapshot.isTaskSidebarCollapsed })}>
     <Icon name={snapshot.isTaskSidebarCollapsed ? 'sidebarOpen' : 'sidebarClose'} size={16} /></Button>;
-  return <aside className="sidebar" aria-label="Workspace navigation"
+  return <aside className={snapshot.sidebarDropTarget ? "sidebar workspace-drop-target" : "sidebar"} aria-label="Workspace navigation"
     style={snapshot.sidebarRail && {
       '--rail-width': snapshot.sidebarRail.width + 'px',
       '--rail-center': snapshot.sidebarRail.iconCenter + 'px',
@@ -176,8 +176,17 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
         const status = item.task && sidebarAgentStatus(item.task);
         const selected = keyOf(item.ref) === selectedTab;
         const label = status ? item.title + (status === 'working' ? ' — Working' : ' — Ready to read') : item.title;
-        return <div key={keyOf(item.ref)} className="workspace-tab-row" draggable={item.open}
-          onDragStart={event => { if (!item.open) return; dragging.current = item.ref; event.dataTransfer?.setData('text/plain', keyOf(item.ref)); }}
+        return <div key={keyOf(item.ref)} className="workspace-tab-row" data-drag-id={item.ref.id} data-drag-kind={item.ref.kind} draggable={item.open}
+          onDragStart={event => {
+            if (!item.open) return;
+            if (nativeHost) {
+              event.preventDefault();
+              post({ action: 'beginWorkspaceTabDrag', tab: item.ref });
+            } else {
+              dragging.current = item.ref;
+              event.dataTransfer?.setData('text/plain', keyOf(item.ref));
+            }
+          }}
           onDragEnd={() => { dragging.current = null; }}
           onDragOver={event => { if (item.open && dragging.current) event.preventDefault(); }}
           onDrop={event => { event.preventDefault(); if (item.open && dragging.current) post({ action: 'moveWorkspaceTab', tab: dragging.current, target: item.ref }); dragging.current = null; }}>

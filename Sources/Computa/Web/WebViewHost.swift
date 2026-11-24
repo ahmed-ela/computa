@@ -4,6 +4,13 @@ import WebKit
 @MainActor
 struct WebWorkspaceView: View {
     @Bindable var state: AppState
+    let windowTabs: WorkspaceTabs
+
+    init(state: AppState, window: WorkspaceTabs? = nil) {
+        self.state = state
+        self.windowTabs = window ?? state.workspaceTabs
+    }
+
     @State private var showsAccessModeSettings = false
 
     @State private var sidebarRail = SidebarRailGeometry.fallback
@@ -16,7 +23,7 @@ struct WebWorkspaceView: View {
     private var commandPanelPresented: Bool { launcherPresented || editingBrowserID != nil }
 
     private func openBrowserAddress() {
-        guard launcherAllowed, !launcherPresented, let id = state.primaryBrowserID else { return }
+        guard launcherAllowed, !launcherPresented, windowTabs.browserIsPrimary, let id = windowTabs.selectedPage else { return }
         editingBrowserID = id
         addressFocusRequest &+= 1
     }
@@ -24,13 +31,14 @@ struct WebWorkspaceView: View {
     private func closeBrowserAddress() {
         let editedID = editingBrowserID
         editingBrowserID = nil
-        guard launcherAllowed, editedID != nil, editedID == state.primaryBrowserID,
-              let tabID = state.browserSession.selectedTabID, let page = state.browserSession.webView(for: tabID) else { return }
+        guard launcherAllowed, let editedID, windowTabs.browserIsPrimary, editedID == windowTabs.selectedPage,
+              let tab = state.browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == editedID }),
+              let page = state.browserSession.webView(for: tab.id) else { return }
         page.window?.makeFirstResponder(page)
     }
 
     private var launcherAllowed: Bool {
-        state.presentedSheet == nil && !showsAccessModeSettings && !state.isAPIProvidersPresented
+        windowTabs.presentedSheet == nil && !showsAccessModeSettings && !windowTabs.isAPIProvidersPresented
             && !state.approvalGateBlocksInteraction
     }
 
@@ -41,8 +49,12 @@ struct WebWorkspaceView: View {
     }
 
     private func launch(_ destination: NewTabDestination, text: String) {
-        guard launcherPresented, launcherAllowed else { return }
+        guard launcherPresented, launcherAllowed, !windowTabs.isClosed else { return }
         launcherPresented = false
+        state.workspaceWindows.withWindow(windowTabs) { openTab(destination, text: text) }
+    }
+
+    private func openTab(_ destination: NewTabDestination, text: String) {
         let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
         switch destination {
         case .browser:
@@ -65,12 +77,12 @@ struct WebWorkspaceView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            workspace(topInset: geometry.safeAreaInsets.top)
+            state.workspaceWindows.withWindow(windowTabs) { workspace(topInset: geometry.safeAreaInsets.top) }
         }
         .focusedSceneValue(\.tabWorkspace, state)
         .focusedSceneValue(\.browserPageCommandsAllowed, launcherAllowed && !commandPanelPresented)
-        .onChange(of: state.isTaskSidebarCollapsed) { _, _ in sidebarPeeked = false }
-        .onChange(of: state.primaryBrowserID) { _, current in
+        .onChange(of: windowTabs.isSidebarCollapsed) { _, _ in sidebarPeeked = false }
+        .onChange(of: windowTabs.browserIsPrimary ? windowTabs.selectedPage : nil) { _, current in
             if current != editingBrowserID { editingBrowserID = nil }
         }
         .onChange(of: commandPanelPresented) { _, presented in if presented { sidebarPeeked = false } }
@@ -88,6 +100,7 @@ struct WebWorkspaceView: View {
         let rowHeight = topInset > 0 ? topInset : 32
         let browserPrimary = state.primaryBrowserID != nil && state.shouldPresentBrowserPane
         let compact = state.isTaskSidebarCollapsed && !sidebarPeeked
+        let selectedPageID = state.displayedBrowserTab?.id
         let sidebarWidth = compact ? sidebarRail.width : SidebarRail.expandedWidth
         var snapshot = WebUISnapshot(state: state, titlebarHeight: rowHeight)
         snapshot.sidebarRail = sidebarRail
@@ -96,7 +109,7 @@ struct WebWorkspaceView: View {
         return ZStack(alignment: .center) {
             HSplitView {
                 CodexWebView(
-                    state: state,
+                    state: state, windowTabs: windowTabs,
                     snapshot: snapshot,
                     sidebarControlsEnabled: launcherAllowed && !commandPanelPresented,
                     setSidebarRail: { sidebarRail = $0 },
@@ -106,7 +119,7 @@ struct WebWorkspaceView: View {
                     consumeLauncherChat: { id in
                         guard launcherChat?.taskID == id else { return false }
                         launcherChat = nil
-                        return state.selectedTaskID == id && state.primaryBrowserID == nil && launcherAllowed && !launcherPresented
+                        return windowTabs.selectedTaskID == id && !windowTabs.browserIsPrimary && launcherAllowed && !launcherPresented
                     },
                     showAccessModeSettings: { showsAccessModeSettings = true }
                 )
@@ -125,6 +138,7 @@ struct WebWorkspaceView: View {
                         session: state.browserSession,
                         tabRowHeight: rowHeight,
                         usesSidebarTabs: browserPrimary,
+                        workspacePageID: browserPrimary ? selectedPageID : nil,
                         showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
                         titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
                         isInteractionBlocked: state.approvalGateBlocksInteraction,
@@ -136,7 +150,7 @@ struct WebWorkspaceView: View {
                         onCloseTab: state.closeWorkspaceTab,
                         onClose: {
                             guard state.workspaceLayout.allowsBrowserSidePane else { return }
-                            state.workspaceTabs.browserIsPrimary = false
+                            windowTabs.browserIsPrimary = false
                             state.isBrowserPresented = false
                         }
                     )
@@ -157,7 +171,7 @@ struct WebWorkspaceView: View {
                     Color.black.opacity(0.10)
                         .onTapGesture(perform: closeBrowserAddress)
                         .alignmentGuide(.commandFieldCenter) { $0.height / 3 }
-                    BrowserAddressPalette(state: state, tab: tab, focusRequest: addressFocusRequest, close: closeBrowserAddress)
+                    BrowserAddressPalette(state: state, window: windowTabs, tab: tab, focusRequest: addressFocusRequest, close: closeBrowserAddress)
                         .id(tab.id)
                 }
             } else if launcherPresented && launcherAllowed {
@@ -166,7 +180,7 @@ struct WebWorkspaceView: View {
                                      launch: launch, openPage: { url in
                     guard launcherPresented, launcherAllowed else { return }
                     launcherPresented = false
-                    state.newWorkspaceBrowserTab(url: url)
+                    state.workspaceWindows.withWindow(windowTabs) { state.newWorkspaceBrowserTab(url: url) }
                 }, cancel: { launcherPresented = false })
             }
 
@@ -208,19 +222,19 @@ struct WebWorkspaceView: View {
                 .accessibilityHidden(true)
         }
         .onAppear { state.browserSession.enableWorkspaceFavicons() }
-        .onChange(of: state.presentedSheet) { _, sheet in
+        .onChange(of: windowTabs.presentedSheet) { _, sheet in
             if sheet != .settings { showsAccessModeSettings = false }
         }
         .alert("Couldn’t open a browser tab", isPresented: Binding(
-            get: { state.browserTabOpenError != nil }, set: { if !$0 { state.browserTabOpenError = nil } }
-        )) { Button("OK") { state.browserTabOpenError = nil } } message: {
-            Text(state.browserTabOpenError ?? "")
+            get: { windowTabs.browserTabOpenError != nil }, set: { if !$0 { windowTabs.browserTabOpenError = nil } }
+        )) { Button("OK") { windowTabs.browserTabOpenError = nil } } message: {
+            Text(windowTabs.browserTabOpenError ?? "")
         }
         .sheet(isPresented: $showsAccessModeSettings) {
             NativeAccessModeSettings(state: state)
         }
-        .sheet(isPresented: Binding(get: { state.isAPIProvidersPresented && !state.approvalGateBlocksInteraction },
-            set: { state.isAPIProvidersPresented = $0 })) {
+        .sheet(isPresented: Binding(get: { windowTabs.isAPIProvidersPresented && !state.approvalGateBlocksInteraction },
+            set: { windowTabs.isAPIProvidersPresented = $0 })) {
             APIProviderSettingsView(settings: state.apiProviderSettings, alibabaSetupID: state.alibabaSetupID)
         }
     }
@@ -229,6 +243,7 @@ struct WebWorkspaceView: View {
 @MainActor
 private struct CodexWebView: NSViewRepresentable {
     let state: AppState
+    let windowTabs: WorkspaceTabs
     let snapshot: WebUISnapshot
     let sidebarControlsEnabled: Bool
     let setSidebarRail: (SidebarRailGeometry) -> Void
@@ -239,7 +254,7 @@ private struct CodexWebView: NSViewRepresentable {
     let showAccessModeSettings: () -> Void
 
     func makeCoordinator() -> WebBridge {
-        WebBridge(state: state, consumeLauncherChat: consumeLauncherChat, showAccessModeSettings: showAccessModeSettings)
+        WebBridge(state: state, window: windowTabs, consumeLauncherChat: consumeLauncherChat, showAccessModeSettings: showAccessModeSettings)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -266,6 +281,7 @@ private struct CodexWebView: NSViewRepresentable {
         let webView = WindowConfiguredWebView(frame: .zero, configuration: configuration)
         webView.openTabLauncher = openTabLauncher
         webView.openBrowserAddress = openBrowserAddress
+        webView.windowTabs = windowTabs
         webView.configureTitlebarControls(state: state)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
@@ -292,6 +308,7 @@ private struct CodexWebView: NSViewRepresentable {
         let shell = webView as? WindowConfiguredWebView
         let compact = snapshot.isTaskSidebarCollapsed && !snapshot.isTaskSidebarPeeked
         let railWidth = compact ? snapshot.sidebarRail.width : SidebarRail.expandedWidth
+        shell?.sidebarWidth = railWidth
         shell?.trackSidebar(width: snapshot.isTaskSidebarCollapsed && sidebarControlsEnabled ? railWidth : 0)
         webView.needsLayout = true
         context.coordinator.update(snapshot: snapshot)
@@ -319,6 +336,8 @@ private struct CodexWebView: NSViewRepresentable {
 
 @MainActor
 private final class WindowConfiguredWebView: WKWebView {
+    weak var windowTabs: WorkspaceTabs?
+    var sidebarWidth = SidebarRail.expandedWidth
     var openTabLauncher: (() -> Void)?
     var openBrowserAddress: (() -> Void)?
     let rail = SidebarRail()
@@ -465,6 +484,9 @@ private final class WindowConfiguredWebView: WKWebView {
                                                name: WorkspaceTabLauncher.requestNotification, object: window)
         NotificationCenter.default.addObserver(self, selector: #selector(titlebarDidChange(_:)),
                                                name: NSWindow.didUpdateNotification, object: window)
+        if let state, let windowTabs {
+            state.windowHosting.attach(window, tabs: windowTabs, sidebar: self, width: { [weak self] in self?.sidebarWidth ?? 0 })
+        }
         window.title = "Kolmogor"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true

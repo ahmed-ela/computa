@@ -79,9 +79,10 @@ final class EmbeddedBrowserSession {
         humanTabs.filter { $0.isDormant || entries[$0.id]?.isToolOwned == false }
     }
     @ObservationIgnored private var workspaceFaviconsEnabled = false
-    @ObservationIgnored var onWorkspaceTabOpened: ((UUID) -> Void)?
-    /// The workspace picks a neighbor only when closing left no opener to return to.
-    @ObservationIgnored var onWorkspaceTabClosed: ((UUID, Bool) -> Void)?
+    @ObservationIgnored var onWorkspaceTabOpened: ((UUID, UUID?) -> Void)?
+    @ObservationIgnored var onWorkspacePageSelected: ((UUID) -> Void)?
+    /// Report the popup opener so its owning window can choose the next visible page.
+    @ObservationIgnored var onWorkspaceTabClosed: ((UUID, UUID?) -> Void)?
     @ObservationIgnored var onWorkspacePageChanged: (() -> Void)?
     private(set) var selectedTabID: UUID?
 
@@ -948,8 +949,10 @@ final class EmbeddedBrowserSession {
         tab.isDormant = false
         if waking == nil { tabs.append(tab) }
         // Inactive creation stays inactive, including the first inference tab.
+        if waking == nil && !modelOwned && !toolOwned {
+            onWorkspaceTabOpened?(tab.workspaceID, popupOpenerTabID.flatMap { entries[$0]?.tab.workspaceID })
+        }
         if select { updateSelection(to: tab.id) }
-        if waking == nil && !modelOwned && !toolOwned { onWorkspaceTabOpened?(tab.workspaceID) }
         observe(entry)
         if !modelOwned { errorMessage = nil }
         return entry
@@ -994,17 +997,20 @@ final class EmbeddedBrowserSession {
         closeTab(tabID)
     }
 
-    private func updateSelection(to id: UUID) {
+    private func updateSelection(to id: UUID, notifyWorkspace: Bool = true) {
         let previous = selectedTabID
         selectedTabID = id
+        if notifyWorkspace, let entry = entries[id], !entry.isModelOwned && !entry.isToolOwned {
+            onWorkspacePageSelected?(entry.tab.workspaceID)
+        }
         if let previous, previous != id, let old = entries[previous] { applyMemoryPolicy(to: old) }
     }
 
-    func selectTab(_ id: UUID) {
+    func selectTab(_ id: UUID, notifyWorkspace: Bool = true) {
         do { try wakeTabIfNeeded(id) } catch { errorMessage = error.localizedDescription; return }
         guard let entry = entries[id] else { errorMessage = Failure.tabClosed.localizedDescription; return }
         guard !entry.isModelOwned else { return }
-        updateSelection(to: id)
+        updateSelection(to: id, notifyWorkspace: notifyWorkspace)
         applyMemoryPolicy(to: entry)
         onWorkspacePageChanged?()
         errorMessage = entry.tab.error
@@ -1014,7 +1020,7 @@ final class EmbeddedBrowserSession {
         guard let index = tabs.firstIndex(where: { $0.id == id }) else { return }
         if tabs[index].isDormant {
             let tab = tabs.remove(at: index)
-            if !isShutdown { onWorkspaceTabClosed?(tab.workspaceID, false) }
+            if !isShutdown { onWorkspaceTabClosed?(tab.workspaceID, nil) }
             return
         }
         guard let entry = entries[id] else { return }
@@ -1061,18 +1067,17 @@ final class EmbeddedBrowserSession {
         entry.view.stopLoading()
         entry.view.removeFromSuperview()
         tabs.remove(at: index)
-        var needsAdjacentSelection = wasSelected
+        let opener = entry.popupOpenerTabID.flatMap { entries[$0] }
         if wasSelected {
-            if let opener = entry.popupOpenerTabID, entries[opener]?.isModelOwned == false {
-                selectedTabID = opener
-                needsAdjacentSelection = false
+            if let opener, !opener.isModelOwned {
+                updateSelection(to: opener.tab.id, notifyWorkspace: false)
             } else {
                 let remaining = workspaceBrowserTabs
                 selectedTabID = nil
-                if !isShutdown, !remaining.isEmpty { selectTab(remaining[min(humanIndex, remaining.count - 1)].id) }
+                if !isShutdown, !remaining.isEmpty { selectTab(remaining[min(humanIndex, remaining.count - 1)].id, notifyWorkspace: false) }
             }
         }
-        if !entry.isModelOwned && !entry.isToolOwned && !isShutdown { onWorkspaceTabClosed?(entry.tab.workspaceID, needsAdjacentSelection) }
+        if !entry.isModelOwned && !entry.isToolOwned && !isShutdown { onWorkspaceTabClosed?(entry.tab.workspaceID, opener?.tab.workspaceID) }
         if !entry.isModelOwned { errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error } }
         if let observation = postBlockObservation {
             observation.lease.exactViewClosed = true

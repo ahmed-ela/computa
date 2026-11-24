@@ -45,6 +45,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let titlebarHeight: CGFloat?
     let allowsBrowserSidePane: Bool
     let mixesBrowserTabsInSidebar: Bool
+    var draftHandoff: WorkspaceTabs.DraftHandoff?
+    var sidebarDropTarget: Bool?
     let workspaceOrder: [WorkspaceTabID]
     let workspaceBrowsers: [WorkspaceBrowserSnapshot]
     let primaryBrowserID: String?
@@ -86,8 +88,11 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         self.titlebarHeight = titlebarHeight
         allowsBrowserSidePane = state.workspaceLayout.allowsBrowserSidePane
         mixesBrowserTabsInSidebar = state.mixesBrowserTabsInSidebar
+        draftHandoff = state.workspaceTabs.draftHandoff
+        sidebarDropTarget = state.workspaceTabs.isDropTarget ? true : nil
         workspaceOrder = state.openWorkspaceTabs
-        workspaceBrowsers = mixesBrowserTabsInSidebar ? state.browserSession.workspaceBrowserTabs.map {
+        let open = Set(workspaceOrder)
+        workspaceBrowsers = mixesBrowserTabsInSidebar ? state.browserSession.workspaceBrowserTabs.filter { open.contains(.browser($0.workspaceID)) }.map {
             WorkspaceBrowserSnapshot(id: $0.workspaceID.uuidString, title: $0.title, host: $0.url?.host,
                                      favicon: $0.favicon, isFaviconLoading: $0.isFaviconLoading,
                                      canGoBack: $0.canGoBack, canGoForward: $0.canGoForward,
@@ -111,7 +116,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
                 includeEntries: task.id == state.selectedTaskID,
                 includeToolPayloads: state.showToolPayloads,
                 modelSelectable: state.canChangeModel(for: task.id),
-                queuedPrompts: task.id == state.selectedTaskID ? state.queuedPrompts[task.id, default: []] : [],
+                queuedPrompts: task.id == state.selectedTaskID ? state.queuedPromptsForDisplay(taskID: task.id) : [],
                 queuePaused: state.pausedQueueTaskIDs.contains(task.id),
                 canStartQueuedTurn: state.canStartQueuedTurn(taskID: task.id),
                 canSteer: state.canSteer(taskID: task.id),

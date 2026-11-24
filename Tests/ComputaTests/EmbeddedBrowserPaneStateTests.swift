@@ -226,6 +226,64 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testTwoWorkspaceWindowsKeepTheirOwnSidebarBrowserViewsAndUnsentDraft() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let windows = state.workspaceWindows
+        let primary = windows.primary, detached = windows.createTemporary()
+        state.createTask()
+        let agent = try XCTUnwrap(primary.selection)
+        let first = try session.createTab()
+        let firstTab = try XCTUnwrap(session.humanTab(id: first))
+        let second = try session.createTab()
+        let secondTab = try XCTUnwrap(session.humanTab(id: second))
+        state.selectWorkspaceTab(agent)
+        XCTAssertTrue(state.transferTabs([.browser(secondTab.workspaceID)], from: primary, to: detached))
+
+        func show(_ tabs: WorkspaceTabs) async throws -> (NSWindow, WKWebView) {
+            let host = NSHostingView(rootView: WebWorkspaceView(state: state, window: tabs))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680),
+                                  styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.orderBack(nil)
+            await settleLayout(host)
+            let shell = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+                $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+            })
+            return (window, shell)
+        }
+        let (mainWindow, mainUI) = try await show(primary)
+        defer { mainWindow.close() }
+        let (otherWindow, otherUI) = try await show(detached)
+        defer { otherWindow.close() }
+        let mainReady = await waitForScriptBool(on: mainUI, script: "document.querySelectorAll('.workspace-tab-row').length === 2 && !!document.querySelector('#task-prompt')")
+        let otherReady = await waitForScriptBool(on: otherUI, script: "document.querySelectorAll('.workspace-tab-row').length === 1 && !document.querySelector('#task-prompt')")
+        XCTAssertTrue(mainReady && otherReady)
+        _ = try await mainUI.evaluateJavaScript("""
+            const field = document.querySelector('#task-prompt'); field.value = 'Keep my draft';
+            field.dispatchEvent(new Event('input', {bubbles:true})); true
+            """)
+        for _ in 0..<100 where state.composerDrafts[agent.id] == nil { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(state.composerDrafts[agent.id], "Keep my draft")
+        windows.withWindow(primary) { state.selectWorkspaceTab(.browser(firstTab.workspaceID)) }
+        for _ in 0..<100 where session.webView(for: first)?.window !== mainWindow || session.webView(for: second)?.window !== otherWindow {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(session.webView(for: first)?.window === mainWindow)
+        XCTAssertTrue(session.webView(for: second)?.window === otherWindow)
+        XCTAssertTrue(state.transferTabs([agent], from: primary, to: detached))
+        let received = await waitForScriptBool(on: otherUI, script: "document.querySelector('#task-prompt')?.value === 'Keep my draft'")
+        XCTAssertTrue(received)
+        let mainStillBrowser = await waitForScriptBool(on: mainUI, script: "document.querySelectorAll('.workspace-tab-row').length === 1 && !document.querySelector('#task-prompt')")
+        XCTAssertTrue(mainStillBrowser)
+        XCTAssertEqual(primary.selection, .browser(firstTab.workspaceID))
+        XCTAssertEqual(detached.selection, agent)
+    }
+
+    @MainActor
     func testSendNowInSecondQueueRowSteersOnlyThatPrompt() async throws {
         try await verifySecondQueueRow(afterFailure: false)
     }

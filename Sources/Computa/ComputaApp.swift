@@ -67,6 +67,7 @@ extension FocusedValues {
 struct WorkspaceCommands: Commands {
     let state: AppState
     let isTestHost: Bool
+    @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.focusBrowserAddress) private var focusBrowserAddress
     @FocusedValue(\.tabWorkspace) private var tabWorkspace
 
@@ -89,7 +90,13 @@ struct WorkspaceCommands: Commands {
     }
 
     var body: some Commands {
-        CommandGroup(after: .newItem) {
+        CommandGroup(replacing: .newItem) {
+            Button("New Window") {
+                if NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) { state.windowHosting.newWindow() }
+                else { openWindow(id: "workspace") }
+            }
+            .keyboardShortcut("n", modifiers: .command)
+            .disabled(workspaceUnavailable)
             Button("New Agent") { state.createTask() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(workspaceUnavailable)
@@ -163,18 +170,13 @@ struct ComputaApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Kolmogor", id: "workspace", for: UUID.self) { $windowID in
             if launchMode == .testHost {
                 Text("Kolmogor test host — application runtime disabled")
                     .padding()
                     .frame(minWidth: 480, minHeight: 120)
             } else {
-                WebWorkspaceView(state: state)
-                    .preferredColorScheme(state.appearance.colorScheme)
-                    .frame(minWidth: 980, minHeight: 640)
-                    .onAppear {
-                        state.startRuntimeIfNeeded()
-                    }
+                WorkspaceScene(state: state, id: windowID)
             }
         }
         .defaultSize(width: 1_280, height: 820)
@@ -208,6 +210,34 @@ struct ComputaApp: App {
                 Text("Focus diagnostic: \(state.browserSession.modelNativeFocusDiagnosticDisposition.rawValue)")
             }
             #endif
+        }
+    }
+}
+
+/// A nil scene value is the durable workspace. Explicit values are usable only
+/// while their in-memory layouts exist; macOS cannot restore a discarded one.
+private struct WorkspaceScene: View {
+    let state: AppState
+    let id: UUID?
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismiss) private var dismiss
+
+    private var tabs: WorkspaceTabs? {
+        guard let id else { return state.workspaceWindows.primary }
+        return state.workspaceWindows.temporary.first { $0.id == id }
+    }
+
+    var body: some View {
+        if let tabs {
+            WebWorkspaceView(state: state, window: tabs)
+                .preferredColorScheme(state.appearance.colorScheme)
+                .frame(minWidth: 980, minHeight: 640)
+                .onAppear {
+                    state.windowHosting.openScene = { openWindow(id: "workspace", value: $0) }
+                    state.startRuntimeIfNeeded()
+                }
+        } else {
+            Color.clear.onAppear { dismiss() }
         }
     }
 }

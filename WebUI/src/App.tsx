@@ -257,20 +257,10 @@ function queueStatusLabel(item: QueuedPromptSnapshot) {
 }
 
 function PromptQueue({ task }: { task: TaskSnapshot }) {
-  const [editDrafts, setEditDrafts] = useState<Record<string, QueueEditDraft>>({});
+  const [localEdit, setTaskEdit] = useState<QueueEditDraft | undefined>(undefined);
   const [draggedID, setDraggedID] = useState<string | null>(null);
   const nativeEditingItem = task.queuedPrompts.find((item) => item.status === 'editing');
-  const editDraft = editDrafts[task.id]
-    ?? (nativeEditingItem ? { id: nativeEditingItem.id, text: nativeEditingItem.text } : undefined);
-
-  const setTaskEdit = (draft?: QueueEditDraft) => {
-    setEditDrafts((current) => {
-      const next = { ...current };
-      if (draft) next[task.id] = draft;
-      else delete next[task.id];
-      return next;
-    });
-  };
+  const editDraft = localEdit ?? (nativeEditingItem ? { id: nativeEditingItem.id, text: nativeEditingItem.text } : undefined);
 
   const beginEdit = (item: QueuedPromptSnapshot) => {
     if (item.status === 'sending' || (editDraft && editDraft.id !== item.id)) return;
@@ -280,14 +270,14 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
 
   const cancelEdit = (id: string) => {
     post({ action: 'cancelQueueEdit', taskID: task.id, id });
-    setTaskEdit();
+    setTaskEdit(undefined);
   };
 
   const saveEdit = (id: string) => {
     const prompt = editDraft?.id === id ? editDraft.text.trim() : '';
     if (!isValidPrompt(prompt)) return;
     post({ action: 'editQueuedPrompt', taskID: task.id, id, prompt });
-    setTaskEdit();
+    setTaskEdit(undefined);
   };
 
   const move = (id: string, direction: -1 | 1) => {
@@ -377,7 +367,11 @@ function PromptQueue({ task }: { task: TaskSnapshot }) {
                     rows={2}
                     maxLength={200000}
                     aria-label="Edit queued message"
-                    onInput={(event) => setTaskEdit({ id: item.id, text: (event.currentTarget as HTMLTextAreaElement).value })}
+                    onInput={(event) => {
+                      const text = (event.currentTarget as HTMLTextAreaElement).value;
+                      setTaskEdit({ id: item.id, text });
+                      post({ action: 'setQueueEditDraft', taskID: task.id, id: item.id, text });
+                    }}
                     onKeyDown={(event) => {
                       if (event.key === 'Escape' && !event.isComposing && !event.repeat) {
                         event.preventDefault();
@@ -520,7 +514,7 @@ function Composer({
   return (
     <div className="composer-zone">
       <WebsiteSessionCleanupControl task={task} blocked={snapshot.pendingApprovalCount > 0} post={post} />
-      <PromptQueue task={task} />
+      <PromptQueue key={task.id} task={task} />
       <div className="composer-shell">
         <Textarea
           ref={textarea}
@@ -629,6 +623,7 @@ function Conversation({ snapshot, task, draftState }: { snapshot: AppSnapshot; t
     return () => observer.disconnect();
   }, [task.id]);
   const setDraft = (value: string) => {
+    post({ action: 'setComposerDraft', taskID: task.id, text: value });
     setDrafts((current) => ({ ...current, [task.id]: value }));
     setSubmissionErrors((current) => {
       if (!(task.id in current)) return current;
@@ -944,7 +939,8 @@ export function App() {
   const nativeHost = Boolean(window.webkit?.messageHandlers?.localCodex);
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(nativeHost ? null : previewSnapshot);
   const [search, setSearch] = useState('');
-  const draftState = useConversationDrafts(snapshot?.promptReceipts);
+  const draftState = useConversationDrafts(snapshot?.promptReceipts, snapshot?.draftHandoff,
+    id => post({ action: 'acknowledgeDraftHandoff', id }));
   const focusSearchOnExpand = useRef(false);
   const currentSnapshot = useRef(snapshot);
   currentSnapshot.current = snapshot;

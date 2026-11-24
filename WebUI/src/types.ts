@@ -185,6 +185,8 @@ export interface AppSnapshot {
   revision: number;
   allowsBrowserSidePane?: boolean;
   mixesBrowserTabsInSidebar?: boolean;
+  draftHandoff?: { id: string; drafts: Record<string, string> };
+  sidebarDropTarget?: boolean;
   workspaceOrder?: WorkspaceTab[];
   savedChats?: { id: string; title: string; workspace: string; updatedAt: number }[];
   savedChatSelection?: { id: string; error?: string };
@@ -234,6 +236,9 @@ export type NativeAction =
   | { action: 'openBrowserAddress'; id: string }
   | { action: 'browserNavigation'; id: string; command: 'back' | 'forward' | 'reload' | 'stop' }
   | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab'; tab: WorkspaceTab }
+  | { action: 'setComposerDraft'; taskID: string; text: string }
+  | { action: 'beginWorkspaceTabDrag'; tab: WorkspaceTab }
+  | { action: 'acknowledgeDraftHandoff'; id: string }
   | { action: 'moveWorkspaceTab'; tab: WorkspaceTab; target: WorkspaceTab }
   | { action: 'chooseTaskWorkspace'; taskID: string }
   | { action: 'prepareWebsiteModel'; taskID: string }
@@ -243,6 +248,7 @@ export type NativeAction =
   | { action: 'interruptTask'; taskID: string }
   | { action: 'retryWebsiteSessionCleanup'; taskID: string }
   | { action: 'beginQueueEdit'; taskID: string; id: string }
+  | { action: 'setQueueEditDraft'; taskID: string; id: string; text: string }
   | { action: 'editQueuedPrompt'; taskID: string; id: string; prompt: string }
   | { action: 'cancelQueueEdit'; taskID: string; id: string }
   | { action: 'deleteQueuedPrompt'; taskID: string; id: string }

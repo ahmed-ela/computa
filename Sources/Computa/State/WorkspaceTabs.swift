@@ -73,11 +73,47 @@ struct SavedWorkspace: Codable, Equatable {
 final class WorkspaceTabs {
     private static let legacyKey = "Computa.Workspace.OpenAgents.v1"
     private static let snapshotKey = "Computa.Workspace.OpenTabs.v2"
-    private let defaults: UserDefaults
+    let id = UUID()
+    let family: UUID
+    var isClosed = false
+    var selectedTaskID: String? {
+        didSet { if selectedTaskID != oldValue { onChange?() } }
+    }
+    var selectedEntryID: String?
+    var selectedPage: UUID?
+    var savedChatSelection: AppState.SavedChatSelection?
+    var isSidebarCollapsed = false
+    var presentedSheet: SheetDestination?
+    var isAPIProvidersPresented = false
+    var browserTabOpenError: String?
+    var isReviewPresented = false
+    var review: AppReviewState?
+    @ObservationIgnored var reviewGeneration: UInt64 = 0
+    @ObservationIgnored var reviewRefresh: Task<Void, Never>?
+    struct DraftHandoff: Codable, Equatable, Sendable {
+        var id = UUID()
+        let drafts: [String: String]
+    }
+    var draftHandoff: DraftHandoff?
+    var temporaryDraftIDs: Set<String> = []
+
+    func forgetDraftProfile(_ id: String) { agents.removeValue(forKey: id.lowercased()) }
+    var isDropTarget = false
+    var selectionRevision: UInt64 = 0
+    private let defaults: UserDefaults?
     @ObservationIgnored private(set) var saved: SavedWorkspace?
     @ObservationIgnored var onChange: (() -> Void)?
     private(set) var order: [WorkspaceTabID]
-    private(set) var agents: [String: SavedWorkspace.Agent]
+    @MainActor @Observable
+    final class AgentProfiles {
+        var entries: [String: SavedWorkspace.Agent]
+        init(_ entries: [String: SavedWorkspace.Agent]) { self.entries = entries }
+    }
+    private let profiles: AgentProfiles
+    private(set) var agents: [String: SavedWorkspace.Agent] {
+        get { profiles.entries }
+        set { profiles.entries = newValue }
+    }
     enum ClosedTab {
         case agent(String)
         case browser(SavedWorkspace.Page, paneIndex: Int)
@@ -98,18 +134,46 @@ final class WorkspaceTabs {
     }
 
     init(defaults: UserDefaults) {
+        family = UUID()
         self.defaults = defaults
         let snapshot = defaults.data(forKey: Self.snapshotKey).flatMap { try? JSONDecoder().decode(SavedWorkspace.self, from: $0) }
         saved = snapshot
-        agents = snapshot?.agents ?? [:]
+        profiles = AgentProfiles(snapshot?.agents ?? [:])
         let legacy = defaults.stringArray(forKey: Self.legacyKey)
         hasSavedAgents = snapshot != nil || legacy != nil
         var seen = Set<WorkspaceTabID>()
         order = (snapshot?.order ?? (legacy ?? []).map(WorkspaceTabID.agent)).filter { seen.insert($0).inserted }
     }
 
+    init(temporaryFor primary: WorkspaceTabs) {
+        family = primary.family
+        defaults = nil
+        profiles = primary.profiles
+        order = []
+        hasSavedAgents = true
+    }
+
+    var selection: WorkspaceTabID? {
+        if browserIsPrimary, let selectedPage { return .browser(selectedPage) }
+        return selectedTaskID.map(WorkspaceTabID.agent)
+    }
+
+    /// Mutate both sides of a transfer before the primary snapshot is written.
+    func removeTransferred(_ tabs: Set<WorkspaceTabID>) {
+        order.removeAll(where: tabs.contains)
+        recentlyClosed.removeAll { tabs.contains($0.content.tab) }
+        selectionRevision &+= 1
+    }
+
+    func insertTransferred(_ tabs: [WorkspaceTabID], before target: WorkspaceTabID?) {
+        let index = target.flatMap { order.firstIndex(of: $0) } ?? order.count
+        order.insert(contentsOf: tabs, at: index)
+        let moved = Set(tabs)
+        recentlyClosed.removeAll { moved.contains($0.content.tab) }
+    }
+
     func save(_ snapshot: SavedWorkspace) {
-        guard saved != snapshot, let data = try? JSONEncoder().encode(snapshot) else { return }
+        guard let defaults, saved != snapshot, let data = try? JSONEncoder().encode(snapshot) else { return }
         defaults.set(data, forKey: Self.snapshotKey)
         saved = snapshot
         hasSavedAgents = true
@@ -195,7 +259,7 @@ final class WorkspaceTabs {
             if ids.contains(tab.id) { return tab }
             return localForThread[AgentTask.identityKey(tab.id)].map(WorkspaceTabID.agent)
         }.filter { seen.insert($0).inserted }
-        if !hasSavedAgents || (hadOpenAgents && !order.contains { $0.kind == .agent }) {
+        if defaults != nil && (!hasSavedAgents || (hadOpenAgents && !order.contains { $0.kind == .agent })) {
             let seed = tasks.filter { $0.id == tasks.first?.id || $0.status == .running }
             order.insert(contentsOf: seed.map { .agent($0.id) }, at: 0)
         }
@@ -209,9 +273,7 @@ final class WorkspaceTabs {
 
 extension AppState {
     var primaryBrowserID: UUID? {
-        guard workspaceTabs.browserIsPrimary, let id = browserSession.selectedTabID,
-              let tab = browserSession.workspaceBrowserTabs.first(where: { $0.id == id }) else { return nil }
-        return tab.workspaceID
+        workspaceTabs.browserIsPrimary ? displayedBrowserTab?.workspaceID : nil
     }
 
     var openWorkspaceTabs: [WorkspaceTabID] {
@@ -266,7 +328,7 @@ extension AppState {
             guard tasks.contains(where: { $0.id == tab.id }) else { return }
             selectTask(tab.id)
         case .browser:
-            guard let id = UUID(uuidString: tab.id),
+            guard workspaceTabs.order.contains(tab), let id = UUID(uuidString: tab.id),
                   let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == id }) else { return }
             browserSession.selectTab(page.id)
             if mixesBrowserTabsInSidebar {
@@ -277,7 +339,7 @@ extension AppState {
     }
 
     func newWorkspaceBrowserTab(url: URL = EmbeddedBrowserURLPolicy.newTabURL) {
-        guard !approvalGateBlocksInteraction, presentedSheet == nil else { return }
+        guard !workspaceTabs.isClosed, !approvalGateBlocksInteraction, presentedSheet == nil else { return }
         do {
             let id = try browserSession.createTab(url: url)
             if let page = browserSession.humanTab(id: id) { selectWorkspaceTab(.browser(page.workspaceID)) }
@@ -287,7 +349,7 @@ extension AppState {
     }
 
     func closeWorkspaceTab(_ tab: WorkspaceTabID) {
-        guard !approvalGateBlocksInteraction, presentedSheet == nil else { return }
+        guard !workspaceTabs.isClosed, workspaceTabs.order.contains(tab), !approvalGateBlocksInteraction, presentedSheet == nil else { return }
         switch tab.kind {
         case .agent:
             guard openWorkspaceTabs.contains(tab) else { return }

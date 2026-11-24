@@ -148,6 +148,23 @@ enum AgentRuntimeEvent: Sendable {
     case connectionChanged(RuntimeConnectionState)
 }
 
+extension AgentRuntimeEvent {
+    var workspaceTaskID: String? {
+        switch self {
+        case .websiteSessionCleanupUpdated(let receipt): receipt.taskID
+        case .taskUpserted(let task): task.id
+        case .taskThreadBound(let id, _), .taskCompletionObserved(let id, _, _),
+             .timelineEntryAppended(let id, _), .turnDiffUpdated(let id, _, _),
+             .assistantMessageDelta(let id, _, _), .assistantMessagePhaseUpdated(let id, _, _),
+             .assistantMessagesDiscarded(let id), .reasoningMessageUpdated(let id, _, _),
+             .reasoningMessagesDiscarded(let id), .taskStatusChanged(let id, _),
+             .contextUsageUpdated(let id, _), .contextCompactionChanged(let id, _): id
+        case .approvalRequested(let request): request.taskID
+        case .tasksSnapshot, .codexCLIUsageUpdated, .approvalResolved, .connectionChanged: nil
+        }
+    }
+}
+
 enum RuntimeConnectionState: Equatable, Sendable {
     case disconnected
     case connecting
