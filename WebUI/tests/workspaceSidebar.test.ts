@@ -67,10 +67,10 @@ test('pinned tabs appear once above regular tabs, and filtering hides empty sect
   }
   expect(render('')).toContain('aria-label="Unpin tab: Trips"');
   expect(render('')).toContain('aria-label="Pin tab: New tab"');
-  snapshot.workspaceBrowsers![1].canPin = true;
+  snapshot.workspaceBrowsers![1].pinIsTemporary = false;
   expect(render('')).toContain('aria-label="Pin tab: New tab"');
-  snapshot.workspaceBrowsers![1].canPin = false;
-  expect(render('')).not.toContain('aria-label="Pin tab: New tab"');
+  snapshot.workspaceBrowsers![1].pinIsTemporary = true;
+  expect(render('')).toContain('aria-label="Pin tab for this session: New tab"');
   expect(render('')).toContain('aria-label="Close tab: New tab"');
   expect(render('rail.example')).toContain('data-section="pinned"');
   expect(render('rail.example')).not.toContain('data-section="tabs"');

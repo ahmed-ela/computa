@@ -797,6 +797,28 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
         try await inspect("document.querySelectorAll('.workspace-pin').length === 3 && !document.querySelector('.sidebar-section-heading')")
         try await inspect("Array.from(document.querySelectorAll('.workspace-pin')).every(button => getComputedStyle(button).pointerEvents === 'auto')")
+        // Exercise the shipped row's secondary-click through the bridge, including the icon-only rail.
+        let bridge = try XCTUnwrap(ui.navigationDelegate as? WebBridge)
+        var menuTitles: [String] = []
+        bridge.presentTabMenu = { menu in
+            guard let item = menu.items.first else { return XCTFail("Missing pin action") }
+            menuTitles.append(item.title)
+            menu.performActionForItem(at: 0)
+        }
+        for compact in [true, false] {
+            state.isTaskSidebarCollapsed = compact
+            try await inspect(compact ? "!!document.querySelector('.agent-rail')" : "!document.querySelector('.agent-rail')")
+            for id in [agent, page.uuidString] {
+                for pinned in [true, false] {
+                    let row = "document.querySelector('[data-drag-id=\"\(id)\"]')"
+                    _ = try await ui.evaluateJavaScript("\(row).dispatchEvent(new MouseEvent('contextmenu', {bubbles:true, cancelable:true, button:2}));true")
+                    try await inspect("(\(row).dataset.pinned === 'true') === \(pinned)")
+                    XCTAssertEqual(menuTitles.last, pinned ? "Pin Tab" : "Unpin Tab")
+                    XCTAssertEqual(state.selectedWorkspaceTab, .agent(selected))
+                }
+            }
+        }
+        XCTAssertEqual(menuTitles.count, 8)
         try await pressPin(agent)
         try await inspect("document.querySelector('h2[data-section=pinned] .lucide-pin') && document.querySelectorAll('[data-pinned=true]').length === 1")
         try await inspect("""
@@ -882,6 +904,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try await pin(link)
         let script = try await openChild("const child = window.open('about:blank'); child.location.assign('/model/final#section')")
         try await pin(script)
+        // Pin before a blank child has a destination. Only its first eligible committed URL is saved.
+        let pending = try await openChild("window.open('about:blank')")
+        try await pin(pending)
+        XCTAssertNil(browser.restorablePage(for: pending, pinned: true))
+        let pendingView = try XCTUnwrap(browser.webView(for: pending.id))
+        _ = try await pendingView.evaluateJavaScript("location.assign('\(root.appendingPathComponent("human/final"))');true")
+        try await check(pendingView, "document.title === 'Popup pin fixture'")
+        XCTAssertEqual(browser.restorablePage(for: pending, pinned: true)?.url, root.appendingPathComponent("human/final"))
         let linkView = try XCTUnwrap(browser.webView(for: link.id))
         _ = try await linkView.evaluateJavaScript("history.pushState({}, '', '/callback?code=private&state=fixture');true")
         let login = try await openChild("window.open('/model/final#access_token=temporary')")
@@ -890,11 +920,15 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         _ = try await loginView.evaluateJavaScript("location.replace('/human/final');true")
         try await check(loginView, "location.pathname === '/human/final' && document.title === 'Popup pin fixture'")
         let loginRow = "document.querySelector('[data-drag-id=\"\(login.workspaceID)\"]')"
-        try await check(ui, "!!\(loginRow) && !\(loginRow).querySelector('.workspace-pin')")
-        XCTAssertFalse(browser.prepareToPin(login))
-        let pins = [direct, link, script].map { WorkspaceTabID.browser($0.workspaceID) }
+        try await check(ui, "\(loginRow)?.querySelector('.workspace-pin')?.title === 'Pin tab for this session'")
+        try await pin(login)
+        XCTAssertNil(browser.restorablePage(for: login, pinned: true))
+        let scriptView = try XCTUnwrap(browser.webView(for: script.id))
+        try await check(scriptView, "location.hash === '#section' && document.title === 'Popup pin fixture'")
+        XCTAssertEqual(browser.restorablePage(for: script, pinned: true)?.url?.fragment, "section")
+        let pins = [direct, link, script, pending].map { WorkspaceTabID.browser($0.workspaceID) }
         state.selectWorkspaceTab(pins[1])
-        XCTAssertEqual(Array(state.workspaceTabs.pinnedTabs), pins)
+        XCTAssertEqual(Array(state.workspaceTabs.pinnedTabs), pins + [.browser(login.workspaceID)])
         _ = await state.shutdownRuntime()
 
         let nextBrowser = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
