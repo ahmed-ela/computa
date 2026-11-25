@@ -23,6 +23,10 @@ struct SidebarRailGeometry: Codable, Equatable, Sendable {
 @MainActor
 final class SidebarRail: NSResponder {
     static let expandedWidth: CGFloat = 230
+    static let transitionDuration: TimeInterval = 0.14
+    static let transitionCurve = UnitCurve.bezier(
+        startControlPoint: .init(x: 0.65, y: 0), endControlPoint: .init(x: 0.35, y: 1)
+    )
     var onHover: (Bool) -> Void = { _ in }
     override func mouseEntered(with event: NSEvent) { onHover(true) }
     override func mouseExited(with event: NSEvent) { onHover(false) }

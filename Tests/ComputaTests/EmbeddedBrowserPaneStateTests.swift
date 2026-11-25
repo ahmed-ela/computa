@@ -1665,17 +1665,21 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                     window.sidebarObserver = new ResizeObserver(sample);
                     window.sidebarObserver.observe(sidebar);
                     const shell = sidebar.closest('.app-shell');
-                    if (document.hidden && !shell.hasAttribute('data-browser-primary')) {
-                        // An offscreen XCTest window has a paused CSS clock. Sample the actual
-                        // transition at known times using the same visible-window stylesheet.
-                        document.documentElement.setAttribute('data-page-visible', '');
+                    window.sidebarTiming = [];
+                    if (!shell.hasAttribute('data-browser-primary') && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                        // Seek the actual CSS transition so a missed display frame cannot change the measured curve.
+                        if (document.hidden) document.documentElement.setAttribute('data-page-visible', '');
                         const changed = new MutationObserver(() => {
                             changed.disconnect();
                             const transition = sidebar.getAnimations().find(a => a.transitionProperty === 'flex-basis');
                             if (transition) {
+                                transition.pause();
+                                const duration = transition.effect.getTiming().duration;
+                                window.sidebarTiming.push(duration);
                                 for (const fraction of [0.25, 0.5, 0.75]) {
-                                    transition.currentTime = transition.effect.getTiming().duration * fraction;
+                                    transition.currentTime = duration * fraction;
                                     sample();
+                                    window.sidebarTiming.push(sidebar.getBoundingClientRect().width);
                                 }
                                 transition.finish();
                             }
@@ -1700,6 +1704,17 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 XCTAssertTrue(intermediate.isEmpty, "Reduce Motion should snap to the final width: \(widths)")
             } else {
                 XCTAssertFalse(intermediate.isEmpty, "The divider should travel between \(start) and \(end): \(widths)")
+                if state.primaryBrowserID == nil {
+                    let trace = try await shell.evaluateJavaScript("window.sidebarTiming")
+                    let timing = try XCTUnwrap(trace as? [Double])
+                    let duration = try XCTUnwrap(timing.first)
+                    XCTAssertEqual(duration, 140, accuracy: 0.01)
+                    XCTAssertEqual(duration, SidebarRail.transitionDuration * 1000, accuracy: 0.01)
+                    let webPercent = timing.dropFirst().map { Int((100 * ($0 - start) / (end - start)).rounded()) }
+                    let nativePercent = [0.25, 0.5, 0.75].map { Int((100 * SidebarRail.transitionCurve.value(at: $0)).rounded()) }
+                    XCTAssertEqual(webPercent, [7, 50, 93])
+                    XCTAssertEqual(nativePercent, webPercent)
+                }
             }
         }
 

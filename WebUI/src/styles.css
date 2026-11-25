@@ -61,8 +61,8 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
   display: flex; width: var(--sidebar-width); flex: 0 0 var(--sidebar-width); flex-direction: column; overflow: hidden;
   box-shadow: inset -1px 0 var(--border); background: var(--sidebar); user-select: none;
 }
-/* A native browser page shares a moving split with the sidebar and supplies its width. */
-:root[data-page-visible] .app-shell:not([data-browser-primary="native"]) .sidebar { transition: flex-basis 140ms ease-in-out; }
+/* For a native browser page, SidebarRail applies the same curve to the split itself. */
+:root[data-page-visible] .app-shell:not([data-browser-primary="native"]) .sidebar { transition: flex-basis 140ms cubic-bezier(0.65, 0, 0.35, 1); }
 /* The native Settings controls overlay this space. The sidebar owns its width. */
 .app-shell[data-native-host] .sidebar::after {
   content: ""; flex: 0 0 34px; box-sizing: border-box; border-top: 1px solid var(--border);
