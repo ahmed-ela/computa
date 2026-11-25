@@ -871,14 +871,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             if !ok { throw CocoaError(.coderInvalidValue) }
         }
         try await requireDOM("!!document.querySelector('.composer-shell textarea') && document.querySelectorAll('.task-row').length === 1")
-        let iconURL = try XCTUnwrap(WebUIResourceLocator.indexURL?.deletingLastPathComponent()
-            .appendingPathComponent("icons/new-browser-tab.svg"))
-        XCTAssertNotNil(NSImage(contentsOf: iconURL))
-        try await requireDOM("""
-        (() => { const icon = document.querySelector('button[aria-label="New tab"] .new-browser-tab-icon');
-          return icon && getComputedStyle(icon).maskImage.includes('/icons/new-browser-tab.svg')
-            && icon.getBoundingClientRect().width === 16; })()
-        """)
+        let newTabPlus = """
+        (() => { const icon = document.querySelector('button[aria-label="New tab"] svg.lucide-plus[aria-hidden="true"]');
+          return icon?.getBoundingClientRect().width === 16; })()
+        """
+        try await requireDOM(newTabPlus)
         _ = try await chat.evaluateJavaScript("""
         const draft = document.querySelector('.composer-shell textarea'); draft.value='Return ticket';
         draft.dispatchEvent(new Event('input', { bubbles:true }));
@@ -932,6 +929,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         _ = try await chat.evaluateJavaScript("document.querySelector('\(toggle)').click(); true")
         try await requireDOM("!!document.querySelector('.agent-rail .site-favicon') && innerWidth === \(railWidth)")
         try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=false] .lucide-panel-left-open')")
+        try await requireDOM(newTabPlus)
         try await requireDOM("!document.querySelector('.workspace-close')")
         func hover(_ entered: Bool, expectedWidth: CGFloat) throws {
             let area = try XCTUnwrap(chat.trackingAreas.first { $0.owner is SidebarRail })

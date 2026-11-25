@@ -125,8 +125,6 @@ struct EmbeddedBrowserPane: View {
         }
     }
 
-    private static let newTabIcon = tabIconAsset("new-browser-tab", fallback: "arrow.up.right.square")
-
     private var browserHeader: some View {
         HStack(spacing: 4) {
             if !usesSidebarTabs { tabPicker }
@@ -146,8 +144,8 @@ struct EmbeddedBrowserPane: View {
 
             if showsNewTabButton {
                 Button { createTab() } label: {
-                    Self.newTabIcon.renderingMode(.template).resizable()
-                        .frame(width: 16, height: 16)
+                    Image(systemName: "plus")
+                        .font(.system(size: 16, weight: .medium))
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
                 }

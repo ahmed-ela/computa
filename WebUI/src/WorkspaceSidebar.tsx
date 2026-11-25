@@ -180,7 +180,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           setSearch('');
           post({ action: nativeHost ? 'openTabLauncher' : 'newWorkspaceBrowserTab' });
         }}>
-        <span className="new-browser-tab-icon" aria-hidden="true" />
+        <Icon name="plus" size={16} />
         <span className={collapsed ? 'sr-only' : undefined}>New tab</span></Button>}
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
