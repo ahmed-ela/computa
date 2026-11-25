@@ -131,9 +131,7 @@ struct WebWorkspaceView: View {
                     },
                     showAccessModeSettings: { showsAccessModeSettings = true }
                 )
-                .frame(minWidth: browserPrimary ? sidebarWidth : 600,
-                       idealWidth: browserPrimary ? sidebarWidth : 640,
-                       maxWidth: browserPrimary ? sidebarWidth : .infinity, maxHeight: .infinity)
+                .modifier(WorkspaceShellWidth(browserPrimary: browserPrimary, sidebarWidth: sidebarWidth))
                 .animation(
                     browserPrimary && !reduceMotion ? .timingCurve(SidebarRail.transitionCurve, duration: SidebarRail.transitionDuration) : nil,
                     value: compact
@@ -251,6 +249,27 @@ struct WebWorkspaceView: View {
             set: { windowTabs.isAPIProvidersPresented = $0 })) {
             APIProviderSettingsView(settings: state.apiProviderSettings, alibabaSetupID: state.alibabaSetupID)
         }
+    }
+}
+
+// Lay out each intermediate split width. An implicit animation on the WebKit
+// surface itself shifts its contents around the center as it resizes.
+private nonisolated struct WorkspaceShellWidth: AnimatableModifier {
+    let browserPrimary: Bool
+    var sidebarWidth: CGFloat
+
+    var animatableData: CGFloat {
+        get { sidebarWidth }
+        set { sidebarWidth = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .frame(minWidth: browserPrimary ? sidebarWidth : 600,
+                   idealWidth: browserPrimary ? sidebarWidth : 640,
+                   maxWidth: browserPrimary ? sidebarWidth : .infinity,
+                   maxHeight: .infinity, alignment: .leading)
+            .transaction { if browserPrimary { $0.animation = nil } }
     }
 }
 
