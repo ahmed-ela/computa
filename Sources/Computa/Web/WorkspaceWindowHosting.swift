@@ -97,9 +97,30 @@ final class WorkspaceWindowHosting: NSObject {
         }
     }
 
-    func newWindow() {
-        guard let state, let openScene else { return }
-        openScene(state.workspaceWindows.createTemporary().id)
+    enum NewItem { case browser, agent, window }
+
+    /// Route the File menu to the originating window even when a page owns the keyboard.
+    func open(_ item: NewItem, from origin: NSWindow?, showWindow: (WorkspaceTabs) -> Void) {
+        guard let state, !state.isShuttingDown, !state.approvalGateBlocksInteraction,
+              origin?.attachedSheet == nil, origin?.sheetParent == nil else { return }
+        let current = origin.flatMap(host(for:))?.tabs
+        let source = current ?? state.workspaceWindows.focused
+        guard source.presentedSheet == nil, !source.isAPIProvidersPresented else { return }
+
+        let primary = state.workspaceWindows.primary
+        let target: WorkspaceTabs
+        if item == .window && (!hosts.isEmpty || primary.newAgentDraft != nil) {
+            target = state.workspaceWindows.createTemporary()
+        } else {
+            target = current ?? primary
+        }
+        state.workspaceWindows.withWindow(target) {
+            switch item {
+            case .browser: target.requestedBrowserAddress = state.newWorkspaceBrowserTab()
+            case .agent, .window: state.presentNewAgent()
+            }
+        }
+        if target !== current { showWindow(target) }
     }
 
     func bringForward(_ tabs: WorkspaceTabs) { hosts[tabs.id]?.window?.makeKeyAndOrderFront(nil) }
@@ -108,7 +129,8 @@ final class WorkspaceWindowHosting: NSObject {
         guard let state, let window, let host = host(for: window), window.attachedSheet == nil,
               !state.approvalGateBlocksInteraction, host.tabs.presentedSheet == nil, !host.tabs.isAPIProvidersPresented else { return }
         state.workspaceWindows.withWindow(host.tabs) {
-            if let tab = state.commandTab(inBrowserPane: inBrowserPane) { state.closeWorkspaceTab(tab) }
+            if host.tabs.showsNewAgent && !inBrowserPane { host.tabs.showsNewAgent = false }
+            else if let tab = state.commandTab(inBrowserPane: inBrowserPane) { state.closeWorkspaceTab(tab) }
         }
         if host.tabs.order.isEmpty { window.performClose(nil) }
     }

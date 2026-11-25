@@ -654,17 +654,17 @@ function Conversation({ snapshot, task, draftState }: { snapshot: AppSnapshot; t
   const handledLaunch = useRef<string>();
   useEffect(() => {
     const launch = snapshot.launcherChat;
-    if (!launch || launch.taskID !== task.id || handledLaunch.current === task.id ||
+    if (!launch || launch.taskID !== task.id || handledLaunch.current === launch.id ||
         snapshot.pendingApprovalCount || snapshot.isSettingsPresented || snapshot.primaryBrowserID) return;
-    handledLaunch.current = task.id;
+    handledLaunch.current = launch.id;
     if (launch.unsentDraft) {
       setDraft(launch.unsentDraft);
       const reason = isValidPrompt(launch.unsentDraft) ? 'Choose an available model to send this draft.' : 'Shorten this draft before sending.';
       setSubmissionErrors(current => ({ ...current, [task.id]: reason }));
     }
     document.getElementById('task-prompt')?.focus();
-    post({ action: 'launcherChatReady', taskID: task.id });
-  }, [snapshot.launcherChat?.taskID, task.id, snapshot.pendingApprovalCount, snapshot.isSettingsPresented, snapshot.primaryBrowserID]);
+    post({ action: 'launcherChatReady', taskID: task.id, requestID: launch.id });
+  }, [snapshot.launcherChat?.id, snapshot.launcherChat?.taskID, task.id, snapshot.pendingApprovalCount, snapshot.isSettingsPresented, snapshot.primaryBrowserID]);
   const rows = activityTimeline(task);
   return (
     <div className={`conversation-column ${rows.length === 0 && !snapshot.isReviewPresented ? 'is-empty' : ''} ${snapshot.isReviewPresented ? 'is-reviewing' : ''}`}>
@@ -944,7 +944,7 @@ export function App() {
   const focusSearchOnExpand = useRef(false);
   const currentSnapshot = useRef(snapshot);
   currentSnapshot.current = snapshot;
-  const selectedTask = snapshot?.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
+  const selectedTask = snapshot?.newAgentDraft ?? snapshot?.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
 
   useEffect(() => observeDisplayedCompletion(() => currentSnapshot.current, {
     visible: () => document.visibilityState === 'visible',
@@ -1033,7 +1033,7 @@ export function App() {
 
   if (!snapshot) return nativeHost ? <LoadingView /> : <BridgeUnavailableView />;
 
-  const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
+  const task = selectedTask;
   return (
     <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined} data-native-sidebar-controls={snapshot.nativeSidebarControls || undefined}
       data-browser-primary={snapshot.primaryBrowserID && !snapshot.isSettingsPresented ? (nativeHost ? "native" : "preview") : undefined}

@@ -26,7 +26,7 @@ struct BrowserAddressPalette: View {
         self.tab = tab
         self.focusRequest = focusRequest
         self.close = close
-        _text = State(initialValue: tab.url?.absoluteString ?? "")
+        _text = State(initialValue: (tab.url ?? state.browserSession.webView(for: tab.id)?.url)?.absoluteString ?? "")
     }
 
     private enum Choice: Hashable {
@@ -77,6 +77,7 @@ struct BrowserAddressPalette: View {
                 error = nil
             }), placeholder: "Search or enter a website address",
                 label: "Website address", identifier: "browser-address", focusRequest: focusRequest,
+                protectFocus: { state.browserSession.protectCommandField($0, on: tab.id, active: $1) },
                 move: { selectedIndex = min(max(0, selectedIndex + $0), max(0, choices.count - 1)) },
                 submit: { value in
                     let current = rows(for: value)
@@ -100,7 +101,7 @@ struct BrowserAddressPalette: View {
 
     private func perform(_ choice: Choice, _ input: String) {
         let session = state.browserSession
-        guard !window.isClosed, window.browserIsPrimary, window.selectedPage == tab.workspaceID,
+        guard !window.isClosed, state.addressableBrowserPage(in: window) == tab.workspaceID,
               !state.approvalGateBlocksInteraction, window.presentedSheet == nil else { close(); return }
         switch choice {
         case .navigate:

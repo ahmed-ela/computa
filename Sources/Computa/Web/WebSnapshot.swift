@@ -32,6 +32,7 @@ struct WorkspaceBrowserSnapshot: Codable, Equatable, Sendable {
 }
 
 struct LauncherChat: Codable, Equatable, Sendable {
+    var id = UUID()
     let taskID: String
     let unsentDraft: String?
 }
@@ -58,6 +59,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let canStartFresh: Bool
     let savedChats: [SavedChatSummary]
     let savedChatSelection: AppState.SavedChatSelection?
+    let newAgentDraft: WebTaskSnapshot?
     let tasks: [WebTaskSnapshot]
     let pendingApprovalCount: Int
     let connection: WebConnectionSnapshot
@@ -89,6 +91,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         self.titlebarHeight = titlebarHeight
         allowsBrowserSidePane = state.workspaceLayout.allowsBrowserSidePane
         mixesBrowserTabsInSidebar = state.mixesBrowserTabsInSidebar
+        launcherChat = state.workspaceTabs.launcherChat
         draftHandoff = state.workspaceTabs.draftHandoff
         sidebarDropTarget = state.workspaceTabs.isDropTarget ? true : nil
         workspaceOrder = state.openWorkspaceTabs
@@ -102,7 +105,8 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         } : []
         primaryBrowserID = state.primaryBrowserID?.uuidString
         selectedTaskID = state.selectedTaskID
-        selectedEntryID = state.selectedEntryID
+        newAgentDraft = state.workspaceTabs.showsNewAgent ? state.workspaceTabs.newAgentDraft.map { WebTaskSnapshot($0.task, modelSelectable: state.canChangeModel(for: $0.task.id)) } : nil
+        selectedEntryID = newAgentDraft == nil ? state.selectedEntryID : nil
         selectedAgentProfile = state.selectedTask.flatMap { state.workspaceTabs.agent(for: $0) }
         canStartFresh = state.selectedTask.map(state.canStartFresh) ?? false
         var names = state.workspaceTabs.agents.mapValues(\.name)

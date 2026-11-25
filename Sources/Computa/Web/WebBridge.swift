@@ -27,8 +27,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private weak var webView: WKWebView?
     private var latestSnapshot: WebUISnapshot?
     private var nextRevision: UInt64 = 0
+    var onComposerReady: ((UUID) -> Void)?
     private var pageIsReady = false
-    private let consumeLauncherChat: (String) -> Bool
+    private let consumeLauncherChat: (String, UUID) -> Bool
     private let showAccessModeSettings: () -> Void
     private let openScreenRecordingSettings: (URL) -> Bool
 
@@ -41,7 +42,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         state: AppState,
         window: WorkspaceTabs? = nil,
         openScreenRecordingSettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
-        consumeLauncherChat: @escaping (String) -> Bool = { _ in false },
+        consumeLauncherChat: @escaping (String, UUID) -> Bool = { _, _ in false },
         showAccessModeSettings: @escaping () -> Void = {}
     ) {
         self.state = state
@@ -101,7 +102,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             guard let id = body["id"] as? String, windowTabs.draftHandoff?.id.uuidString == id else { return }
             windowTabs.draftHandoff = nil
         case "setComposerDraft":
-            guard let id = body["taskID"] as? String, windowTabs.order.contains(.agent(id)),
+            guard let id = body["taskID"] as? String, windowTabs.newAgentDraft?.task.id == id || windowTabs.order.contains(.agent(id)),
                   let text = body["text"] as? String, text.utf16.count <= 200_000 else { return }
             state.composerDrafts[id] = text.isEmpty ? nil : text
         case "beginWorkspaceTabDrag":
@@ -147,8 +148,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             WorkspaceTabLauncher.request(in: webView?.window)
 
         case "launcherChatReady":
-            guard let id = body["taskID"] as? String, consumeLauncherChat(id), let webView else { return }
-            webView.window?.makeFirstResponder(webView)
+            guard let id = body["taskID"] as? String, let raw = body["requestID"] as? String,
+                  let request = UUID(uuidString: raw), consumeLauncherChat(id, request), let webView else { return }
+            if webView.window?.makeFirstResponder(webView) == true { onComposerReady?(request) }
 
         case "newWorkspaceBrowserTab":
             state.newWorkspaceBrowserTab()
@@ -206,12 +208,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             state.openAgentHistory(taskID: id, conversationID: conversation)
 
         case "createTask":
-            state.createTask()
+            state.presentNewAgent()
 
         case "prepareWebsiteModel":
             guard Set(body.keys) == ["action", "taskID"],
-                  let taskID = body["taskID"] as? String, taskID == state.selectedTaskID,
-                  state.tasks.contains(where: { $0.id == taskID }) else { return }
+                  let taskID = body["taskID"] as? String, taskID == state.selectedTask?.id else { return }
             state.prepareWebsiteModel(taskID: taskID)
 
         case "refreshCodexCLIUsage":
@@ -224,7 +225,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                   let requestID = body["requestID"] as? String
             else { return }
             let profile = WebsiteDispatchProfile.begin(taskID: taskID,
-                modelID: state.tasks.first(where: { $0.id == taskID })?.model ?? "",
+                modelID: windowTabs.newAgentDraft.flatMap { $0.task.id == taskID ? $0.task.model : nil }
+                    ?? state.tasks.first(where: { $0.id == taskID })?.model ?? "",
                 requestID: requestID, origin: .webUI)
             profile?.mark(.bridgeReceived)
             WebsiteDispatchProfile.$current.withValue(profile) {

@@ -15,15 +15,16 @@ struct WebWorkspaceView: View {
 
     @State private var sidebarRail = SidebarRailGeometry.fallback
     @State private var sidebarPeeked = false
+    @State private var launcherError: String?
     @State private var launcherPresented = false
     @State private var editingBrowserID: UUID?
     @State private var addressFocusRequest = 0
-    @State private var launcherChat: LauncherChat?
 
     private var commandPanelPresented: Bool { launcherPresented || editingBrowserID != nil }
 
     private func openBrowserAddress() {
-        guard launcherAllowed, !launcherPresented, windowTabs.browserIsPrimary, let id = windowTabs.selectedPage else { return }
+        guard launcherAllowed, let id = state.addressableBrowserPage(in: windowTabs) else { return }
+        launcherPresented = false
         editingBrowserID = id
         addressFocusRequest &+= 1
     }
@@ -31,10 +32,9 @@ struct WebWorkspaceView: View {
     private func closeBrowserAddress() {
         let editedID = editingBrowserID
         editingBrowserID = nil
-        guard launcherAllowed, let editedID, windowTabs.browserIsPrimary, editedID == windowTabs.selectedPage,
-              let tab = state.browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == editedID }),
-              let page = state.browserSession.webView(for: tab.id) else { return }
-        page.window?.makeFirstResponder(page)
+        guard launcherAllowed, let editedID, state.addressableBrowserPage(in: windowTabs) == editedID,
+              let tab = state.browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == editedID }) else { return }
+        state.browserSession.focusPageAfterEditing(tab.id)
     }
 
     private var launcherAllowed: Bool {
@@ -45,12 +45,12 @@ struct WebWorkspaceView: View {
     private func openLauncher() {
         guard launcherAllowed else { return }
         editingBrowserID = nil
+        launcherError = nil
         launcherPresented = true
     }
 
     private func launch(_ destination: NewTabDestination, text: String) {
         guard launcherPresented, launcherAllowed, !windowTabs.isClosed else { return }
-        launcherPresented = false
         state.workspaceWindows.withWindow(windowTabs) { openTab(destination, text: text) }
     }
 
@@ -59,19 +59,14 @@ struct WebWorkspaceView: View {
         switch destination {
         case .browser:
             guard let url = query.isEmpty ? EmbeddedBrowserURLPolicy.newTabURL : try? EmbeddedBrowserURLPolicy.searchURL(for: query) else { return }
+            launcherPresented = false
             state.newWorkspaceBrowserTab(url: url)
         case .agent:
             if state.isReviewPresented { state.toggleReview() }
-            state.createTask()
-            guard let task = state.selectedTask else { return }
-            // Accept against the new task before a second shortcut can change selection.
-            var unsentDraft: String?
-            if !query.isEmpty {
-                let available = LocalModelOption.availableForNewPrompt(task.model, in: state.modelOptions)
-                let accepted = available && state.acceptPrompt(prompt: query, taskID: task.id, requestID: task.id)
-                if !accepted { unsentDraft = query }
-            }
-            launcherChat = LauncherChat(taskID: task.id, unsentDraft: unsentDraft)
+            do {
+                windowTabs.launcherChat = try state.launchNewAgent(prompt: query)
+                launcherPresented = false
+            } catch { launcherError = error.localizedDescription }
         }
     }
 
@@ -82,7 +77,18 @@ struct WebWorkspaceView: View {
         .focusedSceneValue(\.tabWorkspace, state)
         .focusedSceneValue(\.browserPageCommandsAllowed, launcherAllowed && !commandPanelPresented)
         .onChange(of: windowTabs.isSidebarCollapsed) { _, _ in sidebarPeeked = false }
-        .onChange(of: windowTabs.browserIsPrimary ? windowTabs.selectedPage : nil) { _, current in
+        .onChange(of: windowTabs.requestedBrowserAddress, initial: true) { _, requested in
+            guard let requested else { return }
+            windowTabs.requestedBrowserAddress = nil
+            if requested == state.addressableBrowserPage(in: windowTabs) { openBrowserAddress() }
+        }
+        .onChange(of: windowTabs.launcherChat?.id) { _, request in
+            if request != nil && windowTabs.showsNewAgent {
+                launcherPresented = false
+                editingBrowserID = nil
+            }
+        }
+        .onChange(of: state.addressableBrowserPage(in: windowTabs)) { _, current in
             if current != editingBrowserID { editingBrowserID = nil }
         }
         .onChange(of: commandPanelPresented) { _, presented in if presented { sidebarPeeked = false } }
@@ -105,7 +111,6 @@ struct WebWorkspaceView: View {
         var snapshot = WebUISnapshot(state: state, titlebarHeight: rowHeight)
         snapshot.sidebarRail = sidebarRail
         snapshot.isTaskSidebarPeeked = sidebarPeeked
-        snapshot.launcherChat = launcherChat
         return ZStack(alignment: .center) {
             HSplitView {
                 CodexWebView(
@@ -116,10 +121,10 @@ struct WebWorkspaceView: View {
                     setSidebarPeeked: { sidebarPeeked = $0 },
                     openTabLauncher: openLauncher,
                     openBrowserAddress: openBrowserAddress,
-                    consumeLauncherChat: { id in
-                        guard launcherChat?.taskID == id else { return false }
-                        launcherChat = nil
-                        return windowTabs.selectedTaskID == id && !windowTabs.browserIsPrimary && launcherAllowed && !launcherPresented
+                    consumeLauncherChat: { id, request in
+                        guard windowTabs.launcherChat?.taskID == id, windowTabs.launcherChat?.id == request else { return false }
+                        windowTabs.launcherChat = nil
+                        return windowTabs.presentedTaskID == id && !windowTabs.showsPrimaryBrowser && launcherAllowed && !commandPanelPresented
                     },
                     showAccessModeSettings: { showsAccessModeSettings = true }
                 )
@@ -141,7 +146,7 @@ struct WebWorkspaceView: View {
                         workspacePageID: browserPrimary ? selectedPageID : nil,
                         showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
                         titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
-                        isInteractionBlocked: state.approvalGateBlocksInteraction,
+                        isInteractionBlocked: state.approvalGateBlocksInteraction || commandPanelPresented,
                         canLoadModels: state.canRefreshWebsiteModels,
                         modelSetupStatus: state.websiteModelSetupStatus(for:),
                         onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
@@ -177,7 +182,9 @@ struct WebWorkspaceView: View {
             } else if launcherPresented && launcherAllowed {
                 Color.black.opacity(0.10).onTapGesture { launcherPresented = false }
                 WorkspaceTabLauncher(library: ChromeProfileLibrary(profile: state.browserSession.workspaceProfileID),
-                                     launch: launch, openPage: { url in
+                                     error: launcherError, protectFocus: { field, active in
+                    if let selectedPageID { state.browserSession.protectCommandField(field, on: selectedPageID, active: active) }
+                }, launch: launch, openPage: { url in
                     guard launcherPresented, launcherAllowed else { return }
                     launcherPresented = false
                     state.workspaceWindows.withWindow(windowTabs) { state.newWorkspaceBrowserTab(url: url) }
@@ -250,7 +257,7 @@ private struct CodexWebView: NSViewRepresentable {
     let setSidebarPeeked: (Bool) -> Void
     let openTabLauncher: () -> Void
     let openBrowserAddress: () -> Void
-    let consumeLauncherChat: (String) -> Bool
+    let consumeLauncherChat: (String, UUID) -> Bool
     let showAccessModeSettings: () -> Void
 
     func makeCoordinator() -> WebBridge {
@@ -282,6 +289,9 @@ private struct CodexWebView: NSViewRepresentable {
         webView.openTabLauncher = openTabLauncher
         webView.openBrowserAddress = openBrowserAddress
         webView.windowTabs = windowTabs
+        context.coordinator.onComposerReady = { [weak webView] request in
+            webView?.deliverComposerInput(for: request)
+        }
         webView.configureTitlebarControls(state: state)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
@@ -308,6 +318,7 @@ private struct CodexWebView: NSViewRepresentable {
         let shell = webView as? WindowConfiguredWebView
         let compact = snapshot.isTaskSidebarCollapsed && !snapshot.isTaskSidebarPeeked
         let railWidth = compact ? snapshot.sidebarRail.width : SidebarRail.expandedWidth
+        shell?.discardStaleComposerInput()
         shell?.sidebarWidth = railWidth
         shell?.trackSidebar(width: snapshot.isTaskSidebarCollapsed && sidebarControlsEnabled ? railWidth : 0)
         webView.needsLayout = true
@@ -343,6 +354,53 @@ private final class WindowConfiguredWebView: WKWebView {
     let rail = SidebarRail()
     var onSidebarGeometry: ((SidebarRailGeometry) -> Void)?
     private var lastGeometry: SidebarRailGeometry?
+
+    // The native view can receive typing before the local document has painted its composer.
+    // Keep those events in this window and deliver them once to the acknowledged focus request.
+    private var pendingComposerRequest: UUID?
+    private var pendingComposerInput: [NSEvent] = []
+
+    private var composerFocusRequest: UUID? {
+        guard let tabs = windowTabs, !tabs.isClosed, tabs.showsNewAgent,
+              let request = tabs.launcherChat, request.taskID == tabs.presentedTaskID,
+              tabs.presentedSheet == nil, !tabs.isAPIProvidersPresented, state?.approvalGateBlocksInteraction == false
+        else { return nil }
+        return request.id
+    }
+
+    func discardStaleComposerInput() {
+        if pendingComposerRequest != composerFocusRequest {
+            pendingComposerInput.removeAll()
+            pendingComposerRequest = nil
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard event.modifierFlags.intersection([.command, .control]).isEmpty,
+              let request = composerFocusRequest
+        else { super.keyDown(with: event); return }
+        discardStaleComposerInput()
+        pendingComposerRequest = request
+        pendingComposerInput.append(event)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        guard let request = pendingComposerRequest, composerFocusRequest == request,
+              pendingComposerInput.contains(where: { $0.type == .keyDown && $0.keyCode == event.keyCode })
+        else { super.keyUp(with: event); return }
+        pendingComposerInput.append(event)
+    }
+
+    func deliverComposerInput(for request: UUID) {
+        guard pendingComposerRequest == request else { return }
+        let input = pendingComposerInput
+        pendingComposerInput.removeAll()
+        pendingComposerRequest = nil
+        for event in input {
+            if event.type == .keyDown { super.keyDown(with: event) }
+            else { super.keyUp(with: event) }
+        }
+    }
 
     @objc private func titlebarDidChange(_ notification: Notification) { updateSidebarGeometry() }
 
@@ -424,7 +482,7 @@ private final class WindowConfiguredWebView: WKWebView {
 
     @objc private func createChat() {
         guard let state, !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
-        state.createTask()
+        state.presentNewAgent()
         guard WebUIResourceLocator.contains(url) else { return }
         evaluateJavaScript("document.dispatchEvent(new Event('kolmogor-clear-chat-search'))")
     }

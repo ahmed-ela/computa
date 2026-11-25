@@ -89,18 +89,22 @@ struct WorkspaceCommands: Commands {
         isTestHost || state.approvalGateBlocksInteraction || state.presentedSheet != nil
     }
 
+    private func open(_ item: WorkspaceWindowHosting.NewItem) {
+        state.windowHosting.open(item, from: NSApp.keyWindow ?? NSApp.mainWindow) { tabs in
+            if tabs === state.workspaceWindows.primary { openWindow(id: "workspace") }
+            else { openWindow(id: "workspace", value: tabs.id) }
+        }
+    }
+
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Window") {
-                if NSApp.windows.contains(where: { $0.isVisible && $0.canBecomeMain }) { state.windowHosting.newWindow() }
-                else { openWindow(id: "workspace") }
-            }
-            .keyboardShortcut("n", modifiers: .command)
-            .disabled(workspaceUnavailable)
-            Button("New Agent") { state.createTask() }
+            Button("New Window") { open(.window) }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(workspaceUnavailable)
+            Button("New Agent") { open(.agent) }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(workspaceUnavailable)
-            Button("New Tab") { WorkspaceTabLauncher.request(in: NSApp.keyWindow) }
+            Button("New Browser Tab") { open(.browser) }
                 .keyboardShortcut("t", modifiers: .command)
                 .disabled(workspaceUnavailable)
         }
@@ -111,7 +115,7 @@ struct WorkspaceCommands: Commands {
                 }
                 .keyboardShortcut("w", modifiers: .command)
                 .disabled(workspaceUnavailable || (!tabWorkspace.workspaceTabs.order.isEmpty
-                    && tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil))
+                    && !tabWorkspace.workspaceTabs.showsNewAgent && tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil))
             }
             Button("Reopen Closed Tab") { state.reopenClosedTab() }
                 .keyboardShortcut("t", modifiers: [.command, .shift])

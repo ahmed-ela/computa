@@ -5,6 +5,86 @@ import XCTest
 
 @MainActor
 final class WorkspaceWindowTests: XCTestCase {
+    func testNewAgentDoesNotChangeSidebarSearchOrRestoredSelectionUntilFirstSend() throws {
+        let prefs = isolatedTestPreferences()
+        let browser = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
+        defer { browser.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: browser, workspaceLayout: .mixedTabs)
+        state.createTask()
+        let previous = try XCTUnwrap(state.selectedWorkspaceTab)
+        let pageID = try browser.createTab()
+        let page = WorkspaceTabID.browser(try XCTUnwrap(browser.humanTab(id: pageID)?.workspaceID))
+        state.selectWorkspaceTab(page)
+        let order = state.openWorkspaceTabs
+        let saved = try XCTUnwrap(state.workspaceTabs.saved)
+        let draft = state.presentNewAgent()
+        for _ in 0..<5 {
+            XCTAssertEqual(state.presentNewAgent().id, draft.id)
+            let snapshot = WebUISnapshot(state: state)
+            XCTAssertEqual(snapshot.newAgentDraft?.id, draft.id)
+            XCTAssertEqual(snapshot.selectedTaskID, draft.id)
+            XCTAssertFalse(snapshot.tasks.contains { $0.id == draft.id })
+            XCTAssertFalse(snapshot.savedChats.contains { $0.id == draft.id })
+            XCTAssertEqual(snapshot.workspaceOrder, order)
+            XCTAssertNil(snapshot.primaryBrowserID)
+            state.selectWorkspaceTab(page)
+            XCTAssertNil(WebUISnapshot(state: state).newAgentDraft)
+        }
+        state.presentNewAgent()
+        state.composerDrafts[draft.id] = "typed but unsent"
+        state.saveAgentSettings(taskID: draft.id, name: "Review", instructions: "Use the fixture.")
+        state.saveWorkspace()
+        XCTAssertEqual(WorkspaceTabs(defaults: prefs).saved, saved)
+        let afterRestart = WorkspaceTabs(defaults: prefs)
+        XCTAssertEqual(afterRestart.saved?.selectedPage?.uuidString, page.id)
+        XCTAssertNil(afterRestart.newAgentDraft)
+        XCTAssertFalse(state.acceptPrompt(prompt: "   ", taskID: draft.id, requestID: "blank"))
+        XCTAssertFalse(state.acceptPrompt(prompt: String(repeating: "x", count: 200_001), taskID: draft.id, requestID: "too-long"))
+        XCTAssertEqual(state.openWorkspaceTabs, order)
+        state.selectWorkspaceTab(previous)
+        XCTAssertNil(WebUISnapshot(state: state).newAgentDraft)
+        XCTAssertEqual(state.presentNewAgent().id, draft.id)
+        XCTAssertEqual(state.composerText, "typed but unsent")
+        XCTAssertTrue(state.acceptPrompt(prompt: "typed but unsent", taskID: draft.id, requestID: "first"))
+        XCTAssertTrue(state.acceptPrompt(prompt: "typed but unsent", taskID: draft.id, requestID: "first"))
+        XCTAssertFalse(state.acceptPrompt(prompt: "a different message", taskID: draft.id, requestID: "first"))
+        XCTAssertEqual(state.workspaceTabs.agent(for: draft)?.name, "Review")
+        XCTAssertEqual(state.openWorkspaceTabs, [.agent(draft.id)] + order)
+        XCTAssertEqual(state.selectedWorkspaceTab, .agent(draft.id))
+        XCTAssertNil(WebUISnapshot(state: state).newAgentDraft)
+        XCTAssertEqual(state.queuedPromptsForDisplay(taskID: draft.id).count, 1)
+        XCTAssertNil(state.composerDrafts[draft.id])
+        XCTAssertNotEqual(state.presentNewAgent().id, draft.id)
+    }
+
+    func testUnsentComposerBelongsToItsWindowAndCloseLeavesActualTabsAlone() throws {
+        let prefs = isolatedTestPreferences()
+        let browser = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { browser.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: browser, workspaceLayout: .mixedTabs)
+        let primary = state.workspaceWindows.primary
+        let detached = state.workspaceWindows.createTemporary()
+        let draft = state.presentNewAgent()
+        state.workspaceWindows.withWindow(detached) {
+            state.createTask()
+            let previous = state.selectedWorkspaceTab
+            let otherDraft = state.presentNewAgent()
+            XCTAssertNotEqual(draft.id, otherDraft.id)
+            XCTAssertFalse(state.acceptPrompt(prompt: "wrong window", taskID: draft.id, requestID: "foreign"))
+            let window = showWindow(detached, state: state)
+            defer { window.close() }
+            state.windowHosting.closeTabOrWindow(window, inBrowserPane: false)
+            XCTAssertTrue(window.isVisible)
+            XCTAssertEqual(state.selectedWorkspaceTab, previous)
+            XCTAssertEqual(detached.recentlyClosed.count, 0)
+            XCTAssertEqual(state.presentNewAgent().id, otherDraft.id)
+        }
+        state.workspaceWindows.withWindow(primary) {
+            XCTAssertEqual(state.presentNewAgent().id, draft.id)
+            XCTAssertTrue(primary.order.isEmpty)
+        }
+    }
+
     func testPinsFollowTabsThroughUndoBindingFreshContextAndWindowTransfers() throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
