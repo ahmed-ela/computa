@@ -110,10 +110,52 @@ struct WebWorkspaceView: View {
         }
     }
 
+    @ViewBuilder private func titlebarAddressEditor(at anchor: Anchor<CGRect>?) -> some View {
+        if let anchor, launcherAllowed, let editingBrowserID,
+           let tab = state.browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == editingBrowserID }) {
+            GeometryReader { geometry in
+                let rect = geometry[anchor]
+                Color.clear.contentShape(Rectangle()).onTapGesture(perform: closeBrowserAddress)
+                BrowserAddressPalette(state: state, window: windowTabs, tab: tab, focusRequest: addressFocusRequest,
+                                      titlebarHeight: rect.height, close: closeBrowserAddress)
+                    .id(tab.id)
+                    .frame(width: rect.width)
+                    .offset(x: rect.minX, y: rect.minY)
+            }
+        }
+    }
+
+    private func browserPane(rowHeight: CGFloat, topInset: CGFloat, browserPrimary: Bool, titlebarAddress: Bool) -> some View {
+        let selectedPageID = state.displayedBrowserTab?.id
+        let edit: (() -> Void)? = titlebarAddress ? { self.openBrowserAddress() } : nil
+        return EmbeddedBrowserPane(
+            session: state.browserSession,
+            tabRowHeight: rowHeight,
+            usesSidebarTabs: browserPrimary,
+            workspacePageID: browserPrimary ? selectedPageID : nil,
+            openTitlebarAddress: edit,
+            showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
+            titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
+            isInteractionBlocked: state.approvalGateBlocksInteraction || commandPanelPresented,
+            canLoadModels: state.canRefreshWebsiteModels,
+            modelSetupStatus: state.websiteModelSetupStatus(for:),
+            onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
+            canConfigureKimiProfile: state.canConfigureKimiProfile,
+            onSwitchKimiProfile: state.switchKimiSignInProfile(from:),
+            onCloseTab: state.closeWorkspaceTab,
+            onClose: {
+                guard state.workspaceLayout.allowsBrowserSidePane else { return }
+                windowTabs.browserIsPrimary = false
+                state.isBrowserPresented = false
+            }
+        )
+    }
+
     private func workspace(topInset: CGFloat) -> some View {
         // Align the sidebar and any visible pane controls with the native title bar.
         let rowHeight = topInset > 0 ? topInset : 32
         let browserPrimary = state.primaryBrowserID != nil && state.shouldPresentBrowserPane
+        let titlebarAddress = browserPrimary && state.browserAddressPlacement == .titleBar
         let compact = state.isTaskSidebarCollapsed && !sidebarPeeked
         let selectedPageID = state.displayedBrowserTab?.id
         let sidebarWidth = compact ? sidebarRail.width : SidebarRail.expandedWidth
@@ -151,26 +193,7 @@ struct WebWorkspaceView: View {
                 // privileged Octane document or its script-message bridge.
                 // Hiding the pane preserves the session and every tab.
                 if state.shouldPresentBrowserPane {
-                    EmbeddedBrowserPane(
-                        session: state.browserSession,
-                        tabRowHeight: rowHeight,
-                        usesSidebarTabs: browserPrimary,
-                        workspacePageID: browserPrimary ? selectedPageID : nil,
-                        showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
-                        titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
-                        isInteractionBlocked: state.approvalGateBlocksInteraction || commandPanelPresented,
-                        canLoadModels: state.canRefreshWebsiteModels,
-                        modelSetupStatus: state.websiteModelSetupStatus(for:),
-                        onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
-                        canConfigureKimiProfile: state.canConfigureKimiProfile,
-                        onSwitchKimiProfile: state.switchKimiSignInProfile(from:),
-                        onCloseTab: state.closeWorkspaceTab,
-                        onClose: {
-                            guard state.workspaceLayout.allowsBrowserSidePane else { return }
-                            windowTabs.browserIsPrimary = false
-                            state.isBrowserPresented = false
-                        }
-                    )
+                    browserPane(rowHeight: rowHeight, topInset: topInset, browserPrimary: browserPrimary, titlebarAddress: titlebarAddress)
                     .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea(.container, edges: .top)
                     // When this pane opens, the chat already occupies the whole split.
@@ -181,8 +204,11 @@ struct WebWorkspaceView: View {
             .allowsHitTesting(!state.approvalGateBlocksInteraction && !commandPanelPresented)
             .accessibilityHidden(state.approvalGateBlocksInteraction || commandPanelPresented)
             .disabled(state.approvalGateBlocksInteraction)
+            .overlayPreferenceValue(BrowserAddressBounds.self) { anchor in
+                if titlebarAddress { titlebarAddressEditor(at: anchor) }
+            }
 
-            if let editingBrowserID, launcherAllowed,
+            if !titlebarAddress, let editingBrowserID, launcherAllowed,
                let tab = state.browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == editingBrowserID }) {
                 ZStack(alignment: Alignment(horizontal: .center, vertical: .commandFieldCenter)) {
                     Color.black.opacity(0.10)

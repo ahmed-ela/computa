@@ -119,6 +119,10 @@ final class AppState {
     var composerText = ""
     var isInspectorPresented = false
     private static let sidebarCollapsedKey = "taskSidebarCollapsed"
+    private static let addressPlacementKey = "Kolmogor.browserAddressPlacement"
+    var browserAddressPlacement: BrowserAddressPlacement {
+        didSet { preferences.set(browserAddressPlacement.rawValue, forKey: Self.addressPlacementKey) }
+    }
     var isTaskSidebarCollapsed: Bool {
         get { workspaceTabs.isSidebarCollapsed }
         set {
@@ -257,6 +261,8 @@ final class AppState {
         self.runtime = runtime
         self.permissionClient = permissionClient
         self.preferences = preferences
+        browserAddressPlacement = preferences.string(forKey: Self.addressPlacementKey)
+            .flatMap(BrowserAddressPlacement.init(rawValue:)) ?? .titleBar
         self.workspaceLayout = workspaceLayout
         workspaceWindows = WorkspaceWindows(defaults: preferences)
         workspaceWindows.primary.isSidebarCollapsed = preferences.bool(forKey: Self.sidebarCollapsedKey)

@@ -261,6 +261,7 @@ return {
   connection: { state: 'disconnected', label: 'Preview only · no runtime connected', tone: 'neutral' },
   permissions: { accessibility: 'Not granted', screenRecording: 'Not granted' },
   appearance: 'system',
+  browserAddressPlacement: 'titleBar',
   accessMode: 'askEveryTime',
   defaultModel: modelChatGPT,
   providerSetups: ['ChatGPT', 'Gemini', 'Claude', 'Grok', 'Kimi', 'Qwen', 'DeepSeek'].map((name) => ({
@@ -699,6 +700,9 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         return;
       case 'setAppearance':
         publish({ ...snapshot, appearance: action.value });
+        return;
+      case 'setBrowserAddressPlacement':
+        publish({ ...snapshot, browserAddressPlacement: action.value });
         return;
       case 'setDefaultModel':
         if (!isSelectableModel(action.modelID)) return;

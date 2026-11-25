@@ -138,6 +138,9 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     </div>
     {snapshot.mixesBrowserTabsInSidebar && <div className="sidebar-controls-row">
       {sidebarToggle}
+      {nativeHost && snapshot.browserAddressPlacement === 'titleBar' && !currentPage && !collapsed &&
+        <Button variant="ghost" size="icon-xs" aria-label="Open Google in a new tab" title="Open Google in a new tab"
+          onClick={() => post({ action: 'newWorkspaceBrowserTab' })}><Icon name="browser" size={15} /></Button>}
       {nativeHost && currentPage && !collapsed && <div className="sidebar-browser-navigation" role="group" aria-label="Browser navigation">
         <Button variant="ghost" size="icon-xs" aria-label="Back" title="Back" disabled={!currentPage.canGoBack}
           onClick={() => post({ action: 'browserNavigation', id: currentPage.id, command: 'back' })}>
@@ -151,7 +154,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           <Icon name={currentPage.isLoading ? 'x' : 'reload'} size={15} /></Button>
       </div>}
     </div>}
-    {nativeHost && (snapshot.mixesBrowserTabsInSidebar || currentPage) && <button type="button" className="sidebar-address"
+    {nativeHost && snapshot.browserAddressPlacement === 'sidebar' && (snapshot.mixesBrowserTabsInSidebar || currentPage) && <button type="button" className="sidebar-address"
       aria-label={currentPage ? 'Website address' : 'Open Google in a new tab'}
       title={currentPage ? 'Edit website address (⌘L)' : 'Open Google in a new tab'}
       onClick={() => currentPage ? post({ action: 'openBrowserAddress', id: currentPage.id }) : post({ action: 'newWorkspaceBrowserTab' })}>
@@ -177,7 +180,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
           setSearch('');
           post({ action: nativeHost ? 'openTabLauncher' : 'newWorkspaceBrowserTab' });
         }}>
-        <span className="new-browser-tab-icon" aria-hidden="true" />
+        <Icon name="plus" size={16} />
         <span className={collapsed ? 'sr-only' : undefined}>New tab</span></Button>}
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}

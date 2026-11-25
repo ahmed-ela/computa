@@ -1,6 +1,31 @@
 import AppKit
 import SwiftUI
 
+struct BrowserAddressBounds: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
+struct BrowserAddressPill<Content: View>: View {
+    let height: CGFloat
+    let editing: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: editing ? "magnifyingglass" : "globe").foregroundStyle(.secondary).accessibilityHidden(true)
+            content()
+        }
+        .padding(.horizontal, 12)
+        .frame(height: height)
+        .background(Color.primary.opacity(0.055), in: Capsule())
+        .overlay { if editing { Capsule().strokeBorder(.secondary.opacity(0.7), lineWidth: 1.5).allowsHitTesting(false) } }
+        .contentShape(Capsule())
+    }
+}
+
 /// Edits the address of one human browser tab. The new-tab launcher has a separate destination.
 struct BrowserAddressPalette: View {
     static let requestNotification = Notification.Name("Kolmogor.EditBrowserAddress")
@@ -14,17 +39,20 @@ struct BrowserAddressPalette: View {
     let window: WorkspaceTabs
     let tab: EmbeddedBrowserTab
     let focusRequest: Int
+    let titlebarHeight: CGFloat?
     let close: () -> Void
     @State private var text: String
     @State private var selectedIndex = 0
     @State private var error: String?
     @State private var imported = ChromeProfileLibrary.Results()
 
-    init(state: AppState, window: WorkspaceTabs, tab: EmbeddedBrowserTab, focusRequest: Int, close: @escaping () -> Void) {
+    init(state: AppState, window: WorkspaceTabs, tab: EmbeddedBrowserTab, focusRequest: Int,
+         titlebarHeight: CGFloat? = nil, close: @escaping () -> Void) {
         self.state = state
         self.window = window
         self.tab = tab
         self.focusRequest = focusRequest
+        self.titlebarHeight = titlebarHeight
         self.close = close
         _text = State(initialValue: (tab.url ?? state.browserSession.webView(for: tab.id)?.url)?.absoluteString ?? "")
     }
@@ -70,8 +98,7 @@ struct BrowserAddressPalette: View {
 
     var body: some View {
         let choices = rows(for: text)
-        WorkspaceCommandPanel(width: 460) {
-            WorkspaceCommandField(text: Binding(get: { text }, set: { value in
+        let field = WorkspaceCommandField(text: Binding(get: { text }, set: { value in
                 text = value
                 selectedIndex = 0
                 error = nil
@@ -83,14 +110,31 @@ struct BrowserAddressPalette: View {
                     let current = rows(for: value)
                     if let row = current.dropFirst(value == text ? selectedIndex : 0).first { perform(row.id, value) }
                 }, cancel: close)
-        } choices: {
-            if !choices.isEmpty { Divider() }
+        let suggestions = VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(choices.enumerated()), id: \.element.id) { index, row in
                 WorkspaceCommandRow(title: row.title, icon: Image(systemName: row.symbol), selected: selectedIndex == index) {
                     perform(row.id, text)
                 }
             }
             if let error { Text(error).foregroundStyle(.secondary).padding(.horizontal, 8) }
+        }
+        Group {
+            if let titlebarHeight {
+                VStack(spacing: 4) {
+                    BrowserAddressPill(height: titlebarHeight, editing: true) { field }
+                        .background(Color(nsColor: .windowBackgroundColor), in: Capsule())
+                    if !choices.isEmpty || error != nil {
+                        suggestions.padding(6)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                            .shadow(color: .black.opacity(0.15), radius: 8, y: 3)
+                    }
+                }
+            } else {
+                WorkspaceCommandPanel(width: 460) { field } choices: {
+                    if !choices.isEmpty { Divider() }
+                    suggestions
+                }
+            }
         }
         .task(id: text) {
             let results = await ChromeProfileLibrary.Results.search(text, in: ChromeProfileLibrary(profile: state.browserSession.workspaceProfileID))

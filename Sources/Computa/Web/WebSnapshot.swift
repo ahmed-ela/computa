@@ -67,6 +67,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let connection: WebConnectionSnapshot
     let permissions: WebPermissionSnapshot
     let appearance: String
+    let browserAddressPlacement: BrowserAddressPlacement
     let accessMode: String
     let defaultModel: String
     let modelOptions: [LocalModelOption]
@@ -145,6 +146,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         connection = WebConnectionSnapshot(state.connectionState)
         permissions = WebPermissionSnapshot(state.automationPermissions)
         appearance = state.appearance.rawValue
+        browserAddressPlacement = state.browserAddressPlacement
         accessMode = state.accessMode.rawValue
         defaultModel = state.defaultModel
         modelOptions = state.modelOptions

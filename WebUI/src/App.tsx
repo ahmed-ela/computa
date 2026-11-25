@@ -832,6 +832,15 @@ function SettingsModal({ snapshot, nativeHost }: { snapshot: AppSnapshot; native
           </section>
           {nativeHost && <section>
             <h2>Browser</h2>
+            <label className="setting-row">
+              <span><strong>Address bar location</strong></span>
+              <NativeSelect aria-label="Address bar location" value={snapshot.browserAddressPlacement}
+                onChange={(event: Event) => post({ action: 'setBrowserAddressPlacement',
+                  value: (event.currentTarget as HTMLSelectElement).value as AppSnapshot['browserAddressPlacement'] })}>
+                <NativeSelectOption value="titleBar">Title bar (traffic-light row)</NativeSelectOption>
+                <NativeSelectOption value="sidebar">Left sidebar</NativeSelectOption>
+              </NativeSelect>
+            </label>
             <div className="setting-row">
               <span><strong>Import browser data</strong><small>Choose a Chrome profile to bring in history, bookmarks, and saved passwords. Find imported pages in the address bar. Use View → Fill Saved Login on a sign-in page.</small></span>
               <Button variant="outline" disabled={snapshot.importingChromeProfile}
