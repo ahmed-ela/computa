@@ -122,6 +122,24 @@ final class InstalledCodexCLITests: XCTestCase {
         XCTAssertNil(CodexCLIUsage.notification(["rateLimits": [:]]))
     }
 
+    func testThinkingEffortsComeFromEachModelAndLegacyCatalogsStillLoad() async throws {
+        let page = try JSONDecoder().decode(InstalledCodexCLI.Page.self, from: Data(#"""
+        {"data":[
+          {"model":"one","displayName":"One","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"ultra"},{"reasoningEffort":"low"}],"defaultReasoningEffort":"low"},
+          {"model":"two","displayName":"Two","hidden":false,"supportedReasoningEfforts":[{"reasoningEffort":"medium"}],"defaultReasoningEffort":"ultra"},
+          {"model":"legacy","displayName":"Legacy","hidden":false}
+        ]}
+        """#.utf8))
+        let options = try await InstalledCodexCLI.models { _ in page }
+        XCTAssertEqual(options.map(\.thinkingEfforts), [["low", "ultra"], ["medium"], nil])
+        XCTAssertEqual(options.map(\.defaultThinkingEffort), ["low", nil, nil])
+        XCTAssertTrue(options[0].allowsThinkingEffort("ultra"))
+        XCTAssertFalse(options[1].allowsThinkingEffort("ultra"))
+        XCTAssertFalse(options[2].allowsThinkingEffort("low"))
+        XCTAssertTrue(options[2].allowsThinkingEffort(nil))
+        XCTAssertFalse(LocalModelOption.availableForNewPrompt(options[1].id, thinkingEffort: "ultra", in: options))
+    }
+
     func testPickerLoadsEveryVisibleModelAcrossPagesAndRejectsRepeatedCursor() async throws {
         typealias Page = InstalledCodexCLI.Page
         let one = Page.Model(model: "one", displayName: "First", description: nil, hidden: false)
@@ -168,8 +186,10 @@ final class InstalledCodexCLITests: XCTestCase {
         var config = CodexAppServerRuntime.Configuration.localQwen
         config.codexHomePath = root.path
         config.workspacePath = root.appendingPathComponent("Workspace").path
+        config.protocolTracePath = root.appendingPathComponent("wire.jsonl").path
         let runtime = SelectableCodexRuntime(configuration: config)
-        let state = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences())
+        let preferences = isolatedTestPreferences()
+        let state = AppState(tasks: [], runtime: runtime, preferences: preferences)
         state.startRuntimeIfNeeded()
         do {
             try await waitUntil {
@@ -181,10 +201,14 @@ final class InstalledCodexCLITests: XCTestCase {
             let snapshot = WebUISnapshot(state: state)
             XCTAssertTrue(snapshot.providerSetups.contains { $0.route == "cli/codex" && $0.connected }, state.installedCLIError ?? "")
             let options = snapshot.modelOptions.filter { InstalledCodexCLI.slug($0.id) != nil }
-            let model = try XCTUnwrap(options.first)
+            let model = try XCTUnwrap(options.first { ($0.thinkingEfforts?.count ?? 0) > 1 })
+            let effort = try XCTUnwrap(model.thinkingEfforts?.first { $0 != model.defaultThinkingEffort })
             state.createTask()
             let id = try XCTUnwrap(state.selectedTaskID)
-            XCTAssertTrue(state.setTaskModel(model.id, taskID: id))
+            XCTAssertFalse(state.setTaskModel(model.id, taskID: id, thinkingEffort: "unadvertised"))
+            XCTAssertTrue(state.setTaskModel(model.id, taskID: id, thinkingEffort: effort))
+            XCTAssertEqual(state.selectedTask?.thinkingEffort, effort)
+            XCTAssertEqual(state.defaultThinkingEffort, effort)
             let marker = "COMPUTA-" + UUID().uuidString.prefix(8)
             let sent = await state.submit(prompt: "Reply with exactly " + marker + " and use no tools.", toTaskID: id)
             XCTAssertTrue(sent, state.selectedTask?.entries.last?.body ?? "")
@@ -196,7 +220,12 @@ final class InstalledCodexCLITests: XCTestCase {
             }
             let thread = try XCTUnwrap(state.selectedTask?.runtimeThreadID)
             print("Kolmogor CLI live: \(options.count) models; \(model.label); reply \(marker)")
-            let next = try XCTUnwrap(options.dropFirst().first)
+            do {
+                try await runtime.submit(prompt: "This stale choice must fail before dispatch.", toTaskID: id,
+                                         modelID: model.id, accessMode: .askEveryTime, thinkingEffort: "unadvertised")
+                XCTFail("Submitted an effort missing from the live model catalog")
+            } catch AgentRuntimeCapabilityError.thinkingEffortUnsupported { }
+            let next = try XCTUnwrap(options.first { $0.id != model.id && $0.defaultThinkingEffort != nil })
             XCTAssertTrue(state.setTaskModel(next.id, taskID: id))
             let secondMarker = "SWITCH-" + UUID().uuidString.prefix(8)
             let nextSent = await state.submit(prompt: "Reply with exactly " + secondMarker + " and use no tools.", toTaskID: id)
@@ -207,6 +236,14 @@ final class InstalledCodexCLITests: XCTestCase {
             }
             print("Kolmogor CLI switch: \(next.label); reply \(secondMarker)")
             XCTAssertEqual(state.selectedTask?.runtimeThreadID, thread)
+            let trace = try AppServerWireTrace.load(URL(fileURLWithPath: try XCTUnwrap(config.protocolTracePath) + ".installed-cli"))
+            let turns = trace.messages.filter { $0.direction == .clientToServer && $0.method == "turn/start" }
+                .compactMap { $0.object["params"] as? [String: Any] }
+            XCTAssertEqual(turns.compactMap { $0["model"] as? String }, [model.id, next.id].compactMap(InstalledCodexCLI.slug))
+            XCTAssertEqual(turns.compactMap { $0["effort"] as? String }, [effort, try XCTUnwrap(next.defaultThinkingEffort)])
+            print("Verified turn/start efforts: explicit \(effort), provider default \(next.defaultThinkingEffort ?? "")")
+            let idleChoice = try XCTUnwrap(next.thinkingEfforts?.first { $0 != next.defaultThinkingEffort })
+            XCTAssertTrue(state.setTaskModel(next.id, taskID: id, thinkingEffort: idleChoice))
             let stopped = await state.shutdownRuntime()
             XCTAssertTrue(stopped.succeeded, stopped.issues.joined(separator: ", "))
             let reopened = SelectableCodexRuntime(configuration: config)
@@ -214,6 +251,10 @@ final class InstalledCodexCLITests: XCTestCase {
                 let chats = try await reopened.loadTasks()
                 XCTAssertEqual(chats.map(\.id), [thread])
                 XCTAssertEqual(chats.first?.model, next.id)
+                let relaunched = AppState(tasks: [], runtime: nil, preferences: preferences)
+                relaunched.replaceTasks(with: chats)
+                XCTAssertEqual(relaunched.tasks.first?.thinkingEffort, idleChoice)
+                XCTAssertEqual(relaunched.presentNewAgent().thinkingEffort, idleChoice)
                 XCTAssertTrue(chats.first?.entries.contains { $0.kind == .assistant && $0.body.contains(secondMarker) } == true)
                 XCTAssertTrue(chats.first?.entries.contains { $0.kind == .assistant && $0.body.contains(marker) } == true)
             } catch { _ = await reopened.shutdown(); throw error }

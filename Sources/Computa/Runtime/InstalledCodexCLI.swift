@@ -149,6 +149,9 @@ enum InstalledCodexCLI {
             let displayName: String
             let description: String?
             let hidden: Bool
+            struct Effort: Decodable { let reasoningEffort: String }
+            var supportedReasoningEfforts: [Effort]?
+            var defaultReasoningEffort: String?
         }
         let data: [Model]
         let nextCursor: String?
@@ -165,7 +168,14 @@ enum InstalledCodexCLI {
                 let id = prefix + row.model
                 guard slug(id) != nil, seen.insert(id).inserted else { continue }
                 let label = row.displayName.isEmpty ? row.model : row.displayName
-                options.append(LocalModelOption(id: id, label: "Codex CLI / " + label, detail: row.description ?? row.model, highMemory: false))
+                var efforts: [String] = []
+                for choice in row.supportedReasoningEfforts ?? [] {
+                    let value = choice.reasoningEffort
+                    if !value.isEmpty, !efforts.contains(value) { efforts.append(value) }
+                }
+                options.append(LocalModelOption(id: id, label: "Codex CLI / " + label, detail: row.description ?? row.model,
+                    highMemory: false, thinkingEfforts: efforts.isEmpty ? nil : efforts,
+                    defaultThinkingEffort: row.defaultReasoningEffort.flatMap { efforts.contains($0) ? $0 : nil }))
             }
             cursor = result.nextCursor
             if let cursor, !cursors.insert(cursor).inserted { throw Failure.invalidCatalog }

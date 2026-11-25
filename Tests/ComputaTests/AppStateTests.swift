@@ -244,6 +244,34 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
+    func testThinkingEffortIsScopedToItsChatAndNewAgentsInheritTheLastChoice() async throws {
+        let option = LocalModelOption(id: "cli/codex/model/fixture", label: "Fixture", detail: "", highMemory: false,
+                                      thinkingEfforts: ["low", "high"], defaultThinkingEffort: "low")
+        let runtime = ModelRecordingRuntime(recorder: ModelSubmissionRecorder(), catalog: [option])
+        let prefs = isolatedTestPreferences()
+        let task = AgentTask(id: "first", runtimeThreadID: UUID().uuidString, title: "First", summary: "", status: .completed,
+                             workspace: "/tmp", model: option.id)
+        let other = AgentTask(id: "second", runtimeThreadID: UUID().uuidString, title: "Second", summary: "", status: .completed,
+                              workspace: "/tmp", model: option.id)
+        let state = AppState(tasks: [task, other], runtime: runtime, preferences: prefs)
+        await state.refreshInstalledCLIModels()
+        XCTAssertTrue(state.setTaskModel(option.id, taskID: task.id, thinkingEffort: "high"))
+        XCTAssertFalse(state.setTaskModel(option.id, taskID: task.id, thinkingEffort: "unavailable"))
+        XCTAssertTrue(state.setTaskModel(option.id, taskID: other.id, thinkingEffort: "low"))
+        let snapshot = WebUISnapshot(state: state)
+        XCTAssertEqual(snapshot.tasks.map(\.thinkingEffort), ["high", "low"])
+        XCTAssertEqual(state.presentNewAgent().thinkingEffort, "low")
+        let relaunched = AppState(tasks: [], runtime: runtime, preferences: prefs)
+        relaunched.replaceTasks(with: [task, other])
+        XCTAssertEqual(relaunched.tasks.map(\.thinkingEffort), ["high", "low"])
+        await relaunched.refreshInstalledCLIModels()
+        XCTAssertTrue(relaunched.setTaskModel(option.id, taskID: task.id))
+        XCTAssertNil(relaunched.tasks.first?.thinkingEffort)
+        XCTAssertNil(relaunched.defaultThinkingEffort)
+        XCTAssertEqual(relaunched.tasks.last?.thinkingEffort, "low")
+    }
+
+    @MainActor
     func testTurnDurationBelongsOnlyToFinalReplyAndStopsAtCompletion() async throws {
         let runtime = ModelRecordingRuntime(recorder: ModelSubmissionRecorder())
         let task = AgentTask(
@@ -1452,6 +1480,8 @@ private actor ModelSubmissionRecorder {
 private struct ModelRecordingRuntime: AgentRuntimeClient {
     let recorder: ModelSubmissionRecorder
     let providerName = "Model recording runtime"
+    var catalog: [LocalModelOption] = []
+    func installedCLIModels() async throws -> [LocalModelOption] { catalog }
 
     func loadTasks() async throws -> [AgentTask] { [] }
 

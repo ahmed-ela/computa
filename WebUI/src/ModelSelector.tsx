@@ -84,20 +84,55 @@ export function groupModelOptions(options: ModelOption[], model: string, setups:
   return [...groups.values()];
 }
 
-export function ModelSelector({ options, model, label, disabled = false, className,
+function effortLabel(value: string): string {
+  return value === 'xhigh' ? 'Extra high' : value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function ThinkingEffortSubmenu({ option, selected, effort, disabled, onSelect }: {
+  option: ModelOption; selected: boolean; effort?: string; disabled: boolean; onSelect: (model: string, effort?: string) => void;
+}) {
+  const name = modelOptionLabel(option);
+  return <DropdownMenuSub>
+    <DropdownMenuSubTrigger textValue={name} title={option.detail} disabled={disabled} className="model-provider-option">
+      <span className="model-provider-name">{name}</span>
+      {selected && <Icon name="check" size={12} />}
+    </DropdownMenuSubTrigger>
+    <DropdownMenuPortal>
+      <DropdownMenuSubContent className="model-selector-submenu" sideOffset={6} collisionPadding={12} aria-label={name + ' thinking effort'}>
+        <div className="model-setup-detail">Thinking effort</div>
+        <DropdownMenuRadioGroup value={selected ? effort ?? '' : undefined} onValueChange={(value: string) => onSelect(option.id, value || undefined)}>
+          <DropdownMenuRadioItem value="" disabled={disabled}>
+            {option.defaultThinkingEffort ? 'Default (' + effortLabel(option.defaultThinkingEffort) + ')' : 'Provider default'}
+          </DropdownMenuRadioItem>
+          {option.thinkingEfforts?.map(value => <DropdownMenuRadioItem key={value} value={value} textValue={effortLabel(value)} disabled={disabled}>
+            {effortLabel(value)}
+          </DropdownMenuRadioItem>)}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuSubContent>
+    </DropdownMenuPortal>
+  </DropdownMenuSub>;
+}
+
+export function ModelSelector({ options, model, thinkingEffort, label, disabled = false, className,
   setups = [], canConnect = false, boundToRuntime = false, onConnect, onRefresh, onSelect }: { boundToRuntime?: boolean; options: ModelOption[]; setups?: ModelProviderSetup[];
   onRefresh?: (action: WebsiteModelsRefreshAction) => void; canConnect?: boolean; onConnect?: (route: string) => void; model: string; label: string; disabled?: boolean;
-  className?: string; onSelect: (model: string) => void }) {
+  thinkingEffort?: string; className?: string; onSelect: (model: string, effort?: string) => void }) {
   const selected = options.find((option) => option.id === model);
+  const displayedEffort = thinkingEffort ?? selected?.defaultThinkingEffort;
+  const effortText = thinkingEffort && selected && !selected.thinkingEfforts?.includes(thinkingEffort)
+    ? (selected.thinkingEfforts?.length ? 'Choose effort' : 'Reselect model')
+    : displayedEffort && effortLabel(displayedEffort);
   const cliRoute = model.startsWith('cli/') ? model.split('/').slice(0, 2).join('/') : undefined;
   const groups = groupModelOptions(options, model, setups).filter(group =>
     !boundToRuntime || (cliRoute ? group.route === cliRoute : !group.route.startsWith('cli/')));
   const needsSelection = setups.length > 0 && (!selected || selected.available === false || selected.selectable === false);
   const [open, setOpen] = useState(false);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
-  const selectModel = (value: string) => {
-    if (disabled || !groups.some((group) => group.options.some((option) => option.id === value && option.available !== false))) return;
-    onSelect(value);
+  const selectModel = (value: string, effort?: string) => {
+    const option = groups.flatMap((group) => group.options).find((entry) => entry.id === value);
+    if (disabled || !option || option.available === false || (effort !== undefined && !option.thinkingEfforts?.includes(effort))) return;
+    if (effort === undefined) onSelect(value);
+    else onSelect(value, effort);
     setOpen(false);
   };
   return (
@@ -105,8 +140,9 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
       <DropdownMenuTrigger asChild disabled={disabled}>
         <Button type="button" variant="outline" size="sm" disabled={disabled}
           className={`model-selector-trigger ${className ?? ''}`}
-          aria-label={`${label}: ${needsSelection ? 'Choose model' : selected ? fullModelLabel(selected) : model}`} title={selected?.detail ?? model}>
+          aria-label={`${label}: ${needsSelection ? 'Choose model' : selected ? fullModelLabel(selected) : model}${!needsSelection && effortText ? ", " + effortText + " thinking effort" : ""}`} title={selected?.detail ?? model}>
           {needsSelection ? <span>Choose model</span> : <ModelLabel model={model} option={selected} group={groups.find((group) => group.options.some((option) => option.id === model))} />}
+          {!needsSelection && effortText && <span className="model-effort-value">{effortText}</span>}
           <span className="model-selector-chevron"><Icon name="chevron" size={12} /></span>
         </Button>
       </DropdownMenuTrigger>
@@ -124,7 +160,10 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
             <DropdownMenuSubContent className="model-selector-submenu" sideOffset={6} collisionPadding={12}
               aria-label={`${group.name} ${group.id === 'deepseek' ? 'modes' : 'models'}`}>
               <DropdownMenuRadioGroup value={model} onValueChange={selectModel}>
-                {group.options.filter((option) => !group.setup || option.available !== false).map((option) => <DropdownMenuRadioItem key={option.id} value={option.id}
+                {group.options.filter((option) => !group.setup || option.available !== false).map((option) => option.thinkingEfforts?.length ? (
+                  <ThinkingEffortSubmenu key={option.id} option={option} selected={model === option.id}
+                    effort={thinkingEffort} disabled={disabled || option.available === false} onSelect={selectModel} />
+                ) : <DropdownMenuRadioItem key={option.id} value={option.id}
                   textValue={modelOptionLabel(option)} title={option.detail} disabled={disabled || option.available === false}>
                   <span className="model-option-name">{modelOptionLabel(option)}</span>
                   {option.available === false && <span className="model-option-unavailable"> (unavailable)</span>}

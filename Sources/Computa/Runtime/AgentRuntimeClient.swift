@@ -29,6 +29,7 @@ protocol AgentRuntimeClient: Sendable {
     func events() -> AsyncStream<AgentRuntimeEvent>
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode, thinkingEffort: String?) async throws
     func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws
     func steer(prompt: String, toTaskID taskID: AgentTask.ID) async throws
     func compact(taskID: AgentTask.ID) async throws
@@ -59,6 +60,10 @@ extension AgentRuntimeClient {
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { throw AgentCLIError.unavailable("CLI catalog unavailable.") }
     func installedCLIModels() async throws -> [LocalModelOption] { throw InstalledCodexCLI.Failure.missing }
     func readCodexCLIUsage() async -> CodexCLIUsage.Report { .init() }
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode, thinkingEffort: String?) async throws {
+        guard thinkingEffort == nil else { throw AgentRuntimeCapabilityError.thinkingEffortUnsupported }
+        try await submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode)
+    }
     /// Older adapters may keep their restricted submission path. They cannot
     /// silently claim Full access without implementing its execution policy.
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
@@ -106,6 +111,7 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
     case steeringUnsupported
     case compactionUnsupported
     case workspaceSelectionUnsupported
+    case thinkingEffortUnsupported
     case accessModeUnsupported
     case apiProvidersUnsupported
 
@@ -117,6 +123,8 @@ enum AgentRuntimeCapabilityError: LocalizedError, Equatable {
             "This runtime does not support context compaction."
         case .workspaceSelectionUnsupported:
             "This runtime does not support choosing a project folder."
+        case .thinkingEffortUnsupported:
+            "This thinking effort is unavailable for the selected model. Choose an available effort before sending."
         case .accessModeUnsupported:
             "This runtime does not support Full access. Your message was not sent."
         case .apiProvidersUnsupported:

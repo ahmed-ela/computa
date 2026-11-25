@@ -59,6 +59,24 @@ const selector = (model = options[1].id, label = 'Task model', disabled = false)
 })).html;
 
 describe('website model selectors', () => {
+  test('only models with effort choices get a thinking submenu, and selecting an effort binds it to that model', async () => {
+    const model = { ...options[1], id: 'cli/codex/model/example', label: 'Codex CLI / Example', thinkingEfforts: ['low', 'xhigh'], defaultThinkingEffort: 'low' };
+    const selected: unknown[][] = [];
+    selectionHandlers.length = 0;
+    const html = renderToStaticMarkup(h(ModelSelector, {
+      options: [model, options[1]], model: model.id, thinkingEffort: 'xhigh', label: 'Task model',
+      onSelect: (...args: unknown[]) => selected.push(args),
+    })).html;
+    const menus = await attributesBySelector(html, '[data-submenu-content]', 'aria-label');
+    expect(menus.filter(label => label.endsWith('thinking effort'))).toEqual(['Example thinking effort']);
+    expect(await textBySelector(html, '[aria-label="Example thinking effort"] [role="menuitemradio"]')).toEqual(['Default (Low)', 'Low', 'Extra high']);
+    expect(await textBySelector(html, '.model-effort-value')).toEqual(['Extra high']);
+    selectionHandlers[1]('xhigh');
+    selectionHandlers[1]('unsupported');
+    selectionHandlers[1]('');
+    expect(selected).toEqual([[model.id, 'xhigh'], [model.id]]);
+  });
+
   test('Codex CLI has its own setup and preserves the exact discovered model IDs', async () => {
     const setup = { route: 'cli/codex', name: 'Codex CLI', connected: false };
     const render = (choices: ModelOption[], detail?: string) => renderToStaticMarkup(h(ModelSelector, {

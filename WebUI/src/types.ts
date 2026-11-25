@@ -117,6 +117,7 @@ export interface TaskSnapshot {
   activeActivityGroupID?: string;
   workspace: string;
   model: string;
+  thinkingEffort?: string;
   modelSelectable: boolean;
   hasBoundThread?: boolean;
   branch?: string;
@@ -141,6 +142,8 @@ export interface ModelOption {
   highMemory: boolean;
   available?: boolean;
   selectable?: boolean;
+  thinkingEfforts?: string[];
+  defaultThinkingEffort?: string;
 }
 
 export interface ModelProviderSetup {
@@ -208,6 +211,7 @@ export interface AppSnapshot {
   browserAddressPlacement: 'titleBar' | 'sidebar';
   accessMode: 'askEveryTime' | 'fullAccess';
   defaultModel: string;
+  defaultThinkingEffort?: string;
   modelOptions: ModelOption[];
   providerSetups: ModelProviderSetup[];
   websiteModelsRefreshing?: boolean;
@@ -275,8 +279,8 @@ export type NativeAction =
   | { action: 'dismissSettings' }
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }
   | { action: 'setBrowserAddressPlacement'; value: AppSnapshot['browserAddressPlacement'] }
-  | { action: 'setDefaultModel'; modelID: string }
-  | { action: 'setTaskModel'; taskID: string; modelID: string }
+  | { action: 'setDefaultModel'; modelID: string; thinkingEffort?: string }
+  | { action: 'setTaskModel'; taskID: string; modelID: string; thinkingEffort?: string }
   | { action: 'refreshWebsiteModels'; provider?: WebsiteModelProvider }
   | { action: 'connectModelProvider'; route: string }
   | { action: 'showAccessModeSettings' }

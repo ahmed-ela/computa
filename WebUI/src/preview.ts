@@ -328,8 +328,8 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
     }
     return order;
   };
-  const isSelectableModel = (id: string) => snapshot.modelOptions.some((option) =>
-    option.id === id && option.available !== false && option.selectable !== false,
+  const isSelectableModel = (id: string, effort?: string) => snapshot.modelOptions.some((option) =>
+    option.id === id && option.available !== false && option.selectable !== false && (!effort || option.thinkingEfforts?.includes(effort)),
   );
   const updateTask = (id: string, transform: (task: TaskSnapshot) => TaskSnapshot) => {
     if (newAgentDraft?.id === id) newAgentDraft = transform(newAgentDraft);
@@ -451,7 +451,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           id: issueID(), title: 'Untitled task',
           summary: 'Draft task in the browser preview.', status: 'Draft', statusTone: 'neutral',
           updatedAt: Math.floor(Date.now() / 1000), workspace: previous?.workspace ?? previewWorkspace,
-          model: previous?.model ?? snapshot.defaultModel, modelSelectable: true, entries: [],
+          model: previous?.model ?? snapshot.defaultModel, thinkingEffort: previous ? previous.thinkingEffort : snapshot.defaultThinkingEffort, modelSelectable: true, entries: [],
           queuedPrompts: [], queuePaused: false, canStartQueuedTurn: true, canSteer: false, isBusy: false, hasUnreadCompletion: false,
         };
         if (action.action === 'createTask') {
@@ -705,19 +705,19 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         publish({ ...snapshot, browserAddressPlacement: action.value });
         return;
       case 'setDefaultModel':
-        if (!isSelectableModel(action.modelID)) return;
-        publish({ ...snapshot, defaultModel: action.modelID });
+        if (!isSelectableModel(action.modelID, action.thinkingEffort)) return;
+        publish({ ...snapshot, defaultModel: action.modelID, defaultThinkingEffort: action.thinkingEffort });
         return;
       case 'prepareWebsiteModel':
         // Preview never opens a website or submits a prompt.
         return;
       case 'setTaskModel':
-        if (!isSelectableModel(action.modelID)) return;
+        if (!isSelectableModel(action.modelID, action.thinkingEffort)) return;
         if (!taskByID(action.taskID)?.modelSelectable) return;
-        if (newAgentDraft?.id === action.taskID) newAgentDraft = { ...newAgentDraft, model: action.modelID };
+        if (newAgentDraft?.id === action.taskID) newAgentDraft = { ...newAgentDraft, model: action.modelID, thinkingEffort: action.thinkingEffort };
         publish({
-          ...snapshot, defaultModel: action.modelID,
-          tasks: snapshot.tasks.map((task) => task.id === action.taskID ? { ...task, model: action.modelID } : task),
+          ...snapshot, defaultModel: action.modelID, defaultThinkingEffort: action.thinkingEffort,
+          tasks: snapshot.tasks.map((task) => task.id === action.taskID ? { ...task, model: action.modelID, thinkingEffort: action.thinkingEffort } : task),
         });
         return;
       case 'setShowToolPayloads':

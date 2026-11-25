@@ -99,6 +99,7 @@ final class AppState {
     @ObservationIgnored private var startupWebsiteModelIdleObservation: UUID?
     @ObservationIgnored private var lastWebsitePrewarmDemand: (taskID: AgentTask.ID, time: ContinuousClock.Instant)?
     // Keep the persisted key across the Kolmogor rename.
+    private static let defaultEffortPreferenceKey = "Kolmogor.defaultModelEffort"
     private static let defaultModelPreferenceKey = "LocalCodex.defaultModelID"
     private static let accessModePreferenceKey = "HeyDash.accessMode"
 
@@ -187,6 +188,8 @@ final class AppState {
 
     var appearance: AppAppearance = .system
     var defaultModel: String
+    private(set) var defaultThinkingEffort: String?
+    private var threadThinkingSelections: [String: SavedWorkspace.ThinkingSelection] = [:]
     private(set) var websiteModelChoices: [WebsiteModelChoice]
     private(set) var websiteModeChoices: [WebsiteModeChoice]
     private(set) var apiProviders: [APIProviderDefinition] = []
@@ -285,12 +288,14 @@ final class AppState {
         let storedAPIProviders = APIProviderCatalog.load(from: preferences)
         apiProviders = storedAPIProviders
         let storedModel = preferences.string(forKey: Self.defaultModelPreferenceKey)
-        defaultModel = storedModel.flatMap { id in
+        let initialModel = storedModel.flatMap { id in
             guard !Self.isModelHiddenFromPicker(id, apiProviders: storedAPIProviders) else { return nil }
             // Saved website choices remain selected if an account/menu changes.
             // Invalid ones are visible and rejected, never replaced with Qwen.
             return id.hasPrefix("browser/") || id.hasPrefix("api/") || ProviderCLI(modelID: id) != nil || InstalledCodexCLI.slug(id) != nil ? id : LocalModelCatalog.option(for: id)?.id
         } ?? WebsiteModelCatalog.freshProfileDefaultModelID
+        defaultModel = initialModel
+        defaultThinkingEffort = (preferences.dictionary(forKey: Self.defaultEffortPreferenceKey) as? [String: String])?[initialModel]
         websiteModelChoices = WebsiteModelCatalog.load(from: preferences)
         websiteModeChoices = WebsiteModeCatalog.load(from: preferences)
         automationPermissions = permissionClient.current()
@@ -306,6 +311,7 @@ final class AppState {
         }
         let recovered = localRecords.map(\.restoredTask).filter { local in !tasks.contains { $0.id == local.id } }
         let snapshot = workspaceWindows.primary.saved
+        threadThinkingSelections = snapshot?.thinkingSelections ?? [:]
         let existingIDs = Set((tasks + recovered).map(\.id))
         let savedDrafts = snapshot?.drafts ?? [:]
         let openIDs = workspaceWindows.primary.order.filter { $0.kind == .agent }.map(\.id)
@@ -337,7 +343,7 @@ final class AppState {
                 }
                 self.apiProviders = providers
                 if Self.isModelHiddenFromPicker(self.defaultModel, apiProviders: providers) {
-                    self.defaultModel = WebsiteModelCatalog.freshProfileDefaultModelID
+                    self.rememberDefaultModel(WebsiteModelCatalog.freshProfileDefaultModelID)
                 }
             })
         if let snapshot, !self.cookieMaintenanceOnlyLaunch {
@@ -424,7 +430,7 @@ final class AppState {
             ?? returningPin.flatMap { $0.kind == .browser ? UUID(uuidString: $0.id) : nil }
         let temporaryKeys = Set(temporaryDrafts.map { $0.lowercased() })
         let profiles = workspaceTabs.agents.filter { !temporaryKeys.contains($0.key) }
-        workspaceTabs.save(SavedWorkspace(agents: profiles.isEmpty ? nil : profiles, order: order,
+        workspaceTabs.save(SavedWorkspace(thinkingSelections: threadThinkingSelections.isEmpty ? nil : threadThinkingSelections, agents: profiles.isEmpty ? nil : profiles, order: order,
             pinnedCount: pins.isEmpty ? nil : pins.count, selectedAgent: selected, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
             pages: pages, selectedPage: selectedPage, browserIsPrimary: selectedPage != nil && (workspaceTabs.browserIsPrimary || returningPin?.kind == .browser),
@@ -1285,6 +1291,7 @@ final class AppState {
                 || ChatUnreadCompletionStore.identity(tasks[index].runtimeThreadID) == stable else { return false }
         workspaceTabs.bindAgent(draft: taskID, thread: stable)
         tasks[index].runtimeThreadID = stable
+        rememberThreadThinkingSelection(tasks[index])
         bindFirstMessage(taskID: taskID, threadID: stable)
         saveWorkspace()
         return true
@@ -1340,7 +1347,7 @@ final class AppState {
 
     func startFresh(taskID: String) {
         guard let old = selectedTask, old.id == taskID, canStartFresh(old) else { return }
-        let fresh = AgentTask(title: "Untitled task", summary: "", status: .draft, workspace: old.workspace, model: old.model)
+        let fresh = AgentTask(title: "Untitled task", summary: "", status: .draft, workspace: old.workspace, model: old.model, thinkingEffort: old.thinkingEffort)
         if workspaceTabs !== workspaceWindows.primary { workspaceTabs.temporaryDraftIDs.insert(fresh.id) }
         tasks.insert(fresh, at: 0)
         workspaceTabs.startConversation(after: old, newID: fresh.id)
@@ -1370,7 +1377,7 @@ final class AppState {
     func presentNewAgent() -> AgentTask {
         let draft = workspaceTabs.newAgentDraft ?? .init(task: AgentTask(
             title: "Untitled task", summary: "A new local task", status: .draft,
-            workspace: "No workspace selected", model: defaultModel
+            workspace: "No workspace selected", model: defaultModel, thinkingEffort: defaultThinkingEffort
         ))
         workspaceTabs.newAgentDraft = draft
         workspaceTabs.launcherChat = .init(taskID: draft.task.id, unsentDraft: nil)
@@ -1403,13 +1410,13 @@ final class AppState {
         }
         if parked != nil {
             guard validatedPrompt(prompt) != nil else { throw NewAgentLaunchError.invalidPrompt }
-            guard LocalModelOption.availableForNewPrompt(defaultModel, in: modelOptions) else {
+            guard LocalModelOption.availableForNewPrompt(defaultModel, thinkingEffort: defaultThinkingEffort, in: modelOptions) else {
                 throw NewAgentLaunchError.unavailableModel
             }
             workspaceTabs.newAgentDraft = nil
         }
         let task = presentNewAgent()
-        if LocalModelOption.availableForNewPrompt(task.model, in: modelOptions),
+        if LocalModelOption.availableForNewPrompt(task.model, thinkingEffort: task.thinkingEffort, in: modelOptions),
            acceptPrompt(prompt: prompt, taskID: task.id, requestID: UUID().uuidString) {
             workspaceTabs.newAgentDraft = parked
             return LauncherChat(taskID: task.id, unsentDraft: nil)
@@ -1579,28 +1586,43 @@ final class AppState {
         if isReviewPresented { requestReviewRefresh(taskID: taskID) }
     }
 
-    private func rememberDefaultModel(_ modelID: String) {
+    private func rememberDefaultModel(_ modelID: String, thinkingEffort: String? = nil) {
+        defaultThinkingEffort = thinkingEffort
+        preferences.set(thinkingEffort.map { [modelID: $0] }, forKey: Self.defaultEffortPreferenceKey)
         defaultModel = modelID
         preferences.set(modelID, forKey: Self.defaultModelPreferenceKey)
     }
 
+    private func rememberThreadThinkingSelection(_ task: AgentTask) {
+        guard let thread = task.runtimeThreadID else { return }
+        threadThinkingSelections[thread.lowercased()] = task.thinkingEffort.map { .init(model: task.model, effort: $0) }
+    }
+
+    private func restoreThinkingSelection(_ task: inout AgentTask) {
+        guard let thread = task.runtimeThreadID, let saved = threadThinkingSelections[thread.lowercased()],
+              saved.model == task.model || (InstalledCodexCLI.slug(saved.model) != nil && InstalledCodexCLI.slug(task.model) != nil) else { return }
+        task.model = saved.model
+        task.thinkingEffort = saved.effort
+    }
+
     @discardableResult
-    func setDefaultModel(_ modelID: String) -> Bool {
+    func setDefaultModel(_ modelID: String, thinkingEffort: String? = nil) -> Bool {
         guard let option = modelOptions.first(where: { $0.id == modelID }),
-              option.available != false, option.selectable != false else { return false }
-        rememberDefaultModel(modelID)
+              option.available != false, option.selectable != false, option.allowsThinkingEffort(thinkingEffort) else { return false }
+        rememberDefaultModel(modelID, thinkingEffort: thinkingEffort)
         requestAutomaticWebsiteModelRefresh(for: modelID)
         updateWebsitePrewarming()
         return true
     }
 
     @discardableResult
-    func setTaskModel(_ modelID: String, taskID: AgentTask.ID) -> Bool {
+    func setTaskModel(_ modelID: String, taskID: AgentTask.ID, thinkingEffort: String? = nil) -> Bool {
         guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false,
-              option.selectable != false, canChangeModel(for: taskID) else { return false }
+              option.selectable != false, option.allowsThinkingEffort(thinkingEffort), canChangeModel(for: taskID) else { return false }
         if workspaceTabs.newAgentDraft?.task.id == taskID {
             workspaceTabs.newAgentDraft?.task.model = modelID
-            rememberDefaultModel(modelID)
+            workspaceTabs.newAgentDraft?.task.thinkingEffort = thinkingEffort
+            rememberDefaultModel(modelID, thinkingEffort: thinkingEffort)
             requestAutomaticWebsiteModelRefresh(for: modelID)
             updateWebsitePrewarming()
             return true
@@ -1609,14 +1631,18 @@ final class AppState {
               tasks[index].runtimeThreadID == nil || ((InstalledCodexCLI.slug(tasks[index].model) != nil) == (InstalledCodexCLI.slug(modelID) != nil)
                 && ProviderCLI(modelID: tasks[index].model) == ProviderCLI(modelID: modelID))
         else { return false }
-        rememberDefaultModel(modelID)
-        guard tasks[index].model != modelID else { return true }
+        rememberDefaultModel(modelID, thinkingEffort: thinkingEffort)
+        let changedModel = tasks[index].model != modelID
+        guard changedModel || tasks[index].thinkingEffort != thinkingEffort else { return true }
+        tasks[index].thinkingEffort = thinkingEffort
         tasks[index].model = modelID
+        rememberThreadThinkingSelection(tasks[index])
         if var record = firstMessages[taskID.lowercased()], tasks[index].runtimeThreadID == nil {
             record.metadata = .init(tasks[index])
             saveFirstMessage(record, taskID: taskID)
         }
         saveWorkspace()
+        guard changedModel else { return true }
         requestAutomaticWebsiteModelRefresh(for: modelID)
         updateWebsitePrewarming()
         contextUsageByTask.removeValue(forKey: taskID)
@@ -2356,6 +2382,7 @@ final class AppState {
         tasks = newTasks.map { task in
             var restored = task
             if restored.runtimeThreadID == nil { restored.runtimeThreadID = priorThreads[task.id] }
+            restoreThinkingSelection(&restored)
             return restored
         }
         waitingForWorkspaceHistory = false
@@ -2438,6 +2465,7 @@ final class AppState {
                     workspaceTabs.bindAgent(draft: task.id, thread: thread)
                     bindFirstMessage(taskID: task.id, threadID: thread)
                 }
+                restoreThinkingSelection(&replacement)
                 tasks[index] = replacement
             } else {
                 tasks.insert(task, at: 0)
@@ -2835,7 +2863,7 @@ final class AppState {
                     try await runtime.configureWorkspace(path: task.workspace, forTaskID: taskID)
                 }
                 profile?.mark(.runtimeSubmitRequested)
-                try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode)
+                try await runtime.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode, thinkingEffort: task.thinkingEffort)
                 profile?.mark(.runtimeSubmitFinished)
             } catch {
                 profile?.mark(.runtimeSubmitFailed)
