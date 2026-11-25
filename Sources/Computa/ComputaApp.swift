@@ -61,6 +61,7 @@ extension FocusedValues {
     @Entry var focusBrowserAddress: (() -> Void)?
     @Entry var browserPaneFocused: Bool?
     @Entry var browserPageCommandsAllowed: Bool?
+    @Entry var workspaceSidebarCollapsed: Binding<Bool>?
     @Entry var tabWorkspace: AppState?
 }
 
@@ -70,6 +71,7 @@ struct WorkspaceCommands: Commands {
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.focusBrowserAddress) private var focusBrowserAddress
     @FocusedValue(\.tabWorkspace) private var tabWorkspace
+    @FocusedBinding(\.workspaceSidebarCollapsed) private var sidebarCollapsed
 
     @FocusedValue(\.browserPaneFocused) private var browserPaneFocused
 
@@ -126,6 +128,12 @@ struct WorkspaceCommands: Commands {
             .keyboardShortcut("w", modifiers: tabWorkspace == nil ? .command : [.command, .shift])
         }
         CommandGroup(after: .toolbar) {
+            Button(sidebarCollapsed == true ? "Expand Sidebar" : "Collapse Sidebar") {
+                sidebarCollapsed?.toggle()
+            }
+            .keyboardShortcut("b", modifiers: .command)
+            .disabled(isTestHost || sidebarCollapsed == nil)
+
             Button("Fill Saved Login…") {
                 guard let tabWorkspace, let window = NSApp.keyWindow else { return }
                 Task { @MainActor in await BrowserLoginControls.fill(in: tabWorkspace, window: window) }
