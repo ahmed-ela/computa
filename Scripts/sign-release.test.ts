@@ -53,6 +53,23 @@ test("refuses a modified runtime before staging or signing", async () => {
   expect(f.calls.some(call => call.includes("--sign") || call[0] === "/usr/bin/ditto")).toBe(false);
 });
 
+test("refuses development input and fails distribution when the signed copy misses the public identity", async () => {
+  const f = await fixture();
+  await expect(signRelease(f.options, async call => call[0] === "/usr/bin/plutil"
+    ? "com.ahmedelamin.LocalCodex.dev" : f.run(call))).rejects.toThrow("bundle identifier");
+  expect(f.calls.some(call => call.includes("--sign"))).toBe(false);
+  await expect(signRelease(f.options, async call => {
+    if (call.includes("--verify") && call.at(-1) === f.output) {
+      const requirement = call[call.indexOf("-R") + 1];
+      expect(requirement).toContain('identifier "com.ahmedelamin.LocalCodex"');
+      expect(requirement).toContain('certificate leaf[subject.OU] = "MSMG8CJLB3"');
+      expect(requirement).toContain("1.2.840.113635.100.6.1.13");
+      throw new Error("signing identity mismatch");
+    }
+    return f.run(call);
+  })).rejects.toThrow("signing identity mismatch");
+});
+
 test("does not overwrite existing apps or sign in place", async () => {
   const f = await fixture();
   await expect(signRelease({ ...f.options, output: f.app }, f.run)).rejects.toThrow("separate");

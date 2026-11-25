@@ -23,10 +23,10 @@ enum ComputerV2ToolContract {
             }
             return app.activationPolicy == .regular || app.isActive
         }.sorted { left, right in
-            if let query {
-                let leftExact = left.bundleIdentifier?.caseInsensitiveCompare(query) == .orderedSame
-                let rightExact = right.bundleIdentifier?.caseInsensitiveCompare(query) == .orderedSame
-                if leftExact != rightExact { return leftExact }
+            if let query, !query.isEmpty {
+                let leftRank = matchRank(left, query: query)
+                let rightRank = matchRank(right, query: query)
+                if leftRank != rightRank { return leftRank < rightRank }
             }
             if left.isActive != right.isActive { return left.isActive }
             let leftName = left.localizedName ?? left.bundleIdentifier ?? ""
@@ -51,6 +51,18 @@ enum ComputerV2ToolContract {
         return "APPS scope=\(scope) matched=\(matches.count) returned=\(rows.count) omitted=\(matches.count - rows.count). "
             + guidance + "\n"
             + rows.joined(separator: "\n")
+    }
+
+    /// A frontmost app can match only because it contains another product's name
+    /// in its historical identifier. Foreground status breaks ties after relevance.
+    private static func matchRank(_ app: RunningApplicationInfo, query: String) -> Int {
+        let bundle = app.bundleIdentifier ?? ""
+        if bundle.caseInsensitiveCompare(query) == .orderedSame { return 0 }
+        if app.localizedName?.caseInsensitiveCompare(query) == .orderedSame { return 1 }
+        if let leaf = bundle.split(separator: ".").last,
+           String(leaf).caseInsensitiveCompare(query) == .orderedSame { return 2 }
+        if app.localizedName?.localizedCaseInsensitiveContains(query) == true { return 3 }
+        return 4
     }
 
     static func captureMetadata(mapper: ScreenshotCoordinateMapper) -> String {

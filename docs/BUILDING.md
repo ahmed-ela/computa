@@ -125,30 +125,11 @@ not a Developer ID distribution signature or notarization.
 
 ## Installation, data, and permissions
 
-Setup installs only to `~/Applications/Kolmogor.app`, not `/Applications`.
-Quit Kolmogor and any older app copy normally first; setup refuses to kill
-either app or install while either process name is running. It accepts at most
-one existing bundle at `~/Applications/Kolmogor.app` or either legacy name, `Computa.app` or `Mactopus.app`; if several exist, it stops without choosing between
-them. It checks the existing bundle identity, executable, and signature, and
-refuses an unknown app or a symlinked installation directory.
+Local Xcode builds and `Scripts/setup.sh` use the display name **Kolmogor Dev** and the bundle identifier `com.ahmedelamin.LocalCodex.dev`. Setup installs to `~/Applications/Kolmogor Dev.app`. It verifies and backs up an existing development installation before replacement and restores it if the move fails. Earlier installs named Kolmogor, Computa or Mactopus stay at their existing paths. The source installer retains existing chat files. Local ad-hoc rebuilds may need a fresh macOS grant.
 
-The new bundle is staged and verified before replacement. A compatible old
-bundle with the same bundle ID is moved into a uniquely named directory under
-`~/Applications/Computa Backups/`, retaining its original bundle name. The new app is installed as `Kolmogor.app`. A failed final
-move attempts to restore the old bundle to its original name and path, and
-reports the preserved paths if recovery needs assistance. Backups are not
-automatically deleted. Existing `~/Library/Application Support/LocalCodex` chats, preferences,
-browser tabs, and installed system-level applications are not removed or reset.
+Public downloads and Sparkle updates use **Kolmogor** and its original bundle identifier `com.ahmedelamin.LocalCodex`. macOS checks the app’s signing identity when applying an Accessibility grant. An enabled entry from an earlier Apple Development build can therefore appear in System Settings while the installed Developer ID copy is denied.
 
-An existing `/Applications/Kolmogor.app` is intentionally left untouched. When
-both locations exist, use the exact newly installed path instead of assuming
-Spotlight picked the desired copy. The setup command opens that exact path.
-
-The stable legacy bundle ID is `com.ahmedelamin.LocalCodex`; the product name is
-Kolmogor. A locally rebuilt ad-hoc signature may require macOS permissions to
-be granted again. Setup does not edit TCC, bypass Gatekeeper, or grant Full Access.
-Review Accessibility and Screen Recording prompts yourself. Signing does not
-grant access automatically.
+If that happens, open **Kolmogor Settings → Computer use → Show in Finder** to locate the running app. In **System Settings → Privacy & Security → Accessibility**, remove the old entry and add the selected app. Return to Kolmogor to see the refreshed permission status, then retry the inspection.
 
 ### Running agents across a restart
 

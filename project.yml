@@ -66,8 +66,11 @@ targets:
       Release: Config/Version.xcconfig
     settings:
       base:
-        # Stable identity preserves settings and macOS permission association.
-        PRODUCT_BUNDLE_IDENTIFIER: com.ahmedelamin.LocalCodex
+        # Local builds must never register for the public app's macOS permissions.
+        # The notarized release worker supplies Config/Distribution.xcconfig.
+        KOLMOGOR_APP_IDENTIFIER: com.ahmedelamin.LocalCodex.dev
+        KOLMOGOR_DISPLAY_NAME: Kolmogor Dev
+        PRODUCT_BUNDLE_IDENTIFIER: $(KOLMOGOR_APP_IDENTIFIER)
         PRODUCT_NAME: Kolmogor
         PRODUCT_MODULE_NAME: Computa
         DEVELOPMENT_TEAM: MSMG8CJLB3

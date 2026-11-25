@@ -14,7 +14,7 @@ async function file(path: string, contents = "fixture") {
   await writeFile(path, contents);
 }
 
-async function app(path: string, identity = "com.ahmedelamin.LocalCodex", marker = "new build", executable = "Kolmogor") {
+async function app(path: string, identity = "com.ahmedelamin.LocalCodex.dev", marker = "new build", executable = "Kolmogor") {
   await file(join(path, "Contents/Info.plist"), JSON.stringify({ CFBundleIdentifier: identity, CFBundleExecutable: executable }));
   await file(join(path, "Contents/MacOS", executable), marker);
   for (const relative of ["AgentRuntime/codex-app-server", "AgentRuntime/manifest.json",
@@ -149,7 +149,7 @@ describe("source build flow", () => {
     const f = await fixture();
     const result = await setup(parseOptions([]), f.context);
     expect(f.calls).toContainEqual(["/bin/zsh", "Scripts/install-mlx-runtime.sh"]);
-    expect(f.calls).toContainEqual(["/usr/bin/open", join(f.context.userHome, "Applications/Kolmogor.app")]);
+    expect(f.calls).toContainEqual(["/usr/bin/open", join(f.context.userHome, "Applications/Kolmogor Dev.app")]);
     expect(await readFile(join(result.app!, "Contents/MacOS/Kolmogor"), "utf8")).toBe("new build");
   });
   test("download is explicit and no-launch does not start the installed app", async () => {
@@ -178,7 +178,7 @@ describe("source build flow", () => {
   });
   test("failed build leaves existing app and user state unchanged", async () => {
     const f = await fixture();
-    const existing = join(f.context.userHome, "Applications/Kolmogor.app");
+    const existing = join(f.context.userHome, "Applications/Kolmogor Dev.app");
     await app(existing, undefined, "previous build");
     f.failCommand("Scripts/build-agent-runtime.ts");
     await expect(setup(parseOptions([]), f.context)).rejects.toThrow("Command failed");
@@ -188,54 +188,29 @@ describe("source build flow", () => {
 });
 
 describe("installation preservation", () => {
-  test("legacy Mactopus upgrades to Kolmogor with its original filename and user data preserved", async () => {
+  test("local setup leaves every public and legacy app at its original path", async () => {
+    const f = await fixture();
+    const apps = join(f.context.userHome, "Applications");
+    for (const name of ["Kolmogor", "Computa", "Mactopus"]) {
+      await app(join(apps, name + ".app"), "com.ahmedelamin.LocalCodex", "public build", name);
+    }
+    const source = join(f.context.root, "product/Kolmogor.app");
+    await app(source);
+    const installed = await installApp(f.context, source);
+    expect(installed.app).toBe(join(apps, "Kolmogor Dev.app"));
+    expect(installed.backup).toBeUndefined();
+    for (const name of ["Kolmogor", "Computa", "Mactopus"]) {
+      expect(await readFile(join(apps, name + ".app", "Contents/MacOS", name), "utf8")).toBe("public build");
+    }
+  });
+  test("a public bundle cannot be installed as the development app", async () => {
     const f = await fixture();
     const source = join(f.context.root, "product/Kolmogor.app");
-    const legacy = join(f.context.userHome, "Applications/Mactopus.app");
-    const savedChat = join(f.context.userHome, "Library/Application Support/LocalCodex/chat.json");
-    await app(source);
-    await app(legacy, undefined, "legacy build", "Mactopus");
-    await file(savedChat, "unchanged data");
-    const result = await installApp(f.context, source);
-    expect(result.app).toBe(join(f.context.userHome, "Applications/Kolmogor.app"));
-    expect(result.backup).toEndWith("/Mactopus.app");
-    expect(await readFile(join(result.backup!, "Contents/MacOS/Mactopus"), "utf8")).toBe("legacy build");
-    expect(await lstat(legacy).catch(() => null)).toBeNull();
-    expect(await readFile(savedChat, "utf8")).toBe("unchanged data");
-  });
-  test("failed legacy upgrade restores Mactopus at its original path", async () => {
-    const f = await fixture();
-    const source = join(f.context.root, "product/Kolmogor.app");
-    const legacy = join(f.context.userHome, "Applications/Mactopus.app");
-    const destination = join(f.context.userHome, "Applications/Kolmogor.app");
-    await app(source);
-    await app(legacy, undefined, "legacy build", "Mactopus");
-    f.context.move = async (from, to) => {
-      if (from.includes(".computa-install-") && to === destination) throw new Error("simulated move failure");
-      await rename(from, to);
-    };
-    await expect(installApp(f.context, source)).rejects.toThrow("previous app was preserved");
-    expect(await readFile(join(legacy, "Contents/MacOS/Mactopus"), "utf8")).toBe("legacy build");
-    expect(await lstat(destination).catch(() => null)).toBeNull();
-  });
-  test("both names present fail before builds or runtime provisioning", async () => {
-    const f = await fixture();
-    const applications = join(f.context.userHome, "Applications");
-    await app(join(applications, "Kolmogor.app"), undefined, "current build");
-    await app(join(applications, "Mactopus.app"), undefined, "legacy build", "Mactopus");
-    await expect(setup(parseOptions([]), f.context)).rejects.toThrow("duplicate installations");
-    expect(f.calls.some(call => call.includes("Scripts/build-agent-runtime.ts") || call.includes("Scripts/install-mlx-runtime.sh") || call[0] === "/usr/bin/ditto")).toBe(false);
-    expect(await readFile(join(applications, "Kolmogor.app/Contents/MacOS/Kolmogor"), "utf8")).toBe("current build");
-    expect(await readFile(join(applications, "Mactopus.app/Contents/MacOS/Mactopus"), "utf8")).toBe("legacy build");
-  });
-  test("legacy name requires the original bundle identity and executable, not just its path", async () => {
-    const f = await fixture();
-    const legacy = join(f.context.userHome, "Applications/Mactopus.app");
-    await app(legacy, "org.example.Unrelated", "unknown", "Mactopus");
-    await expect(installApp(f.context, "/not-used")).rejects.toThrow("unknown app");
-    await app(legacy, undefined, "wrong executable", "Kolmogor");
-    await expect(installApp(f.context, "/not-used")).rejects.toThrow("unknown app");
-    expect(f.calls.some(call => call[0] === "/usr/bin/ditto")).toBe(false);
+    const destination = join(f.context.userHome, "Applications/Kolmogor Dev.app");
+    await app(source, "com.ahmedelamin.LocalCodex");
+    await app(destination, undefined, "previous build");
+    await expect(installApp(f.context, source)).rejects.toThrow("unknown app");
+    expect(await readFile(join(destination, "Contents/MacOS/Kolmogor"), "utf8")).toBe("previous build");
   });
   test("a running legacy Mactopus blocks the source installer before builds", async () => {
     const f = await fixture(); f.setRunning(true, "Mactopus");
@@ -245,7 +220,7 @@ describe("installation preservation", () => {
   test("existing compatible app is backed up without changing application support", async () => {
     const f = await fixture();
     const source = join(f.context.root, "product/Kolmogor.app");
-    const destination = join(f.context.userHome, "Applications/Kolmogor.app");
+    const destination = join(f.context.userHome, "Applications/Kolmogor Dev.app");
     const savedChat = join(f.context.userHome, "Library/Application Support/LocalCodex/chat.json");
     await app(source);
     await app(destination, undefined, "previous build");
@@ -259,7 +234,7 @@ describe("installation preservation", () => {
   test("unknown app identity is preserved", async () => {
     const f = await fixture();
     const source = join(f.context.root, "product/Kolmogor.app");
-    const destination = join(f.context.userHome, "Applications/Kolmogor.app");
+    const destination = join(f.context.userHome, "Applications/Kolmogor Dev.app");
     await app(source);
     await app(destination, "org.example.Unrelated", "unknown app");
     await expect(installApp(f.context, source)).rejects.toThrow("unknown app");
@@ -276,7 +251,7 @@ describe("installation preservation", () => {
   test("failed final rename restores the previous app and keeps staged evidence", async () => {
     const f = await fixture();
     const source = join(f.context.root, "product/Kolmogor.app");
-    const destination = join(f.context.userHome, "Applications/Kolmogor.app");
+    const destination = join(f.context.userHome, "Applications/Kolmogor Dev.app");
     await app(source);
     await app(destination, undefined, "previous build");
     f.context.move = async (from, to) => {
@@ -291,7 +266,7 @@ describe("installation preservation", () => {
 test("source upgrade removes only retired generated resources and preserves the old installation", async () => {
   const f = await fixture();
   const product = join(f.context.root, ".build/SourceInstall/Build/Products/Release/Kolmogor.app");
-  const installed = join(f.context.userHome, "Applications/Kolmogor.app");
+  const installed = join(f.context.userHome, "Applications/Kolmogor Dev.app");
   await app(installed, undefined, "previous build");
   const retired = ["Contents/Resources/ChromeBridge", "Contents/Resources/BrowserExtension"];
   for (const relative of retired) {

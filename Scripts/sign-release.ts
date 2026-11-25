@@ -8,6 +8,9 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 export interface SignOptions { app: string; output: string; identity: string }
 export type SignRunner = (command: string[]) => Promise<string>;
 const bundleID = "com.ahmedelamin.LocalCodex";
+// Keep the public app eligible for grants made to earlier notarized releases,
+// including after certificate renewal by the same team.
+const publicRequirementFile = new URL("../Config/PublicApp.requirement", import.meta.url);
 const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 const help = "Usage: bun Scripts/sign-release.ts --app BUILD.app --output NEW.app --identity 'Developer ID Application: …'";
 
@@ -131,7 +134,8 @@ export async function signRelease(options: SignOptions, run: SignRunner): Promis
   manifest.binarySize = signedRuntime.length;
   await writeFile(join(output, manifestPath), JSON.stringify(manifest, null, 2) + "\n");
   await run(["/usr/bin/codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, output]);
-  await run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists", output]);
+  const publicRequirement = (await readFile(publicRequirementFile, "utf8")).trim();
+  await run(["/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", publicRequirement, output]);
   return { app: output, mainSHA256: digest(await readFile(join(output, "Contents/MacOS/Kolmogor"))), runtimeSHA256: manifest.binarySHA256 };
 }
 

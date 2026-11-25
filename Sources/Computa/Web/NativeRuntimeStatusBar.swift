@@ -27,7 +27,7 @@ struct NativeRuntimeStatusBar: View {
                 .help("Access mode settings")
             } else {
                 Button {
-                    if state.presentSettings() { state.refreshAutomationPermissions() }
+                    state.presentSettings()
                 } label: { settingsIcon }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Settings")

@@ -126,6 +126,7 @@ def package(state, tag, job):
     if product.exists():
         shutil.rmtree(product)
     run("xcodebuild", "-project", "Kolmogor.xcodeproj", "-scheme", "Kolmogor", "-configuration", "Release",
+        "-xcconfig", "Config/Distribution.xcconfig",
         "-destination", "platform=macOS,arch=arm64", "-derivedDataPath", derived, "-onlyUsePackageVersionsFromResolvedFile",
         "-jobs", "3", "ARCHS=arm64", "ONLY_ACTIVE_ARCH=YES", "CODE_SIGN_STYLE=Manual", "CODE_SIGN_IDENTITY=-",
         "DEVELOPMENT_TEAM=", "SWIFT_ACTIVE_COMPILATION_CONDITIONS=", "CURRENT_PROJECT_VERSION=" + tag.split(".")[-1], "build")

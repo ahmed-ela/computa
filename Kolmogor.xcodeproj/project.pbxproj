@@ -2150,6 +2150,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Config/Kolmogor-Info.plist";
+				KOLMOGOR_APP_IDENTIFIER = com.ahmedelamin.LocalCodex.dev;
+				KOLMOGOR_DISPLAY_NAME = "Kolmogor Dev";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -2158,7 +2160,7 @@
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.ahmedelamin.LocalCodex;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KOLMOGOR_APP_IDENTIFIER)";
 				PRODUCT_MODULE_NAME = Computa;
 				PRODUCT_NAME = Kolmogor;
 				SDKROOT = macosx;
@@ -2319,6 +2321,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "Config/Kolmogor-Info.plist";
+				KOLMOGOR_APP_IDENTIFIER = com.ahmedelamin.LocalCodex.dev;
+				KOLMOGOR_DISPLAY_NAME = "Kolmogor Dev";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -2327,7 +2331,7 @@
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.ahmedelamin.LocalCodex;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(KOLMOGOR_APP_IDENTIFIER)";
 				PRODUCT_MODULE_NAME = Computa;
 				PRODUCT_NAME = Kolmogor;
 				SDKROOT = macosx;

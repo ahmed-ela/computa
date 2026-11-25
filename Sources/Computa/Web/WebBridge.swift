@@ -31,17 +31,20 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private var pageIsReady = false
     private let consumeLauncherChat: (String, UUID) -> Bool
     private let showAccessModeSettings: () -> Void
-    private let openScreenRecordingSettings: (URL) -> Bool
+    private let openPrivacySettings: (URL) -> Bool
 
     static let screenRecordingSettingsURL = URL(
         string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_ScreenCapture"
+    )!
+    static let accessibilitySettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"
     )!
     static let systemSettingsAppURL = URL(fileURLWithPath: "/System/Applications/System Settings.app")
 
     init(
         state: AppState,
         window: WorkspaceTabs? = nil,
-        openScreenRecordingSettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
+        openPrivacySettings: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
         consumeLauncherChat: @escaping (String, UUID) -> Bool = { _, _ in false },
         showAccessModeSettings: @escaping () -> Void = {}
     ) {
@@ -49,7 +52,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         windowTabs = window ?? state.workspaceTabs
         self.consumeLauncherChat = consumeLauncherChat
         self.showAccessModeSettings = showAccessModeSettings
-        self.openScreenRecordingSettings = openScreenRecordingSettings
+        self.openPrivacySettings = openPrivacySettings
     }
 
     private static func workspaceTab(_ value: Any?) -> WorkspaceTabID? {
@@ -361,8 +364,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             }
 
         case "showSettings":
-            state.refreshAutomationPermissions()
-            state.presentedSheet = .settings
+            state.presentSettings()
 
         case "importChromeProfile":
             guard Set(body.keys) == ["action"], state.presentedSheet == .settings, !state.approvalGateBlocksInteraction,
@@ -416,7 +418,13 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             state.refreshAutomationPermissions()
 
         case "requestAccessibilityPermission":
-            state.requestAccessibilityPermission()
+            guard Set(body.keys) == ["action"], state.presentedSheet == .settings else { return }
+            requestAccessibilityPermission()
+
+        case "revealRunningApp":
+            guard Set(body.keys) == ["action"], state.presentedSheet == .settings,
+                  !state.approvalGateBlocksInteraction else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
 
         case "requestScreenRecordingPermission":
             requestScreenRecordingPermission()
@@ -453,13 +461,21 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     /// Only the human-operated Settings action reaches this method. Opening
     /// System Settings does not change TCC authorization; the user must grant it.
+    func requestAccessibilityPermission() {
+        guard let state, !state.approvalGateBlocksInteraction else { return }
+        state.requestAccessibilityPermission()
+        if state.automationPermissions.accessibility == .notGranted { openPermissionPane(Self.accessibilitySettingsURL) }
+    }
+
     func requestScreenRecordingPermission() {
         guard let state else { return }
         state.requestScreenRecordingPermission()
         guard state.automationPermissions.screenRecording == .notGranted else { return }
-        if !openScreenRecordingSettings(Self.screenRecordingSettingsURL) {
-            _ = openScreenRecordingSettings(Self.systemSettingsAppURL)
-        }
+        openPermissionPane(Self.screenRecordingSettingsURL)
+    }
+
+    private func openPermissionPane(_ pane: URL) {
+        if !openPrivacySettings(pane) { _ = openPrivacySettings(Self.systemSettingsAppURL) }
     }
 
     private func pushLatestSnapshotIfReady() {

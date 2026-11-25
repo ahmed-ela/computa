@@ -347,6 +347,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
       case 'ready':
       case 'refreshPermissions':
       case 'requestAccessibilityPermission':
+      case 'revealRunningApp':
       case 'requestScreenRecordingPermission':
         // A browser preview must never request macOS permissions.
         return;
