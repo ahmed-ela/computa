@@ -166,6 +166,10 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             case "closeWorkspaceTab": state.closeWorkspaceTab(tab)
             case "setWorkspaceTabPinned":
                 guard let pinned = body["pinned"] as? Bool else { return }
+                if pinned && tab.kind == .browser {
+                    guard let page = state.browserSession.workspaceBrowserTabs.first(where: { .browser($0.workspaceID) == tab }),
+                          !page.isPopup else { return }
+                }
                 state.workspaceTabs.setPinned(tab, pinned: pinned)
             default:
                 guard let target = Self.workspaceTab(body["target"]), state.openWorkspaceTabs.contains(target) else { return }

@@ -91,11 +91,21 @@ final class EmbeddedBrowserSession {
     var workspaceProfileID: UUID? { persistent ? persistentProfileIdentifier() : nil }
 
     var restorablePages: [SavedWorkspace.Page] {
-        guard persistent else { return [] }
-        return tabs.compactMap { restorablePage(for: $0) }
+        restorablePages(includingSignInsPinnedIn: [])
     }
 
-    func restorablePage(for tab: EmbeddedBrowserTab) -> SavedWorkspace.Page? {
+    func restorablePages(includingSignInsPinnedIn pins: Set<WorkspaceTabID>) -> [SavedWorkspace.Page] {
+        guard persistent else { return [] }
+        return tabs.compactMap { restorablePage(for: $0, includeSignIn: pins.contains(.browser($0.workspaceID))) }
+    }
+
+    func restorablePage(for tab: EmbeddedBrowserTab, includeSignIn: Bool = false) -> SavedWorkspace.Page? {
+        if let provider = tab.setupProvider {
+            guard includeSignIn, !tab.isPopup else { return nil }
+            // OAuth redirects can contain credentials. Reconstruct a fresh provider homepage from its identity.
+            return SavedWorkspace.Page(id: tab.workspaceID, url: nil, mobile: false,
+                signIn: .init(provider: provider.rawValue, kimiProfileID: tab.kimiProfileID))
+        }
         if tab.isDormant { return SavedWorkspace.Page(id: tab.workspaceID, url: tab.url, mobile: tab.requestsMobileSite) }
         guard let entry = entries[tab.id], entry.isRestorable else { return nil }
         return SavedWorkspace.Page(id: tab.workspaceID, url: entry.restoreURL, mobile: tab.requestsMobileSite)
@@ -114,8 +124,31 @@ final class EmbeddedBrowserSession {
     }
 
     private func createWorkspacePage(_ page: SavedWorkspace.Page) throws -> UUID {
-        try createTab(url: EmbeddedBrowserURLPolicy.workspaceAddress(page.url), select: false, modelOwned: false,
+        if page.signIn != nil {
+            guard let tab = restoredTab(page) else { throw Failure.tabClosed }
+            tabs.append(tab)
+            onWorkspaceTabOpened?(tab.workspaceID, nil)
+            return tab.id
+        }
+        return try createTab(url: EmbeddedBrowserURLPolicy.workspaceAddress(page.url), select: false, modelOwned: false,
                       requestsMobileSite: page.mobile, workspaceID: page.id)
+    }
+
+    private func restoredTab(_ page: SavedWorkspace.Page) -> EmbeddedBrowserTab? {
+        let tab = EmbeddedBrowserTab(workspaceID: page.id, kimiProfileID: page.signIn?.kimiProfileID, requestsMobileSite: page.mobile)
+        tab.isDormant = true
+        if let signIn = page.signIn {
+            guard let provider = EmbeddedWebModelTransport.Provider(rawValue: signIn.provider) else { return nil }
+            if let id = signIn.kimiProfileID {
+                guard provider == .kimi, id == kimiDedicatedProfileID else { return nil }
+            }
+            tab.setupProvider = provider
+            tab.url = provider.startURL
+        } else {
+            tab.url = EmbeddedBrowserURLPolicy.workspaceAddress(page.url)
+        }
+        tab.title = tab.url?.host ?? "New tab"
+        return tab
     }
 
     func restoreWorkspacePages(_ snapshot: SavedWorkspace) {
@@ -123,11 +156,7 @@ final class EmbeddedBrowserSession {
         let open = Set(snapshot.order)
         var seen = Set(workspaceBrowserTabs.map(\.workspaceID))
         for page in snapshot.pages where open.contains(.browser(page.id)) && seen.insert(page.id).inserted {
-            let tab = EmbeddedBrowserTab(workspaceID: page.id, requestsMobileSite: page.mobile)
-            tab.isDormant = true
-            tab.url = EmbeddedBrowserURLPolicy.workspaceAddress(page.url)
-            tab.title = tab.url?.host ?? "New tab"
-            tabs.append(tab)
+            if let tab = restoredTab(page) { tabs.append(tab) }
         }
         let selected = workspaceBrowserTabs.first { $0.workspaceID == snapshot.selectedPage }
         if let tab = selected ?? workspaceBrowserTabs.first { selectTab(tab.id) }
@@ -493,6 +522,7 @@ final class EmbeddedBrowserSession {
             let id = try openKimiModelSignIn(loadHome: true)
             guard let tab = humanTab(id: id) else { throw Failure.tabClosed }
             tab.setupProvider = .kimi
+            onWorkspacePageChanged?()
         } else {
             try openSharedProviderSetup(.kimi)
             useSharedKimiModelProfile()
@@ -520,9 +550,12 @@ final class EmbeddedBrowserSession {
     }
 
     private func openKimiModelSignIn(loadHome: Bool) throws -> UUID {
-        let profile = try kimiProfile(id: kimiDedicatedProfileID ?? UUID())
+        let profileID = kimiDedicatedProfileID ?? UUID()
+        let existing = humanTabs.first { !$0.isPopup && $0.kimiProfileID == profileID }
+        if let existing { try wakeTabIfNeeded(existing.id) }
+        let profile = try kimiProfile(id: profileID)
         let tabID: UUID
-        if let tab = humanTabs.first(where: { !$0.isPopup && $0.kimiProfileID == profile.id }) {
+        if let tab = existing {
             guard entries[tab.id]?.view.configuration.websiteDataStore === profile.store else { throw Failure.kimiProfileUnavailable }
             selectTab(tab.id)
             tabID = tab.id
@@ -946,7 +979,7 @@ final class EmbeddedBrowserSession {
         // Inspection is an explicit, ephemeral choice for each human tab.
         // An inspectable opener must not grant it to a new popup.
         view.isInspectable = false
-        tab.isWebInspectorAvailable = !modelOwned && !toolOwned && kimiProfileID == nil
+        tab.isWebInspectorAvailable = !modelOwned && !toolOwned && kimiProfileID == nil && tab.setupProvider == nil
         let delegate = EmbeddedBrowserDelegate(session: self, tabID: tab.id)
         view.navigationDelegate = delegate
         view.uiDelegate = delegate
@@ -3080,7 +3113,7 @@ final class EmbeddedBrowserSession {
 
     /// Dedicated sign-in and OAuth pages remain visible to the person only.
     func browserToolTab(id: UUID) -> EmbeddedBrowserTab? {
-        if entries[id] == nil { return tabs.first { $0.id == id && $0.isDormant } }
+        if entries[id] == nil { return tabs.first { $0.id == id && $0.isDormant && $0.setupProvider == nil && $0.kimiProfileID == nil } }
         guard let entry = entries[id], entry.isAvailableToBrowserTools else { return nil }
         return entry.tab
     }
@@ -3829,8 +3862,11 @@ final class EmbeddedBrowserSession {
 
     func wakeTabIfNeeded(_ id: UUID) throws {
         guard entries[id] == nil, let tab = tabs.first(where: { $0.id == id && $0.isDormant }) else { return }
-        _ = try createTab(url: tab.url, select: false, modelOwned: false, requestsMobileSite: tab.requestsMobileSite,
-                          workspaceID: tab.workspaceID, waking: tab)
+        let profile = try tab.kimiProfileID.map { try kimiProfile(id: $0) }
+        _ = try createTab(url: tab.setupProvider?.startURL ?? tab.url, select: false, modelOwned: false,
+                          requestsMobileSite: tab.requestsMobileSite, workspaceID: tab.workspaceID,
+                          kimiProfile: profile, waking: tab)
+        if let profile { kimiDedicatedStore = profile.store }
     }
 
     private func entry(_ id: UUID) throws -> Entry {

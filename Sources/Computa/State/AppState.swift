@@ -383,9 +383,14 @@ final class AppState {
         let workspaceTabs = workspaceWindows.primary
         let previous = workspaceTabs.saved
         let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
+        // Detached windows are temporary. Their pins join the primary pinned section on relaunch.
+        let pinnedTabs = workspaceWindows.all.flatMap(\.pinnedTabs)
+        let pinSet = Set(pinnedTabs)
         let temporaryDrafts = Set(workspaceWindows.temporary.flatMap(\.temporaryDraftIDs))
-        let primaryTabs = Set(workspaceTabs.order)
-        let pages = browserSession.restorablePages.filter { primaryTabs.contains(.browser($0.id)) }
+            .subtracting(pinnedTabs.filter { $0.kind == .agent }.map(\.id))
+        let restorableTabs = Set(workspaceTabs.order).union(pinSet)
+        let pages = browserSession.restorablePages(includingSignInsPinnedIn: pinSet)
+            .filter { restorableTabs.contains(.browser($0.id)) }
         let pageIDs = Set(pages.map { $0.id.uuidString })
         var drafts = waitingForWorkspaceHistory ? (previous?.drafts ?? [:]).filter { byID[$0.key] == nil } : [:]
         for task in tasks where task.status == .draft && task.runtimeThreadID == nil && task.entries.isEmpty
@@ -403,17 +408,20 @@ final class AppState {
             }
             return .agent(task.runtimeThreadID ?? tab.id)
         }
-        let pins = workspaceTabs.pinnedTabs.compactMap(restorableTab)
+        let pins = pinnedTabs.compactMap(restorableTab)
         let order = pins + workspaceTabs.order.dropFirst(workspaceTabs.pinnedCount).compactMap(restorableTab)
+        let returningPin = workspaceTabs.order.isEmpty ? pins.first : nil
         let selected = workspaceTabs.selectedTaskID.map { byID[$0]?.runtimeThreadID ?? $0 }
+            ?? (returningPin?.kind == .agent ? returningPin?.id : nil)
             ?? (waitingForWorkspaceHistory && workspaceTabs.selectionRevision == 0 ? previous?.selectedAgent : nil)
         let selectedPage = workspaceTabs.selectedPage.flatMap { pageIDs.contains($0.uuidString) ? $0 : nil }
+            ?? returningPin.flatMap { $0.kind == .browser ? UUID(uuidString: $0.id) : nil }
         let temporaryKeys = Set(temporaryDrafts.map { $0.lowercased() })
         let profiles = workspaceTabs.agents.filter { !temporaryKeys.contains($0.key) }
         workspaceTabs.save(SavedWorkspace(agents: profiles.isEmpty ? nil : profiles, order: order,
             pinnedCount: pins.isEmpty ? nil : pins.count, selectedAgent: selected, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
-            pages: pages, selectedPage: selectedPage, browserIsPrimary: workspaceTabs.browserIsPrimary && selectedPage != nil,
+            pages: pages, selectedPage: selectedPage, browserIsPrimary: selectedPage != nil && (workspaceTabs.browserIsPrimary || returningPin?.kind == .browser),
             showsBrowserPane: isBrowserPresented))
     }
 

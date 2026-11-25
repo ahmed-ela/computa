@@ -5,6 +5,89 @@ import XCTest
 
 @MainActor
 final class EmbeddedBrowserSessionTests: XCTestCase {
+    func testPinnedProviderSetupRestoresAtHomeStaysPrivateAndSupportsUndo() throws {
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        registerKimiFixtureProfileForCleanup(profile)
+        let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let normal = try session.createTab()
+        let control = try XCTUnwrap(session.humanTab(id: normal))
+        try session.openProviderSignIn(.chatgpt)
+        let setup = try XCTUnwrap(session.setupTab(for: .chatgpt))
+        let pin = WorkspaceTabID.browser(setup.workspaceID)
+        XCTAssertFalse(WorkspaceTabs(defaults: prefs).order.contains(pin))
+        state.workspaceTabs.setPinned(pin, pinned: true)
+        state.selectWorkspaceTab(.browser(control.workspaceID))
+        var saved = try XCTUnwrap(WorkspaceTabs(defaults: prefs).saved)
+        let index = try XCTUnwrap(saved.pages.firstIndex { $0.id == setup.workspaceID })
+        XCTAssertEqual(saved.pages[index].signIn?.provider, "chatgpt")
+        XCTAssertNil(saved.pages[index].url)
+        // Even a stored callback must never be replayed by a restored sign-in tab.
+        saved.pages[index] = .init(id: setup.workspaceID, url: URL(string: "https://example.invalid/callback?code=fixture"),
+                                   mobile: false, signIn: saved.pages[index].signIn)
+        WorkspaceTabs(defaults: prefs).save(saved)
+
+        let next = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { next.shutdown() }
+        let reopened = AppState(tasks: [], preferences: prefs, browserSession: next, workspaceLayout: .mixedTabs)
+        let dormant = try XCTUnwrap(next.setupTab(for: .chatgpt))
+        XCTAssertEqual(dormant.workspaceID, setup.workspaceID)
+        XCTAssertEqual(dormant.url, EmbeddedWebModelTransport.Provider.chatgpt.startURL)
+        XCTAssertNil(next.webView(for: dormant.id))
+        XCTAssertNil(next.browserToolTab(id: dormant.id))
+        try next.openProviderSignIn(.chatgpt)
+        XCTAssertEqual(next.selectedTabID, dormant.id)
+        XCTAssertNotNil(next.webView(for: dormant.id))
+        XCTAssertNil(next.browserToolTab(id: dormant.id))
+        XCTAssertFalse(dormant.isWebInspectorAvailable)
+        reopened.closeWorkspaceTab(pin)
+        XCTAssertNil(next.setupTab(for: .chatgpt))
+        XCTAssertFalse(WorkspaceTabs(defaults: prefs).order.contains(pin))
+        reopened.reopenClosedTab()
+        let undone = try XCTUnwrap(next.setupTab(for: .chatgpt))
+        XCTAssertEqual(undone.workspaceID, setup.workspaceID)
+        XCTAssertEqual(Array(reopened.workspaceTabs.pinnedTabs), [pin])
+        XCTAssertNil(next.browserToolTab(id: undone.id))
+        reopened.workspaceTabs.setPinned(pin, pinned: false)
+        XCTAssertFalse(WorkspaceTabs(defaults: prefs).order.contains(pin))
+    }
+
+    func testPinnedDedicatedKimiSetupWakesInItsOriginalProfile() throws {
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        registerKimiFixtureProfileForCleanup(profile)
+        let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let normal = try session.createTab()
+        let control = try XCTUnwrap(session.humanTab(id: normal))
+        try session.openKimiSetup(usingDedicatedProfile: true)
+        let setup = try XCTUnwrap(session.setupTab(for: .kimi))
+        let dedicated = try XCTUnwrap(session.kimiModelProfileID)
+        registerKimiFixtureProfileForCleanup(dedicated)
+        state.workspaceTabs.setPinned(.browser(setup.workspaceID), pinned: true)
+        state.selectWorkspaceTab(.browser(control.workspaceID))
+        let next = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { next.shutdown() }
+        var saved = try XCTUnwrap(WorkspaceTabs(defaults: prefs).saved)
+        for signIn in [SavedWorkspace.ProviderSignIn(provider: "kimi", kimiProfileID: UUID()),
+                       SavedWorkspace.ProviderSignIn(provider: "unknown", kimiProfileID: nil)] {
+            let id = UUID()
+            saved.pages.append(.init(id: id, url: URL(string: "https://example.invalid/callback"), mobile: false, signIn: signIn))
+            saved.order.append(.browser(id))
+        }
+        next.restoreWorkspacePages(saved)
+        let dormant = try XCTUnwrap(next.setupTab(for: .kimi))
+        XCTAssertNil(next.webView(for: dormant.id))
+        XCTAssertNil(next.browserToolTab(id: dormant.id))
+        try next.openProviderSignIn(.kimi)
+        XCTAssertEqual(next.selectedTabID, dormant.id)
+        XCTAssertEqual(dormant.workspaceID, setup.workspaceID)
+        XCTAssertEqual(next.webView(for: dormant.id)?.configuration.websiteDataStore.identifier, dedicated)
+        XCTAssertNil(next.browserToolTab(id: dormant.id))
+        XCTAssertEqual(next.workspaceBrowserTabs.count, 2)
+    }
+
     func testKimiModelProfileIsolatesRealWebKitStorageAndPreservesNormalDraftAcrossSwitches() async throws {
         let normalProfile = UUID()
         registerKimiFixtureProfileForCleanup(normalProfile)

@@ -22,10 +22,16 @@ struct WorkspaceTabID: Codable, Hashable, Sendable {
 
 /// Relaunch metadata only. WebKit leases, runtime handles and message contents never cross launches.
 struct SavedWorkspace: Codable, Equatable {
+    struct ProviderSignIn: Codable, Equatable {
+        let provider: String
+        let kimiProfileID: UUID?
+    }
+
     struct Page: Codable, Equatable {
         let id: UUID
         let url: URL?
         let mobile: Bool
+        var signIn: ProviderSignIn? = nil
     }
 
     struct Draft: Codable, Equatable {
@@ -169,6 +175,7 @@ final class WorkspaceTabs {
         family = primary.family
         defaults = nil
         profiles = primary.profiles
+        onChange = primary.onChange
         order = []
         hasSavedAgents = true
     }
@@ -418,7 +425,7 @@ extension AppState {
             removeWorkspaceTab(tab, wasSelected: primaryBrowserID == nil && selectedTaskID == tab.id)
         case .browser:
             if let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID.uuidString == tab.id }) {
-                if let saved = browserSession.restorablePage(for: page),
+                if let saved = browserSession.restorablePage(for: page, includeSignIn: workspaceTabs.pinnedTabs.contains(tab)),
                    let index = browserSession.workspaceBrowserTabs.firstIndex(where: { $0.id == page.id }) {
                     workspaceTabs.rememberClose(.browser(saved, paneIndex: index))
                 }

@@ -155,6 +155,79 @@ final class WorkspaceWindowTests: XCTestCase {
         XCTAssertEqual(primary.order, [.agent("bound"), page, regular])
     }
 
+    func testDetachedPinsRestoreInOrderAndReturnToPrimaryOnWindowClose() throws {
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let main = state.workspaceWindows.primary, detached = state.workspaceWindows.createTemporary()
+        state.createTask()
+        let original = try XCTUnwrap(main.selection)
+        let selectedID = try session.createTab()
+        let selected = try XCTUnwrap(session.humanTab(id: selectedID)?.workspaceID)
+        state.selectWorkspaceTab(.browser(selected))
+        main.setPinned(original, pinned: true)
+        let (agent, page, regular) = try state.workspaceWindows.withWindow(detached) {
+            state.createTask()
+            let agent = try XCTUnwrap(detached.selection)
+            state.saveAgentSettings(taskID: agent.id, name: "Pinned agent", instructions: "Remember the fixture.")
+            state.createTask()
+            let regular = try XCTUnwrap(detached.selection)
+            let tabID = try session.createTab()
+            let page = try XCTUnwrap(session.humanTab(id: tabID))
+            _ = try session.createTab()
+            detached.setPinned(.browser(page.workspaceID), pinned: true)
+            detached.setPinned(agent, pinned: true)
+            return (agent, page, regular)
+        }
+        let browser = WorkspaceTabID.browser(page.workspaceID)
+        let expected = [original, browser, agent, .browser(selected)]
+        XCTAssertEqual(main.order, [original, .browser(selected)])
+        XCTAssertEqual(WorkspaceTabs(defaults: prefs).order, expected)
+        detached.setPinned(agent, pinned: false)
+        XCTAssertFalse(WorkspaceTabs(defaults: prefs).order.contains(agent))
+        detached.setPinned(agent, pinned: true)
+
+        let next = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { next.shutdown() }
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: next, workspaceLayout: .mixedTabs)
+        XCTAssertEqual(restored.workspaceTabs.order, expected)
+        XCTAssertEqual(Array(restored.workspaceTabs.pinnedTabs), Array(expected.prefix(3)))
+        XCTAssertEqual(restored.selectedWorkspaceTab, .browser(selected))
+        XCTAssertFalse(restored.tasks.contains { $0.id == regular.id })
+        let restoredAgent = try XCTUnwrap(restored.tasks.first { $0.id == agent.id })
+        XCTAssertEqual(restored.workspaceTabs.agent(for: restoredAgent)?.name, "Pinned agent")
+
+        let view = try XCTUnwrap(session.webView(for: page.id))
+        state.composerDrafts[agent.id] = "Unsent text"
+        state.discardTemporaryWindow(detached)
+        XCTAssertEqual(main.order, expected)
+        XCTAssertEqual(main.selection, .browser(selected))
+        XCTAssertEqual(main.draftHandoff?.drafts[agent.id], "Unsent text")
+        XCTAssertTrue(view === session.webView(for: page.id))
+        XCTAssertEqual(Set(session.workspaceBrowserTabs.map(\.workspaceID)), [page.workspaceID, selected])
+        XCTAssertFalse(state.tasks.contains { $0.id == regular.id })
+        XCTAssertEqual(WorkspaceTabs(defaults: prefs).order, expected)
+    }
+
+    func testOnlyDetachedBrowserPinIsSelectedOnRestoreIntoEmptyPrimaryWindow() throws {
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let main = state.workspaceWindows.primary, detached = state.workspaceWindows.createTemporary()
+        let id = try session.createTab()
+        let page = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: id)?.workspaceID))
+        main.setPinned(page, pinned: true)
+        XCTAssertTrue(state.transferTabs([page], from: main, to: detached))
+        XCTAssertTrue(main.order.isEmpty)
+        let next = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { next.shutdown() }
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: next, workspaceLayout: .mixedTabs)
+        XCTAssertEqual(Array(restored.workspaceTabs.pinnedTabs), [page])
+        XCTAssertEqual(restored.selectedWorkspaceTab, page)
+    }
+
     func testCloseShortcutClosesOnlyItsLastTabAndWindow() throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
