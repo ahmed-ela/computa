@@ -1,5 +1,19 @@
 import WebKit
 
+enum BrowserPageZoomCommand {
+    case zoomIn, zoomOut, actualSize
+
+    private static let levels: [CGFloat] = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5]
+
+    func scale(from current: CGFloat) -> CGFloat {
+        switch self {
+        case .zoomIn: Self.levels.first { $0 > current + 0.001 } ?? Self.levels[Self.levels.count - 1]
+        case .zoomOut: Self.levels.last { $0 < current - 0.001 } ?? Self.levels[0]
+        case .actualSize: 1
+        }
+    }
+}
+
 /// Only the visible desktop tab fits to the pane. WebKit's native zoom updates both
 /// viewport dimensions, including those read by JavaScript to size an inner scroller.
 @MainActor
@@ -28,7 +42,6 @@ final class EmbeddedBrowserPageFit: NSObject, WKScriptMessageHandler {
         view.configuration.userContentController.removeScriptMessageHandler(forName: handler, contentWorld: Self.world)
         view.callAsyncJavaScript("if (globalThis.fitOwner === handler) globalThis.stopPageFit()",
                                  arguments: ["handler": handler], in: nil, in: Self.world, completionHandler: nil)
-        view.pageZoom = 1
     }
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {

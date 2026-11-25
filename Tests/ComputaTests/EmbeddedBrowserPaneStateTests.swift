@@ -2146,6 +2146,70 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testManualPageZoomOverridesAutomaticFitAndFollowsOnlyItsTab() async throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let id = try session.createTab()
+        let web = try XCTUnwrap(session.webView(for: id))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 600),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let pane = try XCTUnwrap(window.contentView)
+        try session.presentTab(id, in: pane)
+        web.loadHTMLString("<!doctype html><style>body{margin:0;min-width:800px}</style><main>Wide page</main>", baseURL: nil)
+        let fitted = await waitForScriptBool(on: web, script: "document.querySelector('main') && Math.abs(innerWidth - 800) <= 1")
+        XCTAssertTrue(fitted)
+        session.changePageZoom(.zoomIn, tabID: id)
+        XCTAssertEqual(web.pageZoom, 0.67, accuracy: 0.001, "Start at the currently displayed scale")
+        session.changePageZoom(.actualSize, tabID: id)
+        window.setContentSize(NSSize(width: 560, height: 600))
+        let actualSize = await waitForScriptBool(on: web, script: "innerWidth === 560 && document.body.scrollWidth >= 800")
+        XCTAssertTrue(actualSize, "100% must survive a narrow pane and a fresh layout")
+        session.changePageZoom(.zoomOut, tabID: id)
+        XCTAssertEqual(web.pageZoom, 0.9, accuracy: 0.001)
+        session.changePageZoom(.zoomIn, tabID: id)
+        session.changePageZoom(.zoomIn, tabID: id)
+        session.changePageZoom(.zoomIn, tabID: id)
+        XCTAssertEqual(web.pageZoom, 1.25, accuracy: 0.001)
+
+        let otherID = try session.createTab(requestsMobileSite: true)
+        let other = try XCTUnwrap(session.webView(for: otherID))
+        session.detachPresentedTab(id, from: pane)
+        try session.presentTab(otherID, in: pane)
+        XCTAssertEqual(other.pageZoom, 1)
+        session.changePageZoom(.zoomOut, tabID: otherID)
+        XCTAssertEqual(other.pageZoom, 0.9, accuracy: 0.001)
+        session.detachPresentedTab(otherID, from: pane)
+        try session.presentTab(id, in: pane)
+        XCTAssertEqual(web.pageZoom, 1.25, accuracy: 0.001)
+        web.loadHTMLString("<!doctype html><style>body{min-width:1000px}</style><p>New document</p>", baseURL: nil)
+        let navigated = await waitForScriptBool(on: web, script: "document.querySelector('p') && innerWidth === 448")
+        XCTAssertTrue(navigated, "Navigation must keep the tab's manual zoom")
+
+        let renderWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1024, height: 768),
+                                    styleMask: .borderless, backing: .buffered, defer: false)
+        renderWindow.isReleasedWhenClosed = false
+        defer { renderWindow.close() }
+        session.installModelRenderHost(try XCTUnwrap(renderWindow.contentView))
+        let lease = try session.acquireToolRendering(tabID: id)
+        XCTAssertEqual(web.pageZoom, 1, "An agent borrows the ordinary unscaled viewport")
+        session.changePageZoom(.zoomOut, tabID: id)
+        XCTAssertEqual(web.pageZoom, 1)
+        session.releaseToolRendering(tabID: id, lease: lease)
+        XCTAssertEqual(web.pageZoom, 1.25, accuracy: 0.001)
+    }
+
+    func testPageZoomBoundsAndReset() {
+        var scale: CGFloat = 1
+        for _ in 0..<30 { scale = BrowserPageZoomCommand.zoomIn.scale(from: scale) }
+        XCTAssertEqual(scale, 5)
+        for _ in 0..<30 { scale = BrowserPageZoomCommand.zoomOut.scale(from: scale) }
+        XCTAssertEqual(scale, 0.25)
+        XCTAssertEqual(BrowserPageZoomCommand.actualSize.scale(from: scale), 1)
+    }
+
+    @MainActor
     func testFittedInboxUsesFullHeightAndCanScrollToItsLastRow() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }

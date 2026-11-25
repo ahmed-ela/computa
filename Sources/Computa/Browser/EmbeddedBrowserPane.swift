@@ -107,6 +107,7 @@ struct EmbeddedBrowserPane: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityIdentifier("embedded-browser-pane")
+        .focusedSceneValue(\.browserZoomTabID, selectedTab?.id)
         .focusedValue(\.browserPaneFocused, true)
         .focusedSceneValue(\.focusBrowserAddress, { addressFocused = true })
         .onAppear { synchronizeAddress() }
