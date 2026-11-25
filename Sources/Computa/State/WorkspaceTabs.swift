@@ -371,6 +371,19 @@ extension AppState {
         inBrowserPane ? browserSession.workspaceBrowserTabs.map { .browser($0.workspaceID) } : openWorkspaceTabs
     }
 
+    func selectNumberedWorkspaceTab(_ number: Int, inBrowserPane: Bool = false) {
+        let tabs = commandTabs(inBrowserPane: inBrowserPane)
+        let target: WorkspaceTabID
+        switch number {
+        case 1...8 where number <= tabs.count: target = tabs[number - 1]
+        case 9:
+            guard let last = tabs.last else { return }
+            target = last
+        default: return
+        }
+        if target != commandTab(inBrowserPane: inBrowserPane) { selectWorkspaceTab(target) }
+    }
+
     func selectAdjacentWorkspaceTab(_ direction: TabDirection, inBrowserPane: Bool = false) {
         let tabs = commandTabs(inBrowserPane: inBrowserPane)
         guard let first = tabs.first, let last = tabs.last else { return }
