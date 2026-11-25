@@ -13,8 +13,8 @@ final class EmbeddedBrowserTab: Identifiable {
     // An explicit 100% differs from automatic fitting. Keep the choice with the tab across WebKit view replacement.
     fileprivate var userPageZoom: CGFloat?
     let isPopup: Bool
-    fileprivate var popupPinAddress: URL?
-    var pinIsTemporary: Bool { isPopup && (setupProvider != nil || popupPinAddress == nil) }
+    fileprivate var popupDocumentURL: URL?
+    var pinIsTemporary: Bool { isPopup && (setupProvider != nil || popupDocumentURL == nil) }
     let requestsMobileSite: Bool
     fileprivate let kimiProfileID: UUID?
     fileprivate(set) var setupProvider: EmbeddedWebModelTransport.Provider?
@@ -109,7 +109,9 @@ final class EmbeddedBrowserSession {
                 signIn: .init(provider: provider.rawValue, kimiProfileID: tab.kimiProfileID))
         }
         if tab.isPopup {
-            guard pinned, let url = entries[tab.id]?.restoreURL else { return nil }
+            // A pinned tab keeps its captured address. Ordinary child tabs reopen at
+            // their current verified document, just like a directly opened tab.
+            guard let url = pinned ? entries[tab.id]?.restoreURL : tab.popupDocumentURL else { return nil }
             return SavedWorkspace.Page(id: tab.workspaceID, url: url, mobile: tab.requestsMobileSite)
         }
         if tab.isDormant { return SavedWorkspace.Page(id: tab.workspaceID, url: tab.url, mobile: tab.requestsMobileSite) }
@@ -125,9 +127,16 @@ final class EmbeddedBrowserSession {
         capturePopupPinIfReady(entry)
     }
 
+    private func updatePopupAddress(_ address: URL?, for entry: Entry) {
+        guard entry.tab.popupDocumentURL != address else { return }
+        entry.tab.popupDocumentURL = address
+        capturePopupPinIfReady(entry)
+        onWorkspacePageChanged?()
+    }
+
     private func capturePopupPinIfReady(_ entry: Entry) {
         guard entry.awaitingPopupPinAddress, entry.tab.setupProvider == nil,
-              let address = entry.tab.popupPinAddress, address == entry.view.url,
+              let address = entry.tab.popupDocumentURL, address == entry.view.url,
               entry.popupPinNavigation.address(address) == address else { return }
         // Freeze the first eligible address. Subsequent navigations cannot replace the pin.
         entry.restoreURL = address
@@ -1182,7 +1191,7 @@ final class EmbeddedBrowserSession {
             try EmbeddedBrowserURLPolicy.validate(url)
             // Explicitly leaving a sign-in flow starts an independent human navigation in the same tab.
             entry.popupPinNavigation = .pending
-            entry.tab.popupPinAddress = nil
+            updatePopupAddress(nil, for: entry)
         }
         try navigate(entry, to: url, initialRequest: false)
     }
@@ -3894,8 +3903,8 @@ final class EmbeddedBrowserSession {
     fileprivate func recordMainRequest(_ request: URLRequest, view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
         if entry.tab.isPopup {
-            entry.tab.popupPinAddress = nil
             entry.popupPinNavigation.request(request)
+            updatePopupAddress(nil, for: entry)
         }
         entry.readOnlyGET = request.httpMethod == "GET" && request.url == entry.initialReadOnlyRequest ? request.url : nil
         entry.initialReadOnlyRequest = nil
@@ -4018,11 +4027,7 @@ final class EmbeddedBrowserSession {
             if !view.isLoading, case .document = entry.popupPinNavigation {
                 entry.popupPinNavigation.observe(view.url)
             }
-            entry.tab.popupPinAddress = entry.popupPinNavigation.address(view.url)
-            if entry.awaitingPopupPinAddress {
-                capturePopupPinIfReady(entry)
-                if !entry.awaitingPopupPinAddress { onWorkspacePageChanged?() }
-            }
+            updatePopupAddress(entry.popupPinNavigation.address(view.url), for: entry)
         }
         entry.tab.isLoading = view.isLoading
         entry.tab.canGoBack = view.canGoBack

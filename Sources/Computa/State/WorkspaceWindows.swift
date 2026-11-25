@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// Window-local presentation over a single collection of live agents and WebKit pages.
-/// Detached pins restore in the primary window. Other detached tabs last for the window’s lifetime.
+/// Closing a detached window returns only its pins. Quitting restores all its open, eligible tabs in the primary window.
 @MainActor @Observable
 final class WorkspaceWindows {
     let primary: WorkspaceTabs

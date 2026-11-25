@@ -855,6 +855,46 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testUnpinnedArticleOpenedByWebsiteSurvivesQuitAndRetainsSelection() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: """
+            <title>Article</title><a href="/model/start" target="_blank">Read more</a>
+            """)
+        let root = try await site.start()
+        defer { site.stop() }
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let parentID = try session.createTab(url: root.appendingPathComponent("human/final"))
+        let parent = try XCTUnwrap(session.humanTab(id: parentID))
+        let view = try XCTUnwrap(session.webView(for: parentID))
+        let ready = await waitForScriptBool(on: view, script: "!!document.querySelector('a')")
+        XCTAssertTrue(ready)
+        _ = try await view.evaluateJavaScript("document.querySelector('a').click(); true")
+        for _ in 0..<150 where session.workspaceBrowserTabs.count == 1 { try await Task.sleep(for: .milliseconds(20)) }
+        let child = try XCTUnwrap(session.workspaceBrowserTabs.first { $0.isPopup })
+        let article = try XCTUnwrap(session.webView(for: child.id))
+        let loaded = await waitForScriptBool(on: article, script: "location.pathname === '/model/final' && document.title === 'Article'")
+        XCTAssertTrue(loaded)
+        _ = try await article.evaluateJavaScript("history.pushState({}, '', '#reading');true")
+        let address = try XCTUnwrap(URL(string: "model/final#reading", relativeTo: root)?.absoluteURL)
+        let childTab = WorkspaceTabID.browser(child.workspaceID)
+        state.selectWorkspaceTab(childTab)
+        for _ in 0..<150 where state.workspaceTabs.saved?.pages.first(where: { $0.id == child.workspaceID })?.url != address {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(state.workspaceTabs.saved?.pages.first(where: { $0.id == child.workspaceID })?.url, address)
+        _ = await state.shutdownRuntime()
+
+        let nextBrowser = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { nextBrowser.shutdown() }
+        let next = AppState(tasks: [], preferences: prefs, browserSession: nextBrowser, workspaceLayout: .mixedTabs)
+        XCTAssertEqual(next.openWorkspaceTabs, [childTab, .browser(parent.workspaceID)])
+        XCTAssertEqual(next.workspaceTabs.pinnedCount, 0)
+        XCTAssertEqual(next.selectedWorkspaceTab, childTab)
+        XCTAssertEqual(nextBrowser.restorablePages.first { $0.id == child.workspaceID }?.url, address)
+    }
+
+    @MainActor
     func testPinnedLinkAndScriptOpenedPagesRestoreWithoutSignInPopups() async throws {
         let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: """
             <title>Popup pin fixture</title>
