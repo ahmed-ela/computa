@@ -27,6 +27,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private weak var webView: WKWebView?
     private var latestSnapshot: WebUISnapshot?
     private var nextRevision: UInt64 = 0
+    var onComposerReady: ((UUID) -> Void)?
     private var pageIsReady = false
     private let consumeLauncherChat: (String, UUID) -> Bool
     private let showAccessModeSettings: () -> Void
@@ -149,7 +150,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "launcherChatReady":
             guard let id = body["taskID"] as? String, let raw = body["requestID"] as? String,
                   let request = UUID(uuidString: raw), consumeLauncherChat(id, request), let webView else { return }
-            webView.window?.makeFirstResponder(webView)
+            if webView.window?.makeFirstResponder(webView) == true { onComposerReady?(request) }
 
         case "newWorkspaceBrowserTab":
             state.newWorkspaceBrowserTab()

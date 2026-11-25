@@ -2530,6 +2530,18 @@ final class EmbeddedBrowserSession {
         }
     }
 
+    func protectCommandField(_ field: NSTextField, on tabID: UUID, active: Bool) {
+        guard let entry = entries[tabID], !entry.isModelOwned, !entry.isToolOwned else { return }
+        (entry.view as? EmbeddedModelWebView)?.protectCommandField(field, active: active)
+    }
+
+    func focusPageAfterEditing(_ tabID: UUID) {
+        guard let entry = entries[tabID], !entry.isModelOwned, !entry.isToolOwned,
+              let host = entry.presentationHost, entry.view.superview === host else { return }
+        (entry.view as? EmbeddedModelWebView)?.endCommandFocus()
+        entry.view.window?.makeFirstResponder(entry.view)
+    }
+
     func presentTab(_ id: UUID, in host: NSView) throws {
         try wakeTabIfNeeded(id)
         let entry = try entry(id)
@@ -4348,13 +4360,36 @@ private final class EmbeddedModelWebView: WKWebView {
     /// Human tabs use normal WebKit focus until a render lease temporarily
     /// borrows the same view. Final release restores ordinary presentation.
     var protectsNativeFocus = true {
-        didSet {
-            guard !protectsNativeFocus else { return }
-            NotificationCenter.default.removeObserver(self, name: NSText.didChangeNotification, object: nil)
-            NotificationCenter.default.removeObserver(self, name: NSTextView.didChangeSelectionNotification, object: nil)
-            focusWindow = nil; focusResponder = nil; focusField = nil; focusFieldEditor = nil
-            focusFieldText = nil; focusFieldSelection = nil
+        didSet { releaseUnusedFocusSnapshot() }
+    }
+    private weak var commandField: NSTextField?
+    private var shouldProtectNativeFocus: Bool {
+        protectsNativeFocus || (commandField?.window != nil && (window == nil || commandField?.window === window))
+    }
+
+    // A loading website can request native focus after the address field is already editing.
+    // Use the same responder and selection preservation as a background render lease.
+    func protectCommandField(_ field: NSTextField, active: Bool) {
+        if active {
+            guard let target = field.window, let editor = field.currentEditor(), editor === target.firstResponder else { return }
+            commandField = field
+            captureNativeFocus(in: target)
+        } else if commandField === field {
+            endCommandFocus()
         }
+    }
+
+    func endCommandFocus() {
+        commandField = nil
+        releaseUnusedFocusSnapshot()
+    }
+
+    private func releaseUnusedFocusSnapshot() {
+        guard !shouldProtectNativeFocus else { return }
+        NotificationCenter.default.removeObserver(self, name: NSText.didChangeNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSTextView.didChangeSelectionNotification, object: nil)
+        focusWindow = nil; focusResponder = nil; focusField = nil; focusFieldEditor = nil
+        focusFieldText = nil; focusFieldSelection = nil
     }
     private weak var focusWindow: NSWindow?
     private weak var focusResponder: NSResponder?
@@ -4421,7 +4456,7 @@ private final class EmbeddedModelWebView: WKWebView {
     #endif
 
     override var acceptsFirstResponder: Bool {
-        if !protectsNativeFocus { return super.acceptsFirstResponder }
+        if !shouldProtectNativeFocus { return super.acceptsFirstResponder }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         return nativeFocusDiagnosticActive
         #else
@@ -4437,7 +4472,7 @@ private final class EmbeddedModelWebView: WKWebView {
     #endif
 
     func captureNativeFocus(in targetWindow: NSWindow? = nil) {
-        guard protectsNativeFocus else { return }
+        guard shouldProtectNativeFocus else { return }
         guard let target = targetWindow ?? window, let responder = target.firstResponder,
               !ownsResponder(responder) else { return }
         focusWindow = target
@@ -4463,7 +4498,7 @@ private final class EmbeddedModelWebView: WKWebView {
     }
 
     func restoreNativeFocus(allowWindowFallback: Bool = false) {
-        guard protectsNativeFocus else { return }
+        guard shouldProtectNativeFocus else { return }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         guard !nativeFocusDiagnosticActive else { return }
         #endif
@@ -4543,7 +4578,7 @@ private final class EmbeddedModelWebView: WKWebView {
     }
 
     override func becomeFirstResponder() -> Bool {
-        if !protectsNativeFocus { return super.becomeFirstResponder() }
+        if !shouldProtectNativeFocus { return super.becomeFirstResponder() }
         #if DEBUG || COMPUTA_NATIVE_FOCUS_DIAGNOSTIC
         if nativeFocusDiagnosticActive { return super.becomeFirstResponder() }
         #endif

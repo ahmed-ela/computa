@@ -19,12 +19,16 @@ retain their [separate qualification gates](../TODO.md#embedded-browser-agent-co
 
 ## Using browser tabs
 
-Press **⌘T** or click **New tab** in the mixed sidebar. **Browser** is selected first.
-Press **Return** to open Google, or type a query and press **Return** to search.
-Press **↓** to select **Chat**. **Return** opens a new chat with the cursor in the
-composer. If you entered text, Kolmogor sends it as the first message using your
-selected default model. **↑** moves back to Browser and **Esc** dismisses the launcher.
-Use **⇧⌘N** for a new agent chat or **⌘N** for a new window. Press **⌘⇧[** for the
+Press **⌘T** to open a browser tab with its address selected. Type a URL or a
+Google search and press **Return**. **⇧⌘N** opens an agent composer in the current
+window. **⌘N** opens a new window with the cursor in its agent composer. An agent
+gets a sidebar tab when you send its first message.
+
+Click **New tab** in the sidebar to choose a destination. **Browser** is first.
+Press **↓** to select **Agent**, **↑** to return to **Browser**, or **Esc** to
+dismiss the chooser. **Return** opens the selected destination. Text submitted
+on the Browser row searches Google. Text submitted on the Agent row becomes
+its first message using your selected model. Press **⌘⇧[** for the
 previous open tab and **⌘⇧]** for the next. Both follow the sidebar order across
 agent and browser tabs and wrap at either end. **⌘W** closes the selected tab.
 If it was the last tab, or the window was already empty, **⌘W** closes that window.

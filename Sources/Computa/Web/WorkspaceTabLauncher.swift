@@ -5,6 +5,7 @@ enum NewTabDestination: CaseIterable {
     case browser, agent
 
     var label: String { self == .browser ? "Browser" : "Agent" }
+    var shortcutLabel: String { self == .browser ? "⌘T" : "⇧⌘N" }
     @MainActor private static let agentIcon = tabIconAsset("agent", fallback: "person.crop.square").renderingMode(.template)
     @MainActor var icon: Image { self == .browser ? Image(systemName: "globe") : Self.agentIcon }
 }
@@ -20,6 +21,7 @@ struct WorkspaceTabLauncher: View {
 
     var library: ChromeProfileLibrary? = nil
     var error: String?
+    var protectFocus: ((NSTextField, Bool) -> Void)?
     let launch: (NewTabDestination, String) -> Void
     let openPage: (URL) -> Void
     let cancel: () -> Void
@@ -31,7 +33,7 @@ struct WorkspaceTabLauncher: View {
     var body: some View {
         WorkspaceCommandPanel(width: 360) {
             WorkspaceCommandField(text: $text, placeholder: "Search Google or start an agent", label: "New tab",
-                                  identifier: "workspace-tab-launcher", move: { selection = min(max(0, selection + $0), 1 + places.count) },
+                                  identifier: "workspace-tab-launcher", protectFocus: protectFocus, move: { selection = min(max(0, selection + $0), 1 + places.count) },
                                   submit: { value in
                                       if selection == 1 { launch(.agent, value) }
                                       else if value == text, places.indices.contains(selection - 2) { openPage(places[selection - 2].url) }
@@ -43,7 +45,7 @@ struct WorkspaceTabLauncher: View {
             }
             Divider()
             ForEach(NewTabDestination.allCases, id: \.self) { destination in
-                WorkspaceCommandRow(title: destination.label, icon: destination.icon, selected: selection == (destination == .browser ? 0 : 1)) {
+                WorkspaceCommandRow(title: destination.label, icon: destination.icon, shortcut: destination.shortcutLabel, selected: selection == (destination == .browser ? 0 : 1)) {
                     launch(destination, text)
                 }
             }
@@ -93,6 +95,7 @@ struct WorkspaceCommandPanel<Field: View, Choices: View>: View {
 struct WorkspaceCommandRow: View {
     let title: String
     let icon: Image
+    var shortcut: String?
     let selected: Bool
     let action: () -> Void
 
@@ -102,7 +105,8 @@ struct WorkspaceCommandRow: View {
                 icon.frame(width: 22).accessibilityHidden(true)
                 Text(title).lineLimit(1).truncationMode(.middle)
                 Spacer()
-                if selected { Image(systemName: "return").foregroundStyle(.secondary) }
+                if let shortcut { Text(shortcut).foregroundStyle(.secondary) }
+                else if selected { Image(systemName: "return").foregroundStyle(.secondary) }
             }
             .padding(8)
             .background(selected ? Color.primary.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 7))
@@ -122,12 +126,14 @@ struct WorkspaceCommandField: NSViewRepresentable {
     let label: String
     let identifier: String
     var focusRequest: Int = 0
+    var protectFocus: ((NSTextField, Bool) -> Void)?
     let move: (Int) -> Void
     let submit: (String) -> Void
     let cancel: () -> Void
 
     final class Field: NSTextField {
         var lastFocusRequest = 0
+        var protectFocus: ((NSTextField, Bool) -> Void)?
 
         func focusAndSelect() {
             guard let window else { return }
@@ -137,6 +143,12 @@ struct WorkspaceCommandField: NSViewRepresentable {
                 window.makeFirstResponder(self)
                 selectText(nil)
             }
+            protectFocus?(self, true)
+        }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if window !== newWindow { protectFocus?(self, false) }
+            super.viewWillMove(toWindow: newWindow)
         }
 
         override func viewDidMoveToWindow() {
@@ -179,6 +191,7 @@ struct WorkspaceCommandField: NSViewRepresentable {
         field.identifier = .init(identifier)
         field.stringValue = text
         field.lastFocusRequest = focusRequest
+        field.protectFocus = protectFocus
         field.delegate = context.coordinator
         return field
     }

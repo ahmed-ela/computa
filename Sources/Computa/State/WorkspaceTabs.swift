@@ -92,6 +92,8 @@ final class WorkspaceTabs {
     var showsPrimaryBrowser: Bool { !showsNewAgent && browserIsPrimary }
     var selectedEntryID: String?
     var selectedPage: UUID?
+    // Transient so a new tab can receive address focus after its window attaches.
+    var requestedBrowserAddress: UUID?
     var savedChatSelection: AppState.SavedChatSelection?
     var isSidebarCollapsed = false
     var presentedSheet: SheetDestination?
@@ -389,13 +391,21 @@ extension AppState {
         }
     }
 
-    func newWorkspaceBrowserTab(url: URL = EmbeddedBrowserURLPolicy.newTabURL) {
-        guard !workspaceTabs.isClosed, !approvalGateBlocksInteraction, presentedSheet == nil else { return }
+    func addressableBrowserPage(in window: WorkspaceTabs) -> UUID? {
+        window.showsPrimaryBrowser || (!mixesBrowserTabsInSidebar && isBrowserPresented) ? window.selectedPage : nil
+    }
+
+    @discardableResult
+    func newWorkspaceBrowserTab(url: URL = EmbeddedBrowserURLPolicy.newTabURL) -> UUID? {
+        guard !workspaceTabs.isClosed, !approvalGateBlocksInteraction, presentedSheet == nil else { return nil }
         do {
             let id = try browserSession.createTab(url: url)
-            if let page = browserSession.humanTab(id: id) { selectWorkspaceTab(.browser(page.workspaceID)) }
+            guard let page = browserSession.humanTab(id: id) else { return nil }
+            selectWorkspaceTab(.browser(page.workspaceID))
+            return page.workspaceID
         } catch {
             presentBrowserTabOpenError(error)
+            return nil
         }
     }
 
