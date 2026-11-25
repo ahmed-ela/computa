@@ -39,12 +39,43 @@ enum EmbeddedBrowserURLPolicy {
         guard let url, (try? validate(url)) != nil, let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return nil
         }
-        var fragment = URLComponents()
-        fragment.percentEncodedQuery = parts.percentEncodedFragment
-        let keys = Set(((parts.queryItems ?? []) + (fragment.queryItems ?? [])).map { $0.name.lowercased() })
+        let keys = parameterNames(in: parts)
         guard keys.isDisjoint(with: ["access_token", "refresh_token", "id_token"]),
               !(keys.contains("code") && keys.contains("state")) else { return nil }
         return url
+    }
+
+    /// Identify temporary authentication routes on either end of a popup redirect. A blank opener
+    /// is still eligible once an ordinary document commits (for example, window.open followed by location.assign).
+    static func isSignInAddress(_ url: URL?) -> Bool {
+        guard let url, let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        let keys = parameterNames(in: parts)
+        // An OAuth callback can carry an authorization code without a state parameter.
+        if !keys.isDisjoint(with: ["code", "redirect_uri", "response_type", "code_challenge", "code_verifier",
+                                   "access_token", "id_token", "refresh_token", "oauth_token", "oauth_verifier",
+                                   "samlrequest", "samlresponse", "samlart", "relaystate"]) { return true }
+
+        let endpoints: Set<String> = ["authorize", "callback", "signin", "sign-in", "login", "log-in",
+                                      "servicelogin", "accountchooser", "saml", "sso", "oauth", "oauth2"]
+        let routes = [parts.path, parts.fragment?.components(separatedBy: "?").first ?? ""]
+        return routes.contains { route in
+            let path = route.lowercased().split(separator: "/").map(String.init)
+            return path.first.map(endpoints.contains) == true ||
+                (path.contains("auth") && path.last.map(endpoints.contains) == true)
+        }
+    }
+
+    private static func parameterNames(in parts: URLComponents) -> Set<String> {
+        var fragment = URLComponents()
+        // Covers both #access_token=… and hash routers such as #/callback?code=…&state=….
+        fragment.percentEncodedQuery = parts.percentEncodedFragment
+        var items = (parts.queryItems ?? []) + (fragment.queryItems ?? [])
+        if let hash = parts.percentEncodedFragment, let query = hash.firstIndex(of: "?") {
+            fragment.percentEncodedQuery = String(hash[hash.index(after: query)...])
+            items += fragment.queryItems ?? []
+        }
+        return Set(items.map { $0.name.lowercased() })
     }
 
     /// srcdoc is a browser-created iframe document, not a top-level address.

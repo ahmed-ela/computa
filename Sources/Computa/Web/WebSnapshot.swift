@@ -25,7 +25,7 @@ struct WorkspaceBrowserSnapshot: Codable, Equatable, Sendable {
     let host: String?
     let favicon: Data?
     let isFaviconLoading: Bool
-    let isPopup: Bool
+    let canPin: Bool
     let canGoBack: Bool
     let canGoForward: Bool
     let canReload: Bool
@@ -102,7 +102,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         workspacePinnedCount = state.workspaceTabs.pinnedTabs.filter(open.contains).count
         workspaceBrowsers = mixesBrowserTabsInSidebar ? state.browserSession.workspaceBrowserTabs.filter { open.contains(.browser($0.workspaceID)) }.map {
             WorkspaceBrowserSnapshot(id: $0.workspaceID.uuidString, title: $0.title, host: $0.url?.host,
-                                     favicon: $0.favicon, isFaviconLoading: $0.isFaviconLoading, isPopup: $0.isPopup,
+                                     favicon: $0.favicon, isFaviconLoading: $0.isFaviconLoading, canPin: $0.canPin,
                                      canGoBack: $0.canGoBack, canGoForward: $0.canGoForward,
                                      canReload: $0.url != nil, isLoading: $0.isLoading)
         } : []

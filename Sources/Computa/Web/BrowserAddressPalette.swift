@@ -149,10 +149,10 @@ struct BrowserAddressPalette: View {
               !state.approvalGateBlocksInteraction, window.presentedSheet == nil else { close(); return }
         switch choice {
         case .navigate:
-            do { try session.navigate(tabID: tab.id, to: EmbeddedBrowserURLPolicy.normalize(input)) }
+            do { try session.navigate(tabID: tab.id, to: EmbeddedBrowserURLPolicy.normalize(input), fromAddressBar: true) }
             catch { self.error = error.localizedDescription; return }
         case .importedPage(let url):
-            do { try session.navigate(tabID: tab.id, to: url) }
+            do { try session.navigate(tabID: tab.id, to: url, fromAddressBar: true) }
             catch { self.error = error.localizedDescription; return }
         case .switchTab(let id): state.workspaceWindows.withWindow(window) { state.selectWorkspaceTab(.browser(id)) }
         case .back: session.goBack(tabID: tab.id)
