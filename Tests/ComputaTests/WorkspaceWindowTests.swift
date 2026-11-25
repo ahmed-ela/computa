@@ -259,6 +259,50 @@ final class WorkspaceWindowTests: XCTestCase {
         XCTAssertEqual(WorkspaceTabs(defaults: prefs).order, expected)
     }
 
+    func testQuitCollectsOnlyStillOpenWindowsAndPreservesFocusedTab() async throws {
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let primary = state.workspaceWindows.primary
+        let mainID = try session.createTab()
+        let mainTab = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: mainID)).workspaceID)
+        primary.setPinned(mainTab, pinned: true)
+        let closed = state.workspaceWindows.createTemporary()
+        let removed = try state.workspaceWindows.withWindow(closed) {
+            state.createTask()
+            return try XCTUnwrap(closed.selectedTaskID)
+        }
+        let closedHost = showWindow(closed, state: state)
+        closedHost.close()
+        XCTAssertTrue(closed.isClosed)
+        let open = state.workspaceWindows.createTemporary()
+        let (agent, page) = try state.workspaceWindows.withWindow(open) {
+            state.createTask()
+            let agent = try XCTUnwrap(open.selectedTaskID)
+            let browserID = try session.createTab()
+            let page = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: browserID)).workspaceID)
+            state.selectWorkspaceTab(page)
+            return (agent, page)
+        }
+        let openHost = showWindow(open, state: state)
+        state.focusWorkspace(open)
+        let expected = [mainTab] + open.order
+        XCTAssertEqual(Set(open.order), [.agent(agent), page])
+        state.prepareWorkspaceForQuit()
+        // Cocoa can close a window while the application's runtime is shutting down.
+        openHost.close()
+        XCTAssertTrue(open.isClosed)
+        _ = await state.shutdownRuntime()
+        let nextBrowser = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { nextBrowser.shutdown() }
+        let next = AppState(tasks: [], preferences: prefs, browserSession: nextBrowser, workspaceLayout: .mixedTabs)
+        XCTAssertEqual(next.workspaceTabs.order, expected)
+        XCTAssertEqual(Array(next.workspaceTabs.pinnedTabs), [mainTab])
+        XCTAssertEqual(next.selectedWorkspaceTab, page)
+        XCTAssertTrue(next.tasks.contains { $0.id == agent })
+        XCTAssertFalse(next.tasks.contains { $0.id == removed })
+    }
+
     func testOnlyDetachedBrowserPinIsSelectedOnRestoreIntoEmptyPrimaryWindow() throws {
         let prefs = isolatedTestPreferences(), profile = UUID()
         let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)

@@ -313,6 +313,7 @@ final class ComputaAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationStarted else { return .terminateLater }
         terminationStarted = true
+        state?.prepareWorkspaceForQuit()
         prepareBrowserProfilesForTermination()
 
         watchdog = Task { @MainActor in

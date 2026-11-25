@@ -400,17 +400,20 @@ final class AppState {
         if !tasks.isEmpty { saveWorkspace() }
     }
 
-    func saveWorkspace() {
+    func saveWorkspace(includingOpenWindows: Bool = false) {
         guard !isShuttingDown, !cookieMaintenanceOnlyLaunch, !transferringWorkspaceTabs else { return }
         let workspaceTabs = workspaceWindows.primary
         let previous = workspaceTabs.saved
         let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
-        // Detached windows are temporary. Their pins join the primary pinned section on relaunch.
+        // A normal window close discards its unpinned tabs. Quit collects the
+        // still-open windows into the durable sidebar before AppKit tears them down.
+        let windows = includingOpenWindows ? workspaceWindows.all : [workspaceTabs]
+        let regularTabs = windows.flatMap { $0.order.dropFirst($0.pinnedCount) }
         let pinnedTabs = workspaceWindows.all.flatMap(\.pinnedTabs)
         let pinSet = Set(pinnedTabs)
+        let restorableTabs = Set(regularTabs).union(pinSet)
         let temporaryDrafts = Set(workspaceWindows.temporary.flatMap(\.temporaryDraftIDs))
-            .subtracting(pinnedTabs.filter { $0.kind == .agent }.map(\.id))
-        let restorableTabs = Set(workspaceTabs.order).union(pinSet)
+            .subtracting(restorableTabs.filter { $0.kind == .agent }.map(\.id))
         let pages = browserSession.restorablePages(pinnedIn: pinSet)
             .filter { restorableTabs.contains(.browser($0.id)) }
         let pageIDs = Set(pages.map { $0.id.uuidString })
@@ -431,19 +434,22 @@ final class AppState {
             return .agent(task.runtimeThreadID ?? tab.id)
         }
         let pins = pinnedTabs.compactMap(restorableTab)
-        let order = pins + workspaceTabs.order.dropFirst(workspaceTabs.pinnedCount).compactMap(restorableTab)
-        let returningPin = workspaceTabs.order.isEmpty ? pins.first : nil
-        let selected = workspaceTabs.selectedTaskID.map { byID[$0]?.runtimeThreadID ?? $0 }
+        let order = pins + regularTabs.compactMap(restorableTab)
+        let focused = workspaceWindows.focused
+        let selectionWindow = includingOpenWindows && focused.selection.flatMap(restorableTab) != nil
+            ? focused : workspaceTabs
+        let returningPin = selectionWindow.order.isEmpty ? pins.first : nil
+        let selected = selectionWindow.selectedTaskID.map { byID[$0]?.runtimeThreadID ?? $0 }
             ?? (returningPin?.kind == .agent ? returningPin?.id : nil)
             ?? (waitingForWorkspaceHistory && workspaceTabs.selectionRevision == 0 ? previous?.selectedAgent : nil)
-        let selectedPage = workspaceTabs.selectedPage.flatMap { pageIDs.contains($0.uuidString) ? $0 : nil }
+        let selectedPage = selectionWindow.selectedPage.flatMap { pageIDs.contains($0.uuidString) ? $0 : nil }
             ?? returningPin.flatMap { $0.kind == .browser ? UUID(uuidString: $0.id) : nil }
         let temporaryKeys = Set(temporaryDrafts.map { $0.lowercased() })
         let profiles = workspaceTabs.agents.filter { !temporaryKeys.contains($0.key) }
         workspaceTabs.save(SavedWorkspace(thinkingSelections: threadThinkingSelections.isEmpty ? nil : threadThinkingSelections, agents: profiles.isEmpty ? nil : profiles, order: order,
             pinnedCount: pins.isEmpty ? nil : pins.count, selectedAgent: selected, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
-            pages: pages, selectedPage: selectedPage, browserIsPrimary: selectedPage != nil && (workspaceTabs.browserIsPrimary || returningPin?.kind == .browser),
+            pages: pages, selectedPage: selectedPage, browserIsPrimary: selectedPage != nil && (selectionWindow.browserIsPrimary || returningPin?.kind == .browser),
             showsBrowserPane: isBrowserPresented))
     }
 
@@ -2302,11 +2308,17 @@ final class AppState {
         }
     }
 
+    func prepareWorkspaceForQuit() {
+        guard !isShuttingDown else { return }
+        saveWorkspace(includingOpenWindows: true)
+        isShuttingDown = true
+    }
+
     func shutdownRuntime() async -> RuntimeShutdownReport {
         for operation in setupOperations.values { operation.task.cancel() }
         setupOperations.removeAll()
         if let runtimeShutdown { return await runtimeShutdown.value }
-        isShuttingDown = true
+        prepareWorkspaceForQuit()
         var eligible: [String: (model: String, timing: ActiveTurnTiming)] = [:]
         for task in tasks {
             guard let timing = activeTurnTimings[task.id], activeTurnTaskIDs.contains(task.id),
