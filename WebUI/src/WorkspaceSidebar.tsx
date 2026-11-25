@@ -226,7 +226,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
             {!collapsed && <span className="task-row-title">{item.title}</span>}
             {item.task && <TaskActivityIndicator task={item.task} status={status} compact={collapsed} now={now} />}
           </Button>
-          {item.open && !collapsed && <Button variant="ghost" size="icon-xs" className="workspace-pin"
+          {item.open && !collapsed && !item.browser?.isPopup && <Button variant="ghost" size="icon-xs" className="workspace-pin"
             aria-label={(item.pinned ? 'Unpin tab: ' : 'Pin tab: ') + item.title} title={item.pinned ? 'Unpin tab' : 'Pin tab'}
             onClick={() => post({ action: 'setWorkspaceTabPinned', tab: item.ref, pinned: !item.pinned })}>
             <Icon name={item.pinned ? 'unpin' : 'pin'} size={13} /></Button>}

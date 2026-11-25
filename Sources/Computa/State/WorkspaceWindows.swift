@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// Window-local presentation over a single collection of live agents and WebKit pages.
-/// Only the primary window participates in workspace restoration.
+/// Detached pins restore in the primary window. Other detached tabs last for the window’s lifetime.
 @MainActor @Observable
 final class WorkspaceWindows {
     let primary: WorkspaceTabs
@@ -111,6 +111,14 @@ extension AppState {
             if source.order.isEmpty { source.browserIsPrimary = false }
             else { selectTransferred(source.order[min(nextIndex, source.order.count - 1)], in: source) }
         }
+        handOffComposerDrafts(for: tabs, from: source, to: destination)
+        selectTransferred(sourceSelection.flatMap { moved.contains($0) ? $0 : nil } ?? tabs[0], in: destination)
+        transferringWorkspaceTabs = false
+        saveWorkspace()
+        return true
+    }
+
+    private func handOffComposerDrafts(for tabs: [WorkspaceTabID], from source: WorkspaceTabs, to destination: WorkspaceTabs) {
         let incomingAgents = tabs.filter { $0.kind == .agent }
         if !incomingAgents.isEmpty {
             // A second transfer can arrive before WebKit acknowledges the first.
@@ -123,10 +131,6 @@ extension AppState {
             destination.draftHandoff = .init(drafts: incoming)
             source.draftHandoff = .init(drafts: outgoing)
         }
-        selectTransferred(sourceSelection.flatMap { moved.contains($0) ? $0 : nil } ?? tabs[0], in: destination)
-        transferringWorkspaceTabs = false
-        saveWorkspace()
-        return true
     }
 
     private func selectTransferred(_ tab: WorkspaceTabID, in window: WorkspaceTabs) {
@@ -143,6 +147,16 @@ extension AppState {
 
     func discardTemporaryWindow(_ window: WorkspaceTabs) {
         guard window !== workspaceWindows.primary, !window.isClosed else { return }
+        let pins = Array(window.pinnedTabs)
+        if let first = pins.first {
+            let primary = workspaceWindows.primary
+            let moving = Set(pins)
+            window.removeTransferred(moving)
+            primary.insertTransferred(pins, pinned: moving, before: nil)
+            window.temporaryDraftIDs.subtract(pins.filter { $0.kind == .agent }.map(\.id))
+            handOffComposerDrafts(for: pins, from: window, to: primary)
+            if primary.selection == nil && primary.newAgentDraft == nil { selectTransferred(first, in: primary) }
+        }
         let tabs = window.order
         if let draft = window.newAgentDraft { composerDrafts.removeValue(forKey: draft.task.id) }
         let discardable = Set(tasks.filter {

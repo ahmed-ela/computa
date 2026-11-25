@@ -153,7 +153,7 @@ export interface ModelProviderSetup {
 
 export interface WorkspaceTab { kind: 'agent' | 'browser'; id: string }
 export interface WorkspaceBrowser {
-  id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean;
+  id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean; isPopup?: boolean;
   canGoBack?: boolean; canGoForward?: boolean; canReload?: boolean; isLoading?: boolean;
 }
 
