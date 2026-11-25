@@ -60,6 +60,9 @@ test('pinned tabs appear once above regular tabs, and filtering hides empty sect
     expect(html.match(/data-pinned="true"/g)).toHaveLength(2);
     expect(html.indexOf('data-section="pinned"')).toBeLessThan(html.indexOf('aria-label="Trips"'));
     expect(html.indexOf('aria-label="Trips"')).toBeLessThan(html.indexOf('data-section="tabs"'));
+    const divider = html.match(/<h2[^>]*data-section="tabs"[^>]*>[\s\S]*?<\/h2>/)?.[0];
+    expect(divider).toContain('<span class="sr-only">Tabs</span>');
+    expect(divider).not.toContain('title=');
     expect(html).toContain('lucide-pin');
   }
   expect(render('')).toContain('aria-label="Unpin tab: Trips"');
