@@ -83,10 +83,11 @@ extension AppState {
         let moved = Set(tabs)
         guard canTransferTabs(from: source, to: destination), !tabs.isEmpty, moved.count == tabs.count,
               moved.isSubset(of: Set(source.order)), target.map(destination.order.contains) != false else { return false }
+        let pins = moved.intersection(source.pinnedTabs)
         if source === destination {
             guard target.map(moved.contains) != true else { return false }
             source.removeTransferred(moved)
-            source.insertTransferred(tabs, before: target)
+            source.insertTransferred(tabs, pinned: pins, before: target)
             saveWorkspace()
             return true
         }
@@ -98,7 +99,7 @@ extension AppState {
         source.temporaryDraftIDs.subtract(movedDrafts)
         if destination !== workspaceWindows.primary { destination.temporaryDraftIDs.formUnion(movedDrafts) }
         source.removeTransferred(moved)
-        destination.insertTransferred(tabs, before: target)
+        destination.insertTransferred(tabs, pinned: pins, before: target)
         if let agent = source.selectedTaskID, moved.contains(.agent(agent)) {
             source.selectedTaskID = source.order.first { $0.kind == .agent }?.id
             source.selectedEntryID = nil

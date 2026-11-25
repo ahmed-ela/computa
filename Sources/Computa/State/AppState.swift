@@ -392,7 +392,7 @@ final class AppState {
             && workspaceTabs.agent(for: task) != nil && !temporaryDrafts.contains(task.id) {
             drafts[task.id] = SavedWorkspace.Draft(task)
         }
-        let order = workspaceTabs.order.compactMap { tab -> WorkspaceTabID? in
+        func restorableTab(_ tab: WorkspaceTabID) -> WorkspaceTabID? {
             if tab.kind == .browser { return pageIDs.contains(tab.id) ? tab : nil }
             guard let task = byID[tab.id] else {
                 // Browser changes may arrive before the runtime has loaded conversation history.
@@ -403,12 +403,15 @@ final class AppState {
             }
             return .agent(task.runtimeThreadID ?? tab.id)
         }
+        let pins = workspaceTabs.pinnedTabs.compactMap(restorableTab)
+        let order = pins + workspaceTabs.order.dropFirst(workspaceTabs.pinnedCount).compactMap(restorableTab)
         let selected = workspaceTabs.selectedTaskID.map { byID[$0]?.runtimeThreadID ?? $0 }
             ?? (waitingForWorkspaceHistory && workspaceTabs.selectionRevision == 0 ? previous?.selectedAgent : nil)
         let selectedPage = workspaceTabs.selectedPage.flatMap { pageIDs.contains($0.uuidString) ? $0 : nil }
         let temporaryKeys = Set(temporaryDrafts.map { $0.lowercased() })
         let profiles = workspaceTabs.agents.filter { !temporaryKeys.contains($0.key) }
-        workspaceTabs.save(SavedWorkspace(agents: profiles.isEmpty ? nil : profiles, order: order, selectedAgent: selected, drafts: drafts,
+        workspaceTabs.save(SavedWorkspace(agents: profiles.isEmpty ? nil : profiles, order: order,
+            pinnedCount: pins.isEmpty ? nil : pins.count, selectedAgent: selected, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
             pages: pages, selectedPage: selectedPage, browserIsPrimary: workspaceTabs.browserIsPrimary && selectedPage != nil,
             showsBrowserPane: isBrowserPresented))

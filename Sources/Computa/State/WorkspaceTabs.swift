@@ -60,6 +60,7 @@ struct SavedWorkspace: Codable, Equatable {
     // Keyed by the current conversation, initially the draft ID and then the bound thread ID.
     var agents: [String: Agent]? = nil
     var order: [WorkspaceTabID]
+    var pinnedCount: Int? = nil
     var selectedAgent: String?
     var drafts: [String: Draft]
     var browserProfile: UUID?
@@ -104,6 +105,9 @@ final class WorkspaceTabs {
     @ObservationIgnored private(set) var saved: SavedWorkspace?
     @ObservationIgnored var onChange: (() -> Void)?
     private(set) var order: [WorkspaceTabID]
+    // The prefix is the Pinned section. Shortcuts, selection and drag all use this same order.
+    private(set) var pinnedCount = 0
+    var pinnedTabs: ArraySlice<WorkspaceTabID> { order.prefix(pinnedCount) }
     @MainActor @Observable
     final class AgentProfiles {
         var entries: [String: SavedWorkspace.Agent]
@@ -127,7 +131,7 @@ final class WorkspaceTabs {
     }
 
     // Session-only history of explicit user closes. Closed pages retain no WebKit or tool handles.
-    private(set) var recentlyClosed: [(content: ClosedTab, index: Int)] = []
+    private(set) var recentlyClosed: [(content: ClosedTab, sectionIndex: Int, pinned: Bool)] = []
     private var hasSavedAgents: Bool
     var browserIsPrimary = false {
         didSet { if oldValue != browserIsPrimary { onChange?() } }
@@ -142,7 +146,11 @@ final class WorkspaceTabs {
         let legacy = defaults.stringArray(forKey: Self.legacyKey)
         hasSavedAgents = snapshot != nil || legacy != nil
         var seen = Set<WorkspaceTabID>()
-        order = (snapshot?.order ?? (legacy ?? []).map(WorkspaceTabID.agent)).filter { seen.insert($0).inserted }
+        let tabs = snapshot?.order ?? (legacy ?? []).map(WorkspaceTabID.agent)
+        let boundary = max(0, min(snapshot?.pinnedCount ?? 0, tabs.count))
+        let pins = tabs.prefix(boundary).filter { seen.insert($0).inserted }
+        pinnedCount = pins.count
+        order = pins + tabs.dropFirst(boundary).filter { seen.insert($0).inserted }
     }
 
     init(temporaryFor primary: WorkspaceTabs) {
@@ -160,14 +168,18 @@ final class WorkspaceTabs {
 
     /// Mutate both sides of a transfer before the primary snapshot is written.
     func removeTransferred(_ tabs: Set<WorkspaceTabID>) {
+        pinnedCount -= pinnedTabs.filter(tabs.contains).count
         order.removeAll(where: tabs.contains)
         recentlyClosed.removeAll { tabs.contains($0.content.tab) }
         selectionRevision &+= 1
     }
 
-    func insertTransferred(_ tabs: [WorkspaceTabID], before target: WorkspaceTabID?) {
+    func insertTransferred(_ tabs: [WorkspaceTabID], pinned: Set<WorkspaceTabID>, before target: WorkspaceTabID?) {
         let index = target.flatMap { order.firstIndex(of: $0) } ?? order.count
-        order.insert(contentsOf: tabs, at: index)
+        let pins = tabs.filter(pinned.contains)
+        order.insert(contentsOf: tabs.filter { !pinned.contains($0) }, at: max(index, pinnedCount))
+        order.insert(contentsOf: pins, at: min(index, pinnedCount))
+        pinnedCount += pins.count
         let moved = Set(tabs)
         recentlyClosed.removeAll { moved.contains($0.content.tab) }
     }
@@ -183,15 +195,30 @@ final class WorkspaceTabs {
         guard let index = order.firstIndex(of: content.tab) else { return }
         recentlyClosed.removeAll { $0.content.tab == content.tab }
         if recentlyClosed.count == 32 { recentlyClosed.removeFirst() }
-        recentlyClosed.append((content, index))
+        let pinned = index < pinnedCount
+        recentlyClosed.append((content, pinned ? index : index - pinnedCount, pinned))
     }
 
     func open(_ tab: WorkspaceTabID) {
         guard !order.contains(tab) else { return }
         // Both the explicit reopen command and opening a closed chat from Search consume its entry.
-        let index = recentlyClosed.last { $0.content.tab == tab }?.index ?? 0
+        let record = recentlyClosed.last { $0.content.tab == tab }
         recentlyClosed.removeAll { $0.content.tab == tab }
-        order.insert(tab, at: min(index, order.count))
+        if let record, record.pinned {
+            order.insert(tab, at: min(record.sectionIndex, pinnedCount))
+            pinnedCount += 1
+        } else {
+            order.insert(tab, at: min(pinnedCount + (record?.sectionIndex ?? 0), order.count))
+        }
+        onChange?()
+    }
+
+    func setPinned(_ tab: WorkspaceTabID, pinned: Bool) {
+        guard let index = order.firstIndex(of: tab), (index < pinnedCount) != pinned else { return }
+        order.remove(at: index)
+        if !pinned { pinnedCount -= 1 }
+        order.insert(tab, at: pinnedCount)
+        if pinned { pinnedCount += 1 }
         onChange?()
     }
 
@@ -231,12 +258,15 @@ final class WorkspaceTabs {
     }
 
     func close(_ tab: WorkspaceTabID) {
-        order.removeAll { $0 == tab }
+        guard let index = order.firstIndex(of: tab) else { return }
+        if index < pinnedCount { pinnedCount -= 1 }
+        order.remove(at: index)
         onChange?()
     }
 
     func move(_ tab: WorkspaceTabID, to target: WorkspaceTabID) {
-        guard tab != target, let from = order.firstIndex(of: tab), let to = order.firstIndex(of: target) else { return }
+        guard tab != target, let from = order.firstIndex(of: tab), let to = order.firstIndex(of: target),
+              (from < pinnedCount) == (to < pinnedCount) else { return }
         order.remove(at: from)
         order.insert(tab, at: to)
         onChange?()
@@ -254,14 +284,18 @@ final class WorkspaceTabs {
         }
         let hadOpenAgents = order.contains { $0.kind == .agent }
         var seen = Set<WorkspaceTabID>()
-        order = order.compactMap { tab in
-            guard tab.kind == .agent else { return tab }
-            if ids.contains(tab.id) { return tab }
-            return localForThread[AgentTask.identityKey(tab.id)].map(WorkspaceTabID.agent)
-        }.filter { seen.insert($0).inserted }
+        func restored(_ tab: WorkspaceTabID) -> WorkspaceTabID? {
+            let local = tab.kind == .browser || ids.contains(tab.id)
+                ? tab : localForThread[AgentTask.identityKey(tab.id)].map(WorkspaceTabID.agent)
+            guard let local, seen.insert(local).inserted else { return nil }
+            return local
+        }
+        let pins = pinnedTabs.compactMap(restored)
+        order = pins + order.dropFirst(pinnedCount).compactMap(restored)
+        pinnedCount = pins.count
         if defaults != nil && (!hasSavedAgents || (hadOpenAgents && !order.contains { $0.kind == .agent })) {
             let seed = tasks.filter { $0.id == tasks.first?.id || $0.status == .running }
-            order.insert(contentsOf: seed.map { .agent($0.id) }, at: 0)
+            order.insert(contentsOf: seed.map { .agent($0.id) }, at: pinnedCount)
         }
         if let selected = saved?.selectedAgent {
             let local = localForThread[AgentTask.identityKey(selected)] ?? selected

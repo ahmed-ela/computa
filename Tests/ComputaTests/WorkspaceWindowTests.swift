@@ -5,6 +5,51 @@ import XCTest
 
 @MainActor
 final class WorkspaceWindowTests: XCTestCase {
+    func testPinsFollowTabsThroughUndoBindingFreshContextAndWindowTransfers() throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let primary = state.workspaceWindows.primary, detached = state.workspaceWindows.createTemporary()
+        state.createTask()
+        let agent = try XCTUnwrap(state.selectedWorkspaceTab)
+        let pageID = try session.createTab()
+        let page = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: pageID)?.workspaceID))
+        primary.setPinned(page, pinned: true)
+        primary.setPinned(agent, pinned: true)
+        state.createTask()
+        let regular = try XCTUnwrap(state.selectedWorkspaceTab)
+        XCTAssertEqual(primary.order, [page, agent, regular])
+        primary.setPinned(page, pinned: true)
+        primary.move(regular, to: page)
+        XCTAssertEqual(primary.order, [page, agent, regular])
+        XCTAssertEqual(primary.pinnedCount, 2)
+
+        state.closeWorkspaceTab(page)
+        XCTAssertEqual(Array(primary.pinnedTabs), [agent])
+        state.reopenClosedTab()
+        XCTAssertEqual(Array(primary.pinnedTabs), [page, agent])
+        let reopened = try XCTUnwrap(session.workspaceBrowserTabs.first { .browser($0.workspaceID) == page })
+        let view = try XCTUnwrap(session.webView(for: reopened.id))
+        XCTAssertTrue(state.transferTabs([page, regular], from: primary, to: detached))
+        XCTAssertEqual(Array(primary.pinnedTabs), [agent])
+        XCTAssertEqual(Array(detached.pinnedTabs), [page])
+        XCTAssertTrue(state.transferTabs(detached.order, from: detached, to: primary, before: agent))
+        XCTAssertEqual(primary.order, [page, agent, regular])
+        XCTAssertEqual(primary.pinnedCount, 2)
+        XCTAssertTrue(view === session.webView(for: reopened.id))
+        XCTAssertEqual(WorkspaceTabs(defaults: prefs).pinnedCount, 2)
+
+        let task = try XCTUnwrap(state.tasks.first { $0.id == agent.id })
+        primary.startConversation(after: task, newID: "fresh")
+        XCTAssertEqual(Array(primary.pinnedTabs), [page, .agent("fresh")])
+        primary.restoreBinding(draft: "fresh", thread: "bound")
+        XCTAssertEqual(Array(primary.pinnedTabs), [page, .agent("bound")])
+        primary.setPinned(page, pinned: false)
+        XCTAssertEqual(Array(primary.pinnedTabs), [.agent("bound")])
+        XCTAssertEqual(primary.order, [.agent("bound"), page, regular])
+    }
+
     func testCloseShortcutClosesOnlyItsLastTabAndWindow() throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)

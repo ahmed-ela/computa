@@ -29,6 +29,10 @@ previous open tab and **⌘⇧]** for the next. Both follow the sidebar order ac
 agent and browser tabs and wrap at either end. **⌘W** closes the selected tab.
 If it was the last tab, or the window was already empty, **⌘W** closes that window.
 
+Hover over an open agent or browser tab and click the pin to move it into **Pinned**
+at the top of the sidebar. Click **Unpin tab** to return it to the regular list.
+Pins follow a tab between windows. The main window restores its pins on relaunch.
+
 Drag a browser or agent tab out of the sidebar to open it in a temporary window.
 You can open more tabs there. Drag a tab onto another window’s sidebar to place it
 between its tabs, or drag the window by its title bar onto that sidebar to move

@@ -47,6 +47,29 @@ test('sidebar uses the site icon or hostname initial in both sizes; an empty tab
     expect(render()).not.toContain('class="site-initial"');
   }
 });
+
+test('pinned tabs appear once above regular tabs, and filtering hides empty sections', () => {
+  const snapshot = fixture();
+  snapshot.workspacePinnedCount = 2;
+  const render = (search: string, compact = false) => renderToStaticMarkup(h(WorkspaceSidebar, {
+    snapshot: { ...snapshot, isTaskSidebarCollapsed: compact }, search, setSearch: () => {}, post: () => {}, nativeHost: true,
+  })).html;
+  for (const compact of [false, true]) {
+    const html = render('', compact);
+    expect(html.match(/data-tab-kind=/g)).toHaveLength(3);
+    expect(html.match(/data-pinned="true"/g)).toHaveLength(2);
+    expect(html.indexOf('data-section="pinned"')).toBeLessThan(html.indexOf('aria-label="Trips"'));
+    expect(html.indexOf('aria-label="Trips"')).toBeLessThan(html.indexOf('data-section="tabs"'));
+    expect(html).toContain('lucide-pin');
+  }
+  expect(render('')).toContain('aria-label="Unpin tab: Trips"');
+  expect(render('')).toContain('aria-label="Pin tab: New tab"');
+  expect(render('rail.example')).toContain('data-section="pinned"');
+  expect(render('rail.example')).not.toContain('data-section="tabs"');
+  expect(render('New tab')).not.toContain('data-section="pinned"');
+  snapshot.workspacePinnedCount = 0;
+  expect(render('')).not.toContain('sidebar-section-heading');
+});
 test('a matching browser tab stays available at either width in mixed mode', () => {
   for (const isTaskSidebarCollapsed of [false, true]) {
     const html = renderToStaticMarkup(h(WorkspaceSidebar, {

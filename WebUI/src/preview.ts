@@ -1,4 +1,4 @@
-import type { AgentProfile, AppSnapshot, EntrySnapshot, NativeAction, ReviewScope, ReviewState, TaskSnapshot } from './types';
+import type { AgentProfile, AppSnapshot, EntrySnapshot, NativeAction, ReviewScope, ReviewState, TaskSnapshot, WorkspaceTab } from './types';
 import { reorderQueuedPrompts } from './promptQueue';
 
 const previewWorkspace = '/Users/preview/Projects/localcodex-demo';
@@ -316,6 +316,13 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
     receive(snapshot);
   };
   const selectedTask = () => snapshot.tasks.find((task) => task.id === snapshot.selectedTaskID);
+  const openTab = (tab: WorkspaceTab) => {
+    const order = [...(snapshot.workspaceOrder ?? [])];
+    if (!order.some(other => other.kind === tab.kind && other.id === tab.id)) {
+      order.splice(snapshot.workspacePinnedCount ?? 0, 0, tab);
+    }
+    return order;
+  };
   const isSelectableModel = (id: string) => snapshot.modelOptions.some((option) =>
     option.id === id && option.available !== false && option.selectable !== false,
   );
@@ -342,7 +349,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
       case 'newWorkspaceBrowserTab': {
         const id = issueID();
         publish({ ...snapshot, workspaceBrowsers: [...(snapshot.workspaceBrowsers ?? []), { id, title: 'New tab' }],
-          workspaceOrder: [{ kind: 'browser', id }, ...(snapshot.workspaceOrder ?? [])], primaryBrowserID: id });
+          workspaceOrder: openTab({kind: 'browser', id}), primaryBrowserID: id });
         return;
       }
       case 'closeWorkspaceTab': {
@@ -352,18 +359,29 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         const remaining = order.filter((_,i) => i !== index);
         const selected = kind === 'browser' ? snapshot.primaryBrowserID === id : !snapshot.primaryBrowserID && snapshot.selectedTaskID === id;
         const next = remaining[Math.min(index, remaining.length - 1)];
-        publish({ ...snapshot, workspaceOrder: remaining,
+        const pins = snapshot.workspacePinnedCount ?? 0;
+        publish({ ...snapshot, workspaceOrder: remaining, workspacePinnedCount: index < pins ? pins - 1 : pins,
           workspaceBrowsers: snapshot.workspaceBrowsers?.filter(tab => kind !== 'browser' || tab.id !== id),
           primaryBrowserID: selected ? (next?.kind === 'browser' ? next.id : undefined) : snapshot.primaryBrowserID,
           selectedTaskID: selected && next?.kind === 'agent' ? next.id : kind === 'agent' && snapshot.selectedTaskID === id
             ? remaining.find(tab => tab.kind === 'agent')?.id : snapshot.selectedTaskID });
         return;
       }
+      case 'setWorkspaceTabPinned': {
+        const order = [...(snapshot.workspaceOrder ?? [])], pins = snapshot.workspacePinnedCount ?? 0;
+        const index = order.findIndex(tab => tab.kind === action.tab.kind && tab.id === action.tab.id);
+        if (index < 0 || (index < pins) === action.pinned) return;
+        const [tab] = order.splice(index, 1);
+        order.splice(action.pinned ? pins : pins - 1, 0, tab);
+        publish({...snapshot, workspaceOrder: order, workspacePinnedCount: pins + (action.pinned ? 1 : -1)});
+        return;
+      }
       case 'moveWorkspaceTab': {
         const order = [...(snapshot.workspaceOrder ?? [])];
         const from = order.findIndex(t => t.kind === action.tab.kind && t.id === action.tab.id);
         const to = order.findIndex(t => t.kind === action.target.kind && t.id === action.target.id);
-        if (from < 0 || to < 0) return;
+        const pins = snapshot.workspacePinnedCount ?? 0;
+        if (from < 0 || to < 0 || (from < pins) !== (to < pins)) return;
         order.splice(to,0,...order.splice(from,1)); publish({ ...snapshot, workspaceOrder: order });
         return;
       }
@@ -379,8 +397,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         publish({
           ...snapshot,
           selectedTaskID: task.id, primaryBrowserID: undefined,
-          workspaceOrder: snapshot.workspaceOrder?.some(tab => tab.kind === 'agent' && tab.id === task.id) ? snapshot.workspaceOrder
-            : [{kind: 'agent', id: task.id}, ...(snapshot.workspaceOrder ?? [])],
+          workspaceOrder: openTab({kind: 'agent', id: task.id}),
           tasks: snapshot.tasks.map((candidate) => candidate.id === task.id ? {
             ...candidate, hasUnreadCompletion: false, unreadCompletionID: undefined,
           } : candidate),
@@ -417,9 +434,8 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         const task = selectedTask();
         if (!task || task.id !== action.taskID || !profiles.get(task.id)?.history.some(row => row.id === action.conversationID)) return;
         const id = action.conversationID;
-        const order = snapshot.workspaceOrder ?? [];
         publish({...snapshot, selectedTaskID: id, selectedEntryID: undefined,
-          workspaceOrder: order.some(tab => tab.kind === 'agent' && tab.id === id) ? order : [{kind: 'agent', id}, ...order]});
+          workspaceOrder: openTab({kind: 'agent', id})});
         return;
       }
       case 'startFresh':
@@ -441,7 +457,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         }
         publish({ ...snapshot, tasks: [task, ...snapshot.tasks], selectedTaskID: task.id, selectedEntryID: undefined,
           primaryBrowserID: undefined, workspaceOrder: previous ? order.map(tab =>
-            tab.kind === 'agent' && tab.id === previous.id ? {...tab, id: task.id} : tab) : [{kind: 'agent', id: task.id}, ...order] });
+            tab.kind === 'agent' && tab.id === previous.id ? {...tab, id: task.id} : tab) : openTab({kind: 'agent', id: task.id}) });
         return;
       }
 

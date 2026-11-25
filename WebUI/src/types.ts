@@ -188,6 +188,7 @@ export interface AppSnapshot {
   draftHandoff?: { id: string; drafts: Record<string, string> };
   sidebarDropTarget?: boolean;
   workspaceOrder?: WorkspaceTab[];
+  workspacePinnedCount?: number;
   savedChats?: { id: string; title: string; workspace: string; updatedAt: number }[];
   savedChatSelection?: { id: string; error?: string };
   workspaceBrowsers?: WorkspaceBrowser[];
@@ -236,6 +237,7 @@ export type NativeAction =
   | { action: 'openBrowserAddress'; id: string }
   | { action: 'browserNavigation'; id: string; command: 'back' | 'forward' | 'reload' | 'stop' }
   | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab'; tab: WorkspaceTab }
+  | { action: 'setWorkspaceTabPinned'; tab: WorkspaceTab; pinned: boolean }
   | { action: 'setComposerDraft'; taskID: string; text: string }
   | { action: 'beginWorkspaceTabDrag'; tab: WorkspaceTab }
   | { action: 'acknowledgeDraftHandoff'; id: string }
