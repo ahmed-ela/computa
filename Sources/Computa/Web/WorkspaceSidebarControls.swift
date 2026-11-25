@@ -54,9 +54,9 @@ struct SidebarTitlebarToggle: View {
 
 struct BrowserHistoryButtons: View {
     let session: EmbeddedBrowserSession
+    let selectedTab: EmbeddedBrowserTab?
 
     var body: some View {
-        let selectedTab = session.selectedTabID.flatMap(session.humanTab(id:))
         HStack(spacing: 2) {
             Button {
                 if let id = selectedTab?.id { session.goBack(tabID: id) }

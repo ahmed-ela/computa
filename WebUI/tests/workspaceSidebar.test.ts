@@ -93,6 +93,7 @@ test('the browser address is separate from the tab filter and follows the active
   })).html;
   expect(snapshot.browserAddressPlacement).toBe('titleBar');
   expect(render()).not.toContain('class="sidebar-address"');
+  expect(render()).not.toContain('aria-label="Browser navigation"');
   expect(render()).toContain('id="task-search"');
   snapshot.browserAddressPlacement = 'sidebar';
   const expanded = render();

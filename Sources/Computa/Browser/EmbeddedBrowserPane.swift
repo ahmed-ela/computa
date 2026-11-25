@@ -129,6 +129,7 @@ struct EmbeddedBrowserPane: View {
         HStack(spacing: 4) {
             if !usesSidebarTabs { tabPicker }
             if let openTitlebarAddress, let tab = selectedTab {
+                BrowserHistoryButtons(session: session, selectedTab: tab)
                 Button(action: openTitlebarAddress) {
                     BrowserAddressPill(height: max(18, min(28, tabRowHeight - 4)), editing: false) {
                         Text(tab.url?.absoluteString ?? "Search or enter a website address")
@@ -193,7 +194,7 @@ struct EmbeddedBrowserPane: View {
 
     private var navigationBar: some View {
         HStack(spacing: 8) {
-            BrowserHistoryButtons(session: session)
+            BrowserHistoryButtons(session: session, selectedTab: selectedTab)
 
             HStack(spacing: 7) {
                 Image(systemName: addressFocused || address.isEmpty ? "magnifyingglass" : "globe")
