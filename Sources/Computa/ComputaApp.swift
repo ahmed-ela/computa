@@ -61,6 +61,7 @@ extension FocusedValues {
     @Entry var focusBrowserAddress: (() -> Void)?
     @Entry var browserPaneFocused: Bool?
     @Entry var browserPageCommandsAllowed: Bool?
+    @Entry var browserZoomTabID: UUID?
     @Entry var workspaceSidebarCollapsed: Binding<Bool>?
     @Entry var tabWorkspace: AppState?
 }
@@ -76,6 +77,18 @@ struct WorkspaceCommands: Commands {
     @FocusedValue(\.browserPaneFocused) private var browserPaneFocused
 
     @FocusedValue(\.browserPageCommandsAllowed) private var browserPageCommandsAllowed
+
+    @FocusedValue(\.browserZoomTabID) private var browserZoomTabID
+
+    private var zoomTabID: UUID? {
+        guard !workspaceUnavailable, browserPageCommandsAllowed == true,
+              tabWorkspace?.mixesBrowserTabsInSidebar == true || usesBrowserShortcuts else { return nil }
+        return browserZoomTabID
+    }
+
+    private func zoom(_ command: BrowserPageZoomCommand) {
+        if let id = zoomTabID { tabWorkspace?.browserSession.changePageZoom(command, tabID: id) }
+    }
 
     private var reloadTabID: UUID? {
         guard !workspaceUnavailable, browserPageCommandsAllowed == true else { return nil }
@@ -144,6 +157,15 @@ struct WorkspaceCommands: Commands {
             }
             .keyboardShortcut("r", modifiers: .command)
             .disabled(reloadTabID == nil)
+            Group {
+                Button("Zoom In") { zoom(.zoomIn) }
+                    .keyboardShortcut("+", modifiers: .command)
+                Button("Zoom Out") { zoom(.zoomOut) }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("Actual Size") { zoom(.actualSize) }
+                    .keyboardShortcut("0", modifiers: .command)
+            }
+            .disabled(zoomTabID == nil)
             Button("Focus Browser Address") {
                 if tabWorkspace?.primaryBrowserID != nil { BrowserAddressPalette.request(in: NSApp.keyWindow) }
                 else { focusBrowserAddress?() }
