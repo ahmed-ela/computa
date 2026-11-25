@@ -384,6 +384,16 @@ final class AppState {
         self.browserSession.onHumanVerificationRecoveryCandidate = { [weak self] candidate in
             Task { @MainActor [weak self] in await self?.recoverWebsiteModels(candidate) }
         }
+        self.browserSession.onSetupPageReady = { [weak self] tabID, generation in
+            guard self?.websiteSetupTabs.values.contains(tabID) == true else { return }
+            Task { @MainActor [weak self] in
+                guard let self, let tab = self.browserSession.humanTab(id: tabID),
+                      tab.documentGeneration == generation, let provider = tab.setupProvider,
+                      websiteSetupTabs[provider] == tabID else { return }
+                await loadSignedInModels(tabID: tabID)
+                if case .loaded = websiteModelSetupStatus(for: provider.rawValue), websiteSetupTabs[provider] == tabID { websiteSetupTabs[provider] = nil }
+            }
+        }
         self.browserSession.onProviderSignInRecoveryCandidate = { [weak self] candidate in
             self?.requestProviderSignInRecovery(candidate)
         }
@@ -446,10 +456,23 @@ final class AppState {
     private var providerCLIOptions: [ProviderCLI: [LocalModelOption]] = [:]
     private var providerCLIErrors: [ProviderCLI: String] = [:]
     private var checkingProviderCLIs = Set<ProviderCLI>()
+    private var providerCLIStatus: [ProviderCLI: ModelProviderSetup.CheckStatus] = [:]
+    private struct CLISetupOperation {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+    private var setupOperations: [String: CLISetupOperation] = [:]
+    @ObservationIgnored var performCLISetup: (String, ProviderCLISetup.Intent) async throws -> Void = { route, intent in
+        try await ProviderCLISetup.run(route: route, intent: intent)
+    }
+    @ObservationIgnored private var websiteSetupTabs: [EmbeddedWebModelTransport.Provider: UUID] = [:]
+
+    func cliSetupInProgress(_ route: String) -> Bool { setupOperations[route] != nil }
+
     var providerCLISetups: [ModelProviderSetup] {
         ProviderCLI.allCases.map { provider in
             ModelProviderSetup(route: provider.route, name: provider.name, connected: providerCLIOptions[provider] != nil,
-                checkStatus: checkingProviderCLIs.contains(provider) ? .checking : providerCLIErrors[provider] == nil ? nil : .unavailable,
+                checkStatus: cliSetupInProgress(provider.route) ? .settingUp : checkingProviderCLIs.contains(provider) ? .checking : providerCLIStatus[provider],
                 detail: providerCLIErrors[provider])
         }
     }
@@ -563,6 +586,7 @@ final class AppState {
         presentedSheet = nil
         do {
             try browserSession.openProviderSignIn(provider)
+            if let tab = browserSession.setupTab(for: provider) { websiteSetupTabs[provider] = tab.id }
             if workspaceLayout.allowsBrowserSidePane {
                 isBrowserPresented = true
             } else if let tab = browserSession.setupTab(for: provider) {
@@ -574,8 +598,43 @@ final class AppState {
         }
     }
 
+    func manageCLISetup(route: String, operation: String) {
+        guard !isShuttingDown else { return }
+        if operation == "stopWaiting" {
+            setupOperations[route]?.task.cancel()
+            return
+        }
+        guard canRefreshWebsiteModels, !cliSetupInProgress(route),
+              let intent = ProviderCLISetup.Intent(rawValue: operation) else { return }
+        let provider = ProviderCLI.allCases.first { $0.route == route }
+        guard provider != nil || route == InstalledCodexCLI.route else { return }
+        let status = provider.flatMap { providerCLIStatus[$0] } ?? (provider == nil ? installedCLICheckStatus : nil)
+        guard intent == .install ? status == .installRequired : status == .signInRequired || status == .unavailable else { return }
+        let id = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            var failure: String?
+            do { try await performCLISetup(route, intent) }
+            catch { failure = error is CancellationError ? ProviderCLISetup.Failure.cancelled.localizedDescription : error.localizedDescription }
+            guard !isShuttingDown, setupOperations[route]?.id == id else { return }
+            setupOperations[route] = nil
+            if Task.isCancelled {
+                if let provider { providerCLIErrors[provider] = ProviderCLISetup.Failure.cancelled.localizedDescription }
+                else { installedCLIError = ProviderCLISetup.Failure.cancelled.localizedDescription }
+                return
+            }
+            if let provider { await refreshProviderCLI(provider) }
+            else { await refreshInstalledCLIModels() }
+            if let failure {
+                if let provider, providerCLIOptions[provider] == nil { providerCLIErrors[provider] = failure }
+                else if provider == nil && installedCLIOptions.isEmpty { installedCLIError = failure }
+            }
+        }
+        setupOperations[route] = CLISetupOperation(id: id, task: task)
+    }
+
     func recheckPendingCLIInstallations() {
-        for route in pendingCLIInstallations { connectModelProvider(route: route) }
+        for route in pendingCLIInstallations.union(setupOperations.keys) { connectModelProvider(route: route) }
     }
 
     private func refreshProviderCLI(_ provider: ProviderCLI) async {
@@ -585,11 +644,21 @@ final class AppState {
         do {
             let options = try await runtime.providerCLIModels(provider)
             guard !isShuttingDown else { return }
+            setupOperations.removeValue(forKey: provider.route)?.task.cancel()
+            providerCLIStatus[provider] = nil
             providerCLIOptions[provider] = options
             providerCLIErrors[provider] = nil
         } catch {
             guard !isShuttingDown else { return }
-            if case AgentCLIError.installationRequired = error { pendingCLIInstallations.insert(provider.route) }
+            switch error {
+            case AgentCLIError.installationRequired:
+                providerCLIStatus[provider] = .installRequired
+                pendingCLIInstallations.insert(provider.route)
+            case AgentCLIError.signInRequired:
+                providerCLIStatus[provider] = .signInRequired
+                pendingCLIInstallations.insert(provider.route)
+            default: providerCLIStatus[provider] = .unavailable
+            }
             providerCLIOptions[provider] = nil
             providerCLIErrors[provider] = error.localizedDescription
         }
@@ -603,14 +672,22 @@ final class AppState {
         do {
             let options = try await runtime.installedCLIModels()
             guard !isShuttingDown else { return }
+            if !options.isEmpty { setupOperations.removeValue(forKey: InstalledCodexCLI.route)?.task.cancel() }
             installedCLIOptions = options
             installedCLICheckStatus = nil
-            if options.isEmpty { installedCLIError = "The signed-in CLI returned no visible models." }
+            if options.isEmpty {
+                installedCLICheckStatus = .unavailable
+                installedCLIError = "The signed-in CLI returned no visible models."
+            }
         } catch {
             guard !isShuttingDown else { return }
-            if error as? InstalledCodexCLI.Failure == .missing { pendingCLIInstallations.insert(InstalledCodexCLI.route) }
+            switch error as? InstalledCodexCLI.Failure {
+            case .missing, .incompatible: installedCLICheckStatus = .installRequired
+            case .signedOut: installedCLICheckStatus = .signInRequired
+            default: installedCLICheckStatus = .unavailable
+            }
+            if installedCLICheckStatus != .unavailable { pendingCLIInstallations.insert(InstalledCodexCLI.route) }
             installedCLIOptions = []
-            installedCLICheckStatus = .unavailable
             installedCLIError = error.localizedDescription
         }
     }
@@ -2225,6 +2302,8 @@ final class AppState {
     }
 
     func shutdownRuntime() async -> RuntimeShutdownReport {
+        for operation in setupOperations.values { operation.task.cancel() }
+        setupOperations.removeAll()
         if let runtimeShutdown { return await runtimeShutdown.value }
         isShuttingDown = true
         var eligible: [String: (model: String, timing: ActiveTurnTiming)] = [:]

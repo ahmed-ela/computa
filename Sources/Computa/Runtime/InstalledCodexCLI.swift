@@ -110,9 +110,9 @@ enum InstalledCodexCLI {
         case missing, incompatible, signedOut, invalidCatalog, unavailable, differentRuntime, busy
         var errorDescription: String? {
             switch self {
-            case .missing: "Install Codex CLI, run codex login in Terminal, then check available models."
+            case .missing: "Codex CLI is missing. Install it to connect your account."
             case .incompatible: "No installed Codex CLI could provide Kolmogor’s app-server interface. Update Codex CLI and check available models."
-            case .signedOut: "Run codex login in Terminal, then check available models."
+            case .signedOut: "Codex CLI is installed. Sign in to load your account’s models."
             case .invalidCatalog: "Codex CLI returned an unreadable model catalog. Update the CLI and check again."
             case .unavailable: "This model is unavailable in the current Codex CLI account. Check available models and select one."
             case .busy: "A message is already being submitted for this chat."
@@ -131,6 +131,7 @@ enum InstalledCodexCLI {
     static var candidateURLs: [URL] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [home.appendingPathComponent(".local/bin/codex").path,
+                home.appendingPathComponent(".local/share/kolmogor/bin/codex").path,
                 "/opt/homebrew/bin/codex", "/usr/local/bin/codex",
                 "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
                 "/Applications/Codex.app/Contents/Resources/codex"].map { URL(fileURLWithPath: $0) }

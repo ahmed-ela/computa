@@ -406,6 +406,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "refreshWebsiteModels":
             Task { @MainActor [weak self] in await self?.refreshWebsiteModels(body: body) }
 
+        case "manageCLISetup":
+            guard Set(body.keys) == ["action", "route", "operation"], let route = body["route"] as? String,
+                  let operation = body["operation"] as? String else { return }
+            state.manageCLISetup(route: route, operation: operation)
+
         case "connectModelProvider":
             guard Set(body.keys) == ["action", "route"], let route = body["route"] as? String else { return }
             state.connectModelProvider(route: route)

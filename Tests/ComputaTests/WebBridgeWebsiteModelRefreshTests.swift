@@ -36,6 +36,33 @@ final class WebBridgeWebsiteModelRefreshTests: XCTestCase {
         XCTAssertFalse(state.setDefaultModel(chat.modelID))
     }
 
+    func testWebsiteSetupVerifiesOnlyTheCurrentSetupTabAndAdvertisedModels() async throws {
+        let prefs = isolatedTestPreferences()
+        let browser = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { browser.shutdown() }
+        var probes: [String] = []
+        let state = AppState(tasks: [], preferences: prefs, browserSession: browser, websiteModelDiscovery: { provider in
+            probes.append(provider)
+            return [syntheticWebsiteChoice(provider: provider, key: "fixture", label: "Fixture")]
+        })
+        state.connectModelProvider(route: "browser/claude")
+        let tab = try XCTUnwrap(browser.setupTab(for: .claude))
+        state.connectModelProvider(route: "browser/claude")
+        XCTAssertEqual(browser.setupTab(for: .claude)?.id, tab.id)
+        browser.onSetupPageReady?(UUID(), tab.documentGeneration)
+        browser.onSetupPageReady?(tab.id, UUID())
+        await Task.yield()
+        XCTAssertTrue(probes.isEmpty)
+        browser.onSetupPageReady?(tab.id, tab.documentGeneration)
+        for _ in 0..<100 where probes.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(probes, ["claude"])
+        XCTAssertTrue(WebUISnapshot(state: state).providerSetups.contains { $0.route == "browser/claude" && $0.connected })
+        browser.onSetupPageReady?(tab.id, tab.documentGeneration)
+        await Task.yield()
+        XCTAssertEqual(probes, ["claude"])
+    }
+
+    @MainActor
     func testOnlySupportedIdleSetupRoutesCanOpenTabsOrProviderSettings() {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)

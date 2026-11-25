@@ -272,6 +272,7 @@ final class EmbeddedBrowserSession {
     @ObservationIgnored private var transientHumanVerificationCheckpoints: [String: UUID] = [:]
     @ObservationIgnored private var transientRecoveryReports: [String: EmbeddedHumanVerificationStore.RecoveryReport] = [:]
     @ObservationIgnored var onHumanVerificationRecoveryCandidate: (@MainActor (HumanVerificationRecoveryCandidate) -> Void)?
+    @ObservationIgnored var onSetupPageReady: ((UUID, UUID) -> Void)?
     @ObservationIgnored var onProviderSignInRecoveryCandidate: (@MainActor (ProviderSignInRecoveryCandidate) -> Void)?
     @ObservationIgnored private var entries: [UUID: Entry] = [:]
     @ObservationIgnored private weak var modelRenderHost: NSView?
@@ -3822,6 +3823,7 @@ final class EmbeddedBrowserSession {
         for seed in Array(inferenceCookieSeeds.values) { seed.cancel() }
         for validation in Array(inferenceCookieValidations.values) { validation.cancel() }
         onHumanVerificationRecoveryCandidate = nil
+        onSetupPageReady = nil
         onProviderSignInRecoveryCandidate = nil
         for id in tabs.map(\.id) { closeTab(id) }
         temporaryCookieRetirement?.stop()
@@ -4380,6 +4382,10 @@ final class EmbeddedBrowserSession {
         if error == nil, let navigation, entry.humanCommittedNavigation === navigation,
            entry.recoveryCommittedGeneration == entry.tab.documentGeneration {
             entry.recoverySettledGeneration = entry.tab.documentGeneration
+            if !entry.tab.isPopup, let provider = entry.tab.setupProvider, let url = view.url,
+               provider.accepts(url.absoluteString), !EmbeddedBrowserURLPolicy.isSignInAddress(url) {
+                onSetupPageReady?(tabID, entry.tab.documentGeneration)
+            }
             observeHumanVerificationRecovery(entry)
             observeProviderSignInRecovery(entry)
         }

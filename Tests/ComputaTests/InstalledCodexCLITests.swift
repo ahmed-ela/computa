@@ -172,6 +172,7 @@ final class InstalledCodexCLITests: XCTestCase {
             let snapshot = WebUISnapshot(state: state)
             let setup = snapshot.providerSetups.first { $0.route == InstalledCodexCLI.route }
             XCTAssertEqual(setup?.connected, false)
+            XCTAssertEqual(setup?.checkStatus, .signInRequired)
             XCTAssertEqual(setup?.detail, InstalledCodexCLI.Failure.signedOut.localizedDescription)
             XCTAssertFalse(snapshot.modelOptions.contains { InstalledCodexCLI.slug($0.id) != nil })
         }

@@ -148,7 +148,7 @@ export interface ModelOption {
 
 export interface ModelProviderSetup {
   detail?: string | null;
-  checkStatus?: 'checking' | 'signInRequired' | 'unavailable';
+  checkStatus?: 'checking' | 'installRequired' | 'signInRequired' | 'settingUp' | 'unavailable';
   route: string;
   name: string;
   connected: boolean;
@@ -282,6 +282,7 @@ export type NativeAction =
   | { action: 'setDefaultModel'; modelID: string; thinkingEffort?: string }
   | { action: 'setTaskModel'; taskID: string; modelID: string; thinkingEffort?: string }
   | { action: 'refreshWebsiteModels'; provider?: WebsiteModelProvider }
+  | { action: 'manageCLISetup'; route: string; operation: 'install' | 'signIn' | 'stopWaiting' }
   | { action: 'connectModelProvider'; route: string }
   | { action: 'showAccessModeSettings' }
   | { action: 'showAPIProviders' }

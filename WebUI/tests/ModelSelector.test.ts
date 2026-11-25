@@ -92,6 +92,20 @@ describe('website model selectors', () => {
     expect(html).toContain('Task model: Codex CLI / one');
   });
 
+  test('first launch presents the specific action for a missing, signed-out or in-progress CLI', async () => {
+    for (const [checkStatus, action] of [
+      ['installRequired', 'Install Codex CLI…'], ['signInRequired', 'Sign in with Codex CLI…'], ['settingUp', 'Stop waiting'],
+    ] as const) {
+      const html = renderToStaticMarkup(h(ModelSelector, {
+        options: [], setups: [{route: 'cli/codex', name: 'Codex CLI', connected: false, checkStatus}],
+        model: '', label: 'Task model', canConnect: true, onSelect: () => {},
+      })).html;
+      expect(html).toContain('Task model: Connect a provider');
+      expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toContain(action);
+      expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([]);
+    }
+  });
+
   test('a bound CLI chat shows only its own provider and preserves nested model IDs', async () => {
     const setups = [
       { route: 'cli/opencode', name: 'OpenCode', connected: true },
@@ -121,13 +135,13 @@ describe('website model selectors', () => {
     const render = (models: ModelOption[]) => renderToStaticMarkup(h(ModelSelector, { ...props, options: models })).html;
     const html = render([saved]);
     expect((await renderedProviderGroups(html)).map((group) => group.name)).toEqual(names);
-    expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual(names.map(() => 'Check available models'));
+    expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual(names.flatMap(name => ['Sign in to ' + name, 'Check available models']));
     expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([]);
     const connected = render([saved, options[3]]);
     expect(connected).toContain('Task model: Choose model');
     expect(await attributesBySelector(connected, '[role="menuitemradio"]', 'data-value')).toEqual([options[3].id]);
     expect(connected).not.toContain('Sign in to Gemini');
-    expect(connected).not.toContain('Sign in to');
+    expect(connected).toContain('Sign in to ChatGPT');
   });
 
   test('only a confirmed signed-out result offers sign-in; other states allow a scoped check', async () => {

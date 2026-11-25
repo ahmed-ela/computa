@@ -5,7 +5,7 @@ struct ModelProviderSetup: Codable, Equatable, Sendable {
     let route: String
     let name: String
     let connected: Bool
-    enum CheckStatus: String, Codable, Sendable { case checking, signInRequired, unavailable }
+    enum CheckStatus: String, Codable, Sendable { case checking, installRequired, signInRequired, settingUp, unavailable }
     var checkStatus: CheckStatus? = nil
     var detail: String? = nil
 
@@ -166,7 +166,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
                 connected: state.apiProviders.contains(where: \.isAlibabaModelStudioInference)))
         }
         setups.append(ModelProviderSetup(route: InstalledCodexCLI.route, name: "Codex CLI",
-            connected: !state.installedCLIOptions.isEmpty, checkStatus: state.installedCLICheckStatus,
+            connected: !state.installedCLIOptions.isEmpty, checkStatus: state.cliSetupInProgress(InstalledCodexCLI.route) ? .settingUp : state.installedCLICheckStatus,
             detail: state.installedCLIError))
         setups += state.providerCLISetups
         providerSetups = setups

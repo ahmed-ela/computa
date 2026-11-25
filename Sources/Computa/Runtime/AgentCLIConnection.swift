@@ -2,10 +2,10 @@ import Darwin
 import Foundation
 
 enum AgentCLIError: LocalizedError, Sendable {
-    case installationRequired(String), unavailable(String), protocolError(String), cancelled
+    case installationRequired(String), signInRequired(String), unavailable(String), protocolError(String), cancelled
     var errorDescription: String? {
         switch self {
-        case .installationRequired(let reason), .unavailable(let reason), .protocolError(let reason): reason
+        case .installationRequired(let reason), .signInRequired(let reason), .unavailable(let reason), .protocolError(let reason): reason
         case .cancelled: "CLI task interrupted."
         }
     }
@@ -79,7 +79,8 @@ actor AgentCLIConnection {
         guard let id = msg["id"] as? Int, let waiting = requests.removeValue(forKey: id) else { return }
         if let error = msg["error"] as? [String: Any] {
             let reason = error["message"] as? String ?? "CLI request failed."
-            waiting.resume(throwing: AgentCLIError.protocolError(String(reason.prefix(1200))))
+            let detail = String(reason.prefix(1200))
+            waiting.resume(throwing: error["code"] as? Int == -32000 ? AgentCLIError.signInRequired(detail) : .protocolError(detail))
         } else if let result = msg["result"], JSONSerialization.isValidJSONObject(result) {
             do { waiting.resume(returning: try JSONSerialization.data(withJSONObject: result)) }
             catch { waiting.resume(throwing: error) }

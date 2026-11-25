@@ -548,6 +548,7 @@ function Composer({
               setups={snapshot.providerSetups}
               canConnect={snapshot.canRefreshWebsiteModels === true}
               onConnect={(route) => post({ action: 'connectModelProvider', route })}
+              onCLISetup={(route, operation) => post({ action: 'manageCLISetup', route, operation })}
               onRefresh={post}
               disabled={!task.modelSelectable}
               onSelect={(modelID, thinkingEffort) => post({ action: 'setTaskModel', taskID: task.id, modelID, ...(thinkingEffort ? { thinkingEffort } : {}) })}
@@ -771,6 +772,7 @@ function DefaultModelSelector({ snapshot }: { snapshot: AppSnapshot }) {
   return <ModelSelector label="Default model for new tasks" model={snapshot.defaultModel} thinkingEffort={snapshot.defaultThinkingEffort}
     options={snapshot.modelOptions} setups={snapshot.providerSetups} canConnect={snapshot.canRefreshWebsiteModels === true}
     onConnect={(route) => post({ action: 'connectModelProvider', route })}
+    onCLISetup={(route, operation) => post({ action: 'manageCLISetup', route, operation })}
     onRefresh={post}
     onSelect={(modelID, thinkingEffort) => post({ action: 'setDefaultModel', modelID, ...(thinkingEffort ? { thinkingEffort } : {}) })} />;
 }
