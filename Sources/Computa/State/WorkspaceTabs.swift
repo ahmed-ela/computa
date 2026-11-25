@@ -1,6 +1,10 @@
 import Foundation
 import Observation
 
+enum BrowserAddressPlacement: String, Codable {
+    case titleBar, sidebar
+}
+
 enum WorkspaceLayout {
     case chatListWithSidePane
     case mixedTabsWithSidePane

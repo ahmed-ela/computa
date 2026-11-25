@@ -1376,6 +1376,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let session = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
         let agent = AgentTask(title: "Keep this agent", summary: "", status: .draft, workspace: "", model: "local")
         let state = AppState(tasks: [agent], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        state.browserAddressPlacement = .sidebar
         state.selectTask(agent.id)
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
@@ -1411,6 +1412,86 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testAddressPlacementSwitchesInSettingsAndTitleBarEditsInPlace() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Address placement</title>")
+        let url = try await site.start().appendingPathComponent("human/final")
+        defer { site.stop() }
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let id = try session.createTab(url: url)
+        let page = try XCTUnwrap(session.webView(for: id))
+        let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let tab = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: id)?.workspaceID))
+        state.selectWorkspaceTab(tab)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 730),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        await settleLayout(host)
+        let shell = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let ready = await waitForScriptBool(on: page, script: "document.title === 'Address placement'")
+        XCTAssertTrue(ready)
+        XCTAssertEqual(state.browserAddressPlacement, .titleBar)
+        let light = try XCTUnwrap(window.standardWindowButton(.closeButton))
+        for (width, collapsed) in [(1100, false), (850, true)] {
+            window.setContentSize(.init(width: width, height: 730))
+            state.isTaskSidebarCollapsed = collapsed
+            await settleLayout(host)
+            let lightY = light.convert(light.bounds, to: nil).midY
+            let pageFrame = page.convert(page.bounds, to: nil)
+            XCTAssertEqual(pageFrame.maxY, window.contentLayoutRect.maxY, accuracy: 3)
+            try await clickInWindow(at: .init(x: pageFrame.midX, y: lightY), window: window, throughApplication: true)
+            let editor = try await commandEditor("browser-address", in: host, window: window)
+            let field = try XCTUnwrap(editor.delegate as? NSTextField)
+            let frame = field.convert(field.bounds, to: nil)
+            XCTAssertEqual(frame.midY, lightY, accuracy: 3)
+            XCTAssertGreaterThan(frame.minX, pageFrame.minX)
+            XCTAssertLessThanOrEqual(frame.maxX, pageFrame.maxX)
+            XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: url.absoluteString.utf16.count))
+            editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+            await settleLayout(host)
+        }
+        BrowserAddressPalette.request(in: window)
+        let editor = try await commandEditor("browser-address", in: host, window: window)
+        editor.insertText(url.appendingPathComponent("edited").absoluteString, replacementRange: editor.selectedRange())
+        editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        let navigated = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/edited')")
+        XCTAssertTrue(navigated)
+        func choose(_ value: String) async throws {
+            state.presentSettings()
+            let picker = "document.querySelector('select[aria-label=\"Address bar location\"]')"
+            let shown = await waitForScriptBool(on: shell, script: "!!\(picker)")
+            XCTAssertTrue(shown)
+            _ = try await shell.evaluateJavaScript("\(picker).value = '\(value)'; \(picker).dispatchEvent(new Event('change', { bubbles: true })); true")
+            let changed = await waitForScriptBool(on: shell, script: "\(picker).value === '\(value)'")
+            XCTAssertTrue(changed)
+            for _ in 0..<100 where state.browserAddressPlacement.rawValue != value { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(state.browserAddressPlacement.rawValue, value)
+            _ = try await shell.evaluateJavaScript("document.querySelector('[aria-label=\"Close settings\"]').click(); true")
+            await settleLayout(host)
+        }
+        try await choose("sidebar")
+        let restored = AppState(tasks: [], preferences: prefs, browserSession: EmbeddedBrowserSession(persistent: false), workspaceLayout: .mixedTabs)
+        XCTAssertEqual(restored.browserAddressPlacement, .sidebar)
+        restored.browserSession.shutdown()
+        let inSidebar = await waitForScriptBool(on: shell, script: "!!document.querySelector('button.sidebar-address')")
+        XCTAssertTrue(inSidebar)
+        XCTAssertEqual(page.convert(page.bounds, to: nil).maxY, window.frame.height, accuracy: 1)
+        try await choose("titleBar")
+        let removed = await waitForScriptBool(on: shell, script: "!document.querySelector('button.sidebar-address')")
+        XCTAssertTrue(removed)
+        XCTAssertEqual(state.selectedWorkspaceTab, tab)
+        XCTAssertTrue(session.webView(for: id) === page)
+    }
+
+    @MainActor
     func testSidebarAddressOpensCenteredSelectsReplacesAndNavigates() async throws {
         let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<!doctype html><title>Address selection</title><button>Top control</button>")
         let url = try await site.start().appendingPathComponent("human/final")
@@ -1419,6 +1500,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let tab = try session.createTab(url: url)
         let page = try XCTUnwrap(session.webView(for: tab))
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session, workspaceLayout: .mixedTabs)
+        state.browserAddressPlacement = .sidebar
         state.selectWorkspaceTab(.browser(try XCTUnwrap(session.humanTab(id: tab)?.workspaceID)))
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 740),

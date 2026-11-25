@@ -205,6 +205,7 @@ export interface AppSnapshot {
   connection: ConnectionSnapshot;
   permissions: PermissionSnapshot;
   appearance: 'system' | 'light' | 'dark';
+  browserAddressPlacement: 'titleBar' | 'sidebar';
   accessMode: 'askEveryTime' | 'fullAccess';
   defaultModel: string;
   modelOptions: ModelOption[];
@@ -273,6 +274,7 @@ export type NativeAction =
   | { action: 'importChromeProfile' }
   | { action: 'dismissSettings' }
   | { action: 'setAppearance'; value: 'system' | 'light' | 'dark' }
+  | { action: 'setBrowserAddressPlacement'; value: AppSnapshot['browserAddressPlacement'] }
   | { action: 'setDefaultModel'; modelID: string }
   | { action: 'setTaskModel'; taskID: string; modelID: string }
   | { action: 'refreshWebsiteModels'; provider?: WebsiteModelProvider }
