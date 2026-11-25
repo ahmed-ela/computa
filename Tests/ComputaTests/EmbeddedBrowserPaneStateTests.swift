@@ -799,6 +799,14 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try await inspect("Array.from(document.querySelectorAll('.workspace-pin')).every(button => getComputedStyle(button).pointerEvents === 'auto')")
         try await pressPin(agent)
         try await inspect("document.querySelector('h2[data-section=pinned] .lucide-pin') && document.querySelectorAll('[data-pinned=true]').length === 1")
+        try await inspect("""
+            (() => {
+                const divider = document.querySelector('[data-section=tabs]');
+                const label = divider?.querySelector('span');
+                return label && getComputedStyle(label).clipPath === 'inset(50%)'
+                    && getComputedStyle(divider, '::before').height === '1px';
+            })()
+            """)
         try await pressPin(page.uuidString)
         try await inspect("document.querySelectorAll('[data-pinned=true] .lucide-pin-off').length === 2")
         XCTAssertEqual(state.openWorkspaceTabs, [.agent(agent), .browser(page), .agent(selected)])

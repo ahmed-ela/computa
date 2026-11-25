@@ -185,9 +185,10 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       {rows.slice(start, end).map((item,index) => {
         if (typeof item === 'string') {
           const heading = item === 'pinned' ? 'Pinned' : snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats';
-          return <h2 key={item} className="sidebar-section-heading" data-section={item} title={heading}>
+          const dividerOnly = item === 'tabs' && snapshot.mixesBrowserTabsInSidebar;
+          return <h2 key={item} className="sidebar-section-heading" data-section={item} title={dividerOnly ? undefined : heading}>
             {item === 'pinned' && <Icon name="pin" size={13} />}
-            <span className={collapsed ? 'sr-only' : undefined}>{heading}</span>
+            <span className={collapsed || dividerOnly ? 'sr-only' : undefined}>{heading}</span>
           </h2>;
         }
         const status = item.task && sidebarAgentStatus(item.task);
