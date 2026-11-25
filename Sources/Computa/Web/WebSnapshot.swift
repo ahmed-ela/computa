@@ -48,6 +48,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     var draftHandoff: WorkspaceTabs.DraftHandoff?
     var sidebarDropTarget: Bool?
     let workspaceOrder: [WorkspaceTabID]
+    let workspacePinnedCount: Int
     let workspaceBrowsers: [WorkspaceBrowserSnapshot]
     let primaryBrowserID: String?
     let selectedTaskID: String?
@@ -92,6 +93,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         sidebarDropTarget = state.workspaceTabs.isDropTarget ? true : nil
         workspaceOrder = state.openWorkspaceTabs
         let open = Set(workspaceOrder)
+        workspacePinnedCount = state.workspaceTabs.pinnedTabs.filter(open.contains).count
         workspaceBrowsers = mixesBrowserTabsInSidebar ? state.browserSession.workspaceBrowserTabs.filter { open.contains(.browser($0.workspaceID)) }.map {
             WorkspaceBrowserSnapshot(id: $0.workspaceID.uuidString, title: $0.title, host: $0.url?.host,
                                      favicon: $0.favicon, isFaviconLoading: $0.isFaviconLoading,

@@ -153,12 +153,15 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "newWorkspaceBrowserTab":
             state.newWorkspaceBrowserTab()
 
-        case "selectWorkspaceTab", "closeWorkspaceTab", "moveWorkspaceTab":
+        case "selectWorkspaceTab", "closeWorkspaceTab", "moveWorkspaceTab", "setWorkspaceTabPinned":
             guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
                   let tab = Self.workspaceTab(body["tab"]), state.openWorkspaceTabs.contains(tab) else { return }
             switch action {
             case "selectWorkspaceTab": state.selectWorkspaceTab(tab)
             case "closeWorkspaceTab": state.closeWorkspaceTab(tab)
+            case "setWorkspaceTabPinned":
+                guard let pinned = body["pinned"] as? Bool else { return }
+                state.workspaceTabs.setPinned(tab, pinned: pinned)
             default:
                 guard let target = Self.workspaceTab(body["target"]), state.openWorkspaceTabs.contains(target) else { return }
                 state.workspaceTabs.move(tab, to: target)

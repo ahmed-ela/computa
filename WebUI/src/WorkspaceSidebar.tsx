@@ -8,7 +8,7 @@ import { isTaskActive, sidebarAgentStatus, startSidebarClock } from './sidebarAc
 import type { AppSnapshot, NativeAction, TaskSnapshot, WorkspaceBrowser, WorkspaceTab } from './types';
 
 type Item = {
-  ref: WorkspaceTab; title: string; searchText: string; open: boolean;
+  ref: WorkspaceTab; title: string; searchText: string; open: boolean; pinned: boolean;
   updatedAt: number; task?: TaskSnapshot; browser?: WorkspaceBrowser;
 };
 type Action = (action: NativeAction) => void;
@@ -24,7 +24,7 @@ export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
   for (const task of snapshot.tasks) {
     const title = snapshot.agentNames?.[task.id] || (task.title === 'Untitled task' ? 'New agent' : task.title);
     const ref: WorkspaceTab = { kind: 'agent', id: task.id };
-    available.set(keyOf(ref), { ref, task, title, open: false, updatedAt: task.updatedAt,
+    available.set(keyOf(ref), { ref, task, title, open: false, pinned: false, updatedAt: task.updatedAt,
       searchText: [title, task.title, task.summary, task.workspace].join(' ') });
   }
   if (needle) {
@@ -32,23 +32,24 @@ export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
       const ref: WorkspaceTab = { kind: 'agent', id: chat.id };
       const title = snapshot.agentNames?.[chat.id.toLowerCase()] || chat.title;
       if (!available.has(keyOf(ref))) available.set(keyOf(ref), {
-        ref, title, open: false, updatedAt: chat.updatedAt, searchText: [title, chat.title, chat.workspace].join(' '),
+        ref, title, open: false, pinned: false, updatedAt: chat.updatedAt, searchText: [title, chat.title, chat.workspace].join(' '),
       });
     }
   }
   if (snapshot.mixesBrowserTabsInSidebar) {
     for (const browser of snapshot.workspaceBrowsers ?? []) {
       const ref: WorkspaceTab = { kind: 'browser', id: browser.id };
-      available.set(keyOf(ref), { ref, browser, title: browser.title, open: false, updatedAt: 0,
+      available.set(keyOf(ref), { ref, browser, title: browser.title, open: false, pinned: false, updatedAt: 0,
         searchText: [browser.title, browser.host].join(' ') });
     }
   }
   const order = snapshot.workspaceOrder ?? snapshot.tasks.map(task => ({ kind: 'agent' as const, id: task.id }));
   const open: Item[] = [];
-  for (const ref of order) {
+  for (const [index, ref] of order.entries()) {
     const key = keyOf(ref), item = available.get(key);
     if (item) {
       item.open = true;
+      item.pinned = index < (snapshot.workspacePinnedCount ?? 0);
       open.push(item);
       available.delete(key);
     }
@@ -57,6 +58,14 @@ export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
   const closed = Array.from(available.values()).filter(item => item.ref.kind === 'agent');
   const items = open.concat(closed.sort((a, b) => b.updatedAt - a.updatedAt));
   return items.filter(item => item.searchText.toLocaleLowerCase().includes(needle));
+}
+
+// Headings occupy one row so shortcuts, virtual scrolling and the compact rail share the same geometry.
+function sidebarRows(items: Item[]): (Item | 'pinned' | 'tabs')[] {
+  if (!items[0]?.pinned) return items;
+  const firstRegular = items.findIndex(item => !item.pinned);
+  if (firstRegular === -1) return ['pinned', ...items];
+  return ['pinned', ...items.slice(0, firstRegular), 'tabs', ...items.slice(firstRegular)];
 }
 
 function SiteIcon({ tab }: { tab: WorkspaceBrowser }) {
@@ -81,7 +90,8 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     } });
   }, [active, collapsed]);
   const items = useMemo(() => workspaceItems(snapshot, search), [snapshot, search]);
-  const { start, end } = useSidebarWindow(tabList, items.length);
+  const rows = useMemo(() => sidebarRows(items), [items]);
+  const { start, end } = useSidebarWindow(tabList, rows.length);
   const selectedTab = snapshot.primaryBrowserID
     ? 'browser:' + snapshot.primaryBrowserID
     : 'agent:' + (snapshot.savedChatSelection?.id ?? snapshot.selectedTaskID);
@@ -96,7 +106,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       selected.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     } else {
       // A shortcut can select a tab outside the mounted rows.
-      const index = items.findIndex(item => keyOf(item.ref) === selectedTab);
+      const index = rows.findIndex(row => typeof row !== 'string' && keyOf(row.ref) === selectedTab);
       if (index >= 0) list.scrollTop = index * sidebarRowHeight;
     }
   }, [selectedTab]);
@@ -172,11 +182,19 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     </nav>}
     <nav ref={tabList} style={{ '--sidebar-row-height': sidebarRowHeight + 'px' }} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats'}>
       {start > 0 && <div aria-hidden="true" style={{ height: start * sidebarRowHeight + 'px' }} />}
-      {items.slice(start, end).map((item,index) => {
+      {rows.slice(start, end).map((item,index) => {
+        if (typeof item === 'string') {
+          const heading = item === 'pinned' ? 'Pinned' : snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats';
+          return <h2 key={item} className="sidebar-section-heading" data-section={item} title={heading}>
+            {item === 'pinned' && <Icon name="pin" size={13} />}
+            <span className={collapsed ? 'sr-only' : undefined}>{heading}</span>
+          </h2>;
+        }
         const status = item.task && sidebarAgentStatus(item.task);
         const selected = keyOf(item.ref) === selectedTab;
         const label = status ? item.title + (status === 'working' ? ' — Working' : ' — Ready to read') : item.title;
-        return <div key={keyOf(item.ref)} className="workspace-tab-row" data-drag-id={item.ref.id} data-drag-kind={item.ref.kind} draggable={item.open}
+        return <div key={keyOf(item.ref)} className="workspace-tab-row" data-pinned={item.pinned ? 'true' : undefined}
+          data-drag-id={item.ref.id} data-drag-kind={item.ref.kind} draggable={item.open}
           onDragStart={event => {
             if (!item.open) return;
             if (nativeHost) {
@@ -195,18 +213,22 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
             data-tab-kind={item.ref.kind} aria-current={selected ? 'page' : undefined} onClick={() => select(item)}
             onKeyDown={event => {
               if (!item.open || !event.altKey || !['ArrowUp','ArrowDown'].includes(event.key)) return;
-              event.preventDefault(); const neighbor = items[start + index + (event.key === 'ArrowUp' ? -1 : 1)];
-              if (neighbor?.open) post({ action: 'moveWorkspaceTab', tab: item.ref, target: neighbor.ref });
+              event.preventDefault(); const neighbor = rows[start + index + (event.key === 'ArrowUp' ? -1 : 1)];
+              if (typeof neighbor !== 'string' && neighbor?.open) post({ action: 'moveWorkspaceTab', tab: item.ref, target: neighbor.ref });
             }}>
             {item.browser ? <SiteIcon tab={item.browser} /> : <AgentStatusIcon taskID={item.ref.id} />}
             {!collapsed && <span className="task-row-title">{item.title}</span>}
             {!collapsed && item.task && <TaskActivityIndicator task={item.task} now={now} />}
           </Button>
+          {item.open && !collapsed && <Button variant="ghost" size="icon-xs" className="workspace-pin"
+            aria-label={(item.pinned ? 'Unpin tab: ' : 'Pin tab: ') + item.title} title={item.pinned ? 'Unpin tab' : 'Pin tab'}
+            onClick={() => post({ action: 'setWorkspaceTabPinned', tab: item.ref, pinned: !item.pinned })}>
+            <Icon name={item.pinned ? 'unpin' : 'pin'} size={13} /></Button>}
           {item.open && !collapsed && <Button variant="ghost" size="icon-xs" className="workspace-close" aria-label={'Close tab: ' + item.title}
             title="Close tab" onClick={() => post({ action: 'closeWorkspaceTab', tab: item.ref })}><Icon name="x" size={12} /></Button>}
         </div>;
       })}
-      {end < items.length && <div aria-hidden="true" style={{ height: (items.length - end) * sidebarRowHeight + 'px' }} />}
+      {end < rows.length && <div aria-hidden="true" style={{ height: (rows.length - end) * sidebarRowHeight + 'px' }} />}
       {!items.length && !collapsed && <div className="sidebar-empty">{search ? 'No matching ' + noun : 'No ' + noun}</div>}
     </nav>
   </aside>;

@@ -630,6 +630,63 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testPinButtonsMoveAgentAndBrowserTabsAndRestoreTheSelectedTab() async throws {
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        let browser = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        let state = AppState(tasks: [], preferences: prefs, browserSession: browser, workspaceLayout: .mixedTabs)
+        state.createTask()
+        let agent = try XCTUnwrap(state.selectedTaskID)
+        let page = try XCTUnwrap(browser.humanTab(id: try browser.createTab())?.workspaceID)
+        state.createTask()
+        let selected = try XCTUnwrap(state.selectedTaskID)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1000, height: 680), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close(); browser.shutdown() }
+        await settleLayout(host)
+        let ui = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        func inspect(_ condition: String, line: UInt = #line) async throws {
+            let matched = await waitForScriptBool(on: ui, script: condition)
+            XCTAssertTrue(matched, condition, line: line)
+            if !matched { throw CocoaError(.coderInvalidValue) }
+        }
+        func pressPin(_ tab: String) async throws {
+            _ = try await ui.evaluateJavaScript("document.querySelector('[data-drag-id=\"\(tab)\"] .workspace-pin').click(); true")
+        }
+        try await inspect("document.querySelectorAll('.workspace-pin').length === 3 && !document.querySelector('.sidebar-section-heading')")
+        try await inspect("Array.from(document.querySelectorAll('.workspace-pin')).every(button => getComputedStyle(button).pointerEvents === 'auto')")
+        try await pressPin(agent)
+        try await inspect("document.querySelector('h2[data-section=pinned] .lucide-pin') && document.querySelectorAll('[data-pinned=true]').length === 1")
+        try await pressPin(page.uuidString)
+        try await inspect("document.querySelectorAll('[data-pinned=true] .lucide-pin-off').length === 2")
+        XCTAssertEqual(state.openWorkspaceTabs, [.agent(agent), .browser(page), .agent(selected)])
+        XCTAssertEqual(state.selectedWorkspaceTab, .agent(selected))
+
+        try await pressPin(agent)
+        try await inspect("document.querySelectorAll('[data-pinned=true]').length === 1")
+        try await pressPin(page.uuidString)
+        try await inspect("!document.querySelector('h2[data-section=pinned]')")
+        try await pressPin(page.uuidString)
+        try await inspect("document.querySelector('[data-pinned=true][data-drag-kind=browser]') !== null")
+        try await pressPin(agent)
+        try await inspect("document.querySelectorAll('[data-pinned=true]').length === 2")
+        _ = await state.shutdownRuntime()
+
+        let nextBrowser = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        defer { nextBrowser.shutdown() }
+        let next = AppState(tasks: [], preferences: prefs, browserSession: nextBrowser, workspaceLayout: .mixedTabs)
+        XCTAssertEqual(next.openWorkspaceTabs, [.browser(page), .agent(agent), .agent(selected)])
+        XCTAssertEqual(WebUISnapshot(state: next).workspacePinnedCount, 2)
+        XCTAssertEqual(next.selectedWorkspaceTab, .agent(selected))
+        next.selectAdjacentWorkspaceTab(.next)
+        XCTAssertEqual(next.selectedWorkspaceTab, .browser(page))
+    }
+
+    @MainActor
     func testMixedSidebarFaviconSwitchingReorderAndHistory() async throws {
         let html = """
         <title>Cedar rail</title>

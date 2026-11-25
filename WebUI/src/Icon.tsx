@@ -15,6 +15,8 @@ import PanelLeftOpen from '@octanejs/lucide/icons/panel-left-open';
 import PanelRight from '@octanejs/lucide/icons/panel-right';
 import Pause from '@octanejs/lucide/icons/pause';
 import Pencil from '@octanejs/lucide/icons/pencil';
+import Pin from '@octanejs/lucide/icons/pin';
+import PinOff from '@octanejs/lucide/icons/pin-off';
 import SquarePen from '@octanejs/lucide/icons/square-pen';
 import Play from '@octanejs/lucide/icons/play';
 import RotateCw from '@octanejs/lucide/icons/rotate-cw';
@@ -43,6 +45,8 @@ const icons = {
   inspect: PanelRight,
   more: Ellipsis,
   pause: Pause,
+  pin: Pin,
+  unpin: PinOff,
   compose: SquarePen,
   resume: Play,
   search: Search,
