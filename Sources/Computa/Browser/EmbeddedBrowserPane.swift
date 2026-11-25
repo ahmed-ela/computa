@@ -289,7 +289,7 @@ struct EmbeddedBrowserPane: View {
         do {
             let url = try EmbeddedBrowserURLPolicy.normalize(address)
             if let id = selectedTab?.id {
-                try session.navigate(tabID: id, to: url)
+                try session.navigate(tabID: id, to: url, fromAddressBar: true)
             } else {
                 _ = try session.createTab(url: url)
             }

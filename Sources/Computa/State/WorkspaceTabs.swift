@@ -442,7 +442,7 @@ extension AppState {
             removeWorkspaceTab(tab, wasSelected: primaryBrowserID == nil && selectedTaskID == tab.id)
         case .browser:
             if let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID.uuidString == tab.id }) {
-                if let saved = browserSession.restorablePage(for: page, includeSignIn: workspaceTabs.pinnedTabs.contains(tab)),
+                if let saved = browserSession.restorablePage(for: page, pinned: workspaceTabs.pinnedTabs.contains(tab)),
                    let index = browserSession.workspaceBrowserTabs.firstIndex(where: { $0.id == page.id }) {
                     workspaceTabs.rememberClose(.browser(saved, paneIndex: index))
                 }

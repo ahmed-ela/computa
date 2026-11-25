@@ -395,7 +395,7 @@ final class AppState {
         let temporaryDrafts = Set(workspaceWindows.temporary.flatMap(\.temporaryDraftIDs))
             .subtracting(pinnedTabs.filter { $0.kind == .agent }.map(\.id))
         let restorableTabs = Set(workspaceTabs.order).union(pinSet)
-        let pages = browserSession.restorablePages(includingSignInsPinnedIn: pinSet)
+        let pages = browserSession.restorablePages(pinnedIn: pinSet)
             .filter { restorableTabs.contains(.browser($0.id)) }
         let pageIDs = Set(pages.map { $0.id.uuidString })
         var drafts = waitingForWorkspaceHistory ? (previous?.drafts ?? [:]).filter { byID[$0.key] == nil } : [:]

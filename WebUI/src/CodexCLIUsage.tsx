@@ -27,10 +27,19 @@ function resetMillis(window: CodexCLIUsageWindow): number | undefined {
   return time > 0 && time <= 8.64e15 ? time : undefined;
 }
 
-export function quotaNearLimit(buckets: CodexCLIUsageBucket[] | undefined, now: number): boolean {
-  return buckets?.some(({ primary, secondary }) => [primary, secondary].some(window => {
-    return window && (resetMillis(window) ?? Infinity) > now && quotaLeft(window.usedPercent) <= 10;
-  })) ?? false;
+export function quotaSummary(buckets: CodexCLIUsageBucket[] | undefined, now: number) {
+  let remaining: number | undefined;
+  let nextReset = Infinity;
+  for (const { primary, secondary } of buckets ?? []) {
+    for (const window of [primary, secondary]) {
+      if (!window) continue;
+      const reset = resetMillis(window) ?? Infinity;
+      if (reset <= now) continue;
+      remaining = Math.min(remaining ?? 100, quotaLeft(window.usedPercent));
+      nextReset = Math.min(nextReset, reset);
+    }
+  }
+  return { remaining, nextReset };
 }
 
 const resetFormat = new Intl.DateTimeFormat(undefined, {
@@ -65,12 +74,14 @@ export function CodexCLIUsage({ buckets, refreshing, blocked, onRefresh }: {
 }) {
   const [, setClock] = useState(0);
   const now = Date.now();
-  const nearLimit = quotaNearLimit(buckets, now);
-  const nextReset = (buckets ?? []).flatMap(({ primary, secondary }) => [primary, secondary])
-    .reduce((next: number, window) => {
-      const reset = window && resetMillis(window);
-      return reset !== undefined && reset > now ? Math.min(next, reset) : next;
-    }, Infinity);
+  const { remaining, nextReset } = quotaSummary(buckets, now);
+  const hint = remaining !== undefined ? `${remaining}% left` : refreshing ? 'Checking usage…' : 'Usage unavailable';
+  const needsQuota = remaining === undefined && !blocked;
+  function refreshMissing() {
+    if (needsQuota && !refreshing) onRefresh();
+  }
+  // Read once when a meter first needs data. A failed read can be retried on hover or focus.
+  useEffect(refreshMissing, [needsQuota]);
   useEffect(() => {
     if (!Number.isFinite(nextReset)) return;
     const timeout = setTimeout(() => setClock(Date.now()),
@@ -80,8 +91,17 @@ export function CodexCLIUsage({ buckets, refreshing, blocked, onRefresh }: {
 
   return (
     <Popover onOpenChange={(open: boolean) => { if (open && !blocked && !refreshing) onRefresh(); }}>
-      <PopoverTrigger className="codex-usage-trigger" data-warning={nearLimit ? 'true' : undefined}
-        aria-label={nearLimit ? 'Codex usage, quota low' : 'Codex usage'} disabled={blocked}>Usage</PopoverTrigger>
+      <PopoverTrigger className="codex-usage-trigger" disabled={blocked} data-hint={hint}
+        data-warning={remaining !== undefined && remaining <= 10 ? 'true' : undefined}
+        aria-label={`Codex usage, ${hint}`} onPointerEnter={refreshMissing} onFocus={refreshMissing}>
+        <svg className="codex-usage-ring" width="16" height="16" viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" strokeWidth="2" aria-hidden="true" focusable="false">
+          <circle className="codex-usage-track" cx="8" cy="8" r="6"
+            strokeDasharray={remaining === undefined ? '2 2' : undefined} />
+          {remaining !== undefined && remaining > 0 ? <circle cx="8" cy="8" r="6" pathLength="100"
+            strokeDasharray={`${remaining} 100`} strokeLinecap="round" transform="rotate(-90 8 8)" /> : null}
+        </svg>
+      </PopoverTrigger>
       <PopoverContent className="codex-usage-popover" side="top" align="start" sideOffset={8} aria-label="Codex usage">
         <header className="codex-quota-row">
           <h2>Codex usage</h2>

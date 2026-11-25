@@ -363,12 +363,17 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .model-option-unavailable { flex-shrink: 0; color: var(--text-tertiary); font-size: 11px; }
 .composer-shell .model-selector-trigger { height: 28px; border: 0; box-shadow: none; background: transparent; color: var(--text-secondary); font-size: 11px; }
 .composer-shell .model-selector-trigger:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
-.codex-usage-trigger { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; height: 28px; padding: 0 6px; border-radius: 5px; color: var(--text-secondary); font-size: 11px; }
+.codex-usage-trigger { position: relative; display: inline-grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; padding: 0; border-radius: 50%; color: var(--text-secondary); }
 .codex-usage-trigger:hover:not(:disabled), .codex-usage-trigger[data-state="open"] { background: var(--surface-hover); }
 .codex-usage-trigger:focus-visible { outline: 2px solid var(--focus); }
 .codex-usage-trigger:disabled { opacity: .45; }
 .codex-usage-trigger[data-warning="true"] { color: var(--orange); }
-.codex-usage-trigger[data-warning="true"]::after { width: 5px; height: 5px; border-radius: 50%; background: currentColor; content: ""; }
+.codex-usage-track { opacity: .28; }
+.codex-usage-trigger:is(:hover, :focus-visible):not(:disabled, [data-state="open"])::after {
+  content: attr(data-hint); position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%);
+  z-index: 1; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised);
+  color: var(--text); font-size: 11px; line-height: 1.4; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none;
+}
 .codex-usage-popover { z-index: 120; width: 270px; max-width: calc(100vw - 24px); max-height: var(--radix-popover-content-available-height, 300px); overflow: auto; gap: 4px; padding: 8px 12px 12px; border: 1px solid var(--border-strong); background: var(--surface-raised); color: var(--text); font-size: 12px; }
 .codex-quota-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .codex-usage-popover h2 { font-weight: 600; }
