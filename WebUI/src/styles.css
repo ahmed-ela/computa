@@ -87,7 +87,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .new-task-button:hover { background: var(--surface-hover); }
 .approval-nav { min-height: 32px; color: var(--orange); font-size: 12px; }
 .count-pill { margin-left: auto; font-variant-numeric: tabular-nums; }
-.connection-dot, .task-row-status { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
+.connection-dot { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
 .sidebar-controls-row {
   display: flex; flex: none; align-items: center; justify-content: space-between;
   margin: 3px var(--sidebar-end-inset) 0 var(--sidebar-inset); color: var(--text-secondary);
@@ -135,8 +135,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .task-row.selected { background: var(--surface-selected); }
 .task-row-title { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .task-row.selected .task-row-title { font-weight: 500; }
-.task-row-status { flex: 0 0 5px; }
-.task-row-unread { color: var(--blue); width: 6px; height: 6px; flex-basis: 6px; }
+.task-row-unread { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--blue); }
 .task-row-elapsed { flex: 0 0 auto; color: var(--text-secondary); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sidebar-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 10px; color: var(--text-tertiary); font-size: 11px; text-align: center; }
 .sidebar-empty strong { margin-top: 4px; color: var(--text-secondary); font-weight: 500; }
@@ -576,7 +575,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .site-initial { display: grid; place-content: center; border-radius: 4px; background: var(--surface-selected); font-size: 11px; font-weight: 600; }
 .new-browser-tab-icon { background: currentColor; mask: url('/icons/new-browser-tab.svg') center / contain no-repeat; }
 
-.agent-rail-button[data-agent-status="ready"]::after { content: ""; position: absolute; left: 18px; top: 2px; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); }
+.agent-rail-button .task-row-unread { position: absolute; left: 18px; top: 2px; }
 .agent-settings { width: min(360px, 90vw); padding: 18px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
 .agent-settings::backdrop { background: rgb(0 0 0 / .22); }
 .agent-settings form, .agent-settings label { display: grid; gap: 8px; }

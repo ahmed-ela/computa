@@ -152,6 +152,7 @@ test('agent and browser rows retain order, selection, icons and activity in both
   idle.status = 'Completed';
   idle.isBusy = false;
   idle.hasUnreadCompletion = true;
+  idle.unreadCompletionID = 'finished-turn';
   snapshot.primaryBrowserID = undefined;
   snapshot.selectedTaskID = idle.id;
   snapshot.workspaceOrder!.push({kind:'agent', id:idle.id});
@@ -161,11 +162,22 @@ test('agent and browser rows retain order, selection, icons and activity in both
     const items = workspaceItems(snapshot, '');
     expect(items.map(item => item.ref)).toEqual(snapshot.workspaceOrder!);
     expect(items.at(-1)?.title).toBe('Release agent');
-    const rows = renderToStaticMarkup(h(WorkspaceSidebar, {snapshot, search:'', setSearch:()=>{}, nativeHost:true, post:()=>{}})).html;
+    const render = () => renderToStaticMarkup(h(WorkspaceSidebar, {snapshot, search:'', setSearch:()=>{}, nativeHost:true, post:()=>{}})).html;
+    snapshot.primaryBrowserID = undefined;
+    snapshot.canViewConversation = true;
+    const rows = render();
     expect(rows.match(/class="agent-status-icon"/g)).toHaveLength(2);
     expect(rows.match(/data-agent-status="working"/g)).toHaveLength(1);
-    expect(rows.match(/data-agent-status="ready"/g)).toHaveLength(1);
+    expect(rows).not.toContain('Ready to read');
+    expect(rows).not.toContain('task-row-unread');
     expect(rows.match(/aria-current="page"/g)).toHaveLength(1);
+    snapshot.canViewConversation = false;
+    expect(render()).toContain('aria-label="Release agent — Ready to read"');
+    snapshot.canViewConversation = true;
+    snapshot.primaryBrowserID = snapshot.workspaceBrowsers![0].id;
+    const behindBrowser = render();
+    expect(behindBrowser).toContain('aria-label="Release agent — Ready to read"');
+    expect(behindBrowser.match(/task-row-unread/g)).toHaveLength(1);
   }
 });
 

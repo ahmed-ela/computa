@@ -13,6 +13,7 @@ struct WebWorkspaceView: View {
 
     @State private var showsAccessModeSettings = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.controlActiveState) private var controlActiveState
 
     @State private var sidebarRail = SidebarRailGeometry.fallback
     @State private var sidebarPeeked = false
@@ -112,6 +113,7 @@ struct WebWorkspaceView: View {
         var snapshot = WebUISnapshot(state: state, titlebarHeight: rowHeight)
         snapshot.sidebarRail = sidebarRail
         snapshot.isTaskSidebarPeeked = sidebarPeeked
+        snapshot.canViewConversation = controlActiveState == .key && launcherAllowed && !commandPanelPresented
         return ZStack(alignment: .center) {
             HSplitView {
                 CodexWebView(

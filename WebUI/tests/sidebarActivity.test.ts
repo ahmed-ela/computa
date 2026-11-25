@@ -7,18 +7,21 @@ import { makePreviewSnapshot } from '../src/preview';
 const { TaskActivityIndicator } = await import('../src/TaskActivityIndicator');
 
 const task = (changes: Partial<SidebarTaskActivity> = {}): SidebarTaskActivity => ({
-  status: 'Running', statusTone: 'blue', isBusy: true, updatedAt: 190,
+  status: 'Running', isBusy: true, updatedAt: 190,
   activeTurnStartedAt: 100, hasUnreadCompletion: false, ...changes,
 });
-const render = (value: SidebarTaskActivity, now = 225) => renderToStaticMarkup(h(TaskActivityIndicator, { task: value, now })).html;
+const render = (task: SidebarTaskActivity, now = 225) => renderToStaticMarkup(h(TaskActivityIndicator,
+  { task, status: sidebarAgentStatus(task, false), compact: false, now })).html;
 
 describe('sidebar activity', () => {
   test('the compact rail shows working turns and unread successful completions', () => {
-    const completed = { status: 'Completed', hasUnreadCompletion: true };
-    expect(sidebarAgentStatus(task(completed))).toBe('working');
-    expect(sidebarAgentStatus(task({ ...completed, isBusy: false }))).toBe('ready');
+    const completed = { status: 'Completed', hasUnreadCompletion: true, unreadCompletionID: 'finished-turn' };
+    expect(sidebarAgentStatus(task(completed), true)).toBe('working');
+    expect(sidebarAgentStatus(task({ ...completed, isBusy: false }), false)).toBe('ready');
+    expect(sidebarAgentStatus(task({ ...completed, isBusy: false }), true)).toBeUndefined();
+    expect(sidebarAgentStatus(task({ ...completed, isBusy: false, unreadCompletionID: undefined }), false)).toBeUndefined();
     for (const status of ['Draft', 'Waiting', 'Failed', 'Completed']) {
-      expect(sidebarAgentStatus(task({ status, isBusy: false }))).toBeUndefined();
+      expect(sidebarAgentStatus(task({ status, isBusy: false }), false)).toBeUndefined();
     }
   });
   test('elapsed time uses the current turn start even as activity updates arrive', () => {
@@ -41,8 +44,8 @@ describe('sidebar activity', () => {
     expect(render(task())).not.toContain('task-row-status');
   });
   test('only unread completion gets a blue indicator; read completion has none', () => {
-    const completed = task({ status: 'Completed', statusTone: 'green', isBusy: false });
-    const unread = render({ ...completed, hasUnreadCompletion: true });
+    const completed = task({ status: 'Completed', isBusy: false });
+    const unread = render({ ...completed, hasUnreadCompletion: true, unreadCompletionID: 'finished-turn' });
     expect(unread).toContain('task-row-unread');
     expect(unread).toContain('Completed, unread');
     expect(unread).not.toContain('tone-green');
@@ -51,15 +54,15 @@ describe('sidebar activity', () => {
     expect(read).not.toContain('task-row-elapsed');
     expect(read).toContain('Completed');
   });
-  test('failed and waiting remain distinct even with stale unread state or active cleanup', () => {
-    for (const status of ['Failed', 'Waiting']) {
+  test('drafts, waiting and failed tasks expose their status without drawing a notification dot', () => {
+    for (const status of ['Draft', 'Failed', 'Waiting']) {
       for (const isBusy of [false, true]) {
-        const html = render(task({ status, statusTone: 'orange', isBusy, hasUnreadCompletion: true }));
+        const html = render(task({ status, isBusy, hasUnreadCompletion: true, unreadCompletionID: 'older-turn' }));
         if (isBusy) {
           expect(html).toContain('task-row-elapsed');
           expect(html).not.toContain('task-row-status');
         } else {
-          expect(html).toContain('task-row-status tone-orange');
+          expect(html).not.toContain('task-row-status');
           expect(html).not.toContain('task-row-elapsed');
         }
         expect(html).toContain(status);

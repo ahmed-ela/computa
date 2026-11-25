@@ -1,14 +1,13 @@
-import { sidebarAgentStatus, taskElapsedLabel, type SidebarTaskActivity } from './sidebarActivity';
+import { taskElapsedLabel, type SidebarAgentStatus, type SidebarTaskActivity } from './sidebarActivity';
 
-export function TaskActivityIndicator({ task, now }: { task: SidebarTaskActivity; now: number }) {
-  const status = sidebarAgentStatus(task);
-  const active = status === 'working';
+export function TaskActivityIndicator({ task, status, compact, now }: {
+  task: SidebarTaskActivity; status: SidebarAgentStatus; compact: boolean; now: number;
+}) {
+  const elapsed = status === 'working' && !compact ? taskElapsedLabel(task, now) : undefined;
   const unread = status === 'ready';
-  const statusDot = !active && task.status !== 'Completed' && task.status !== 'Running';
   return <>
-    {active ? <span className="task-row-elapsed" title={`${task.status} · ${taskElapsedLabel(task, now)}`} aria-hidden="true">{taskElapsedLabel(task, now)}</span> : null}
-    {unread ? <span className="task-row-status task-row-unread" title="Completed, unread" aria-hidden="true" />
-      : statusDot ? <span className={`task-row-status tone-${task.statusTone}`} title={task.status} aria-hidden="true" /> : null}
+    {elapsed && <span className="task-row-elapsed" title={`${task.status} · ${elapsed}`} aria-hidden="true">{elapsed}</span>}
+    {unread && <span className="task-row-unread" title="Completed, unread" aria-hidden="true" />}
     <span className="sr-only">{unread ? 'Completed, unread' : task.status}</span>
   </>;
 }

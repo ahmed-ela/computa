@@ -193,6 +193,7 @@ export interface AppSnapshot {
   savedChatSelection?: { id: string; error?: string };
   workspaceBrowsers?: WorkspaceBrowser[];
   primaryBrowserID?: string;
+  canViewConversation?: boolean;
   titlebarHeight?: number;
   sidebarRail?: { width: number; iconCenter: number };
   selectedTaskID?: string;

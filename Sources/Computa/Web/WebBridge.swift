@@ -180,6 +180,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             guard Set(body.keys) == ["action", "taskID", "completionID"],
                   let taskID = body["taskID"] as? String,
                   let completionID = body["completionID"] as? String,
+                  latestSnapshot?.canViewConversation == true,
                   NSApp.isActive, webView?.window?.isKeyWindow == true,
                   webView?.window?.isVisible == true,
                   webView?.isHiddenOrHasHiddenAncestor == false,
