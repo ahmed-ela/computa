@@ -1725,8 +1725,34 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let page = try XCTUnwrap(session.webView(for: id))
         page.loadHTMLString("<input id='draft' value='Keep this edit'>", baseURL: nil)
         state.selectWorkspaceTab(.browser(tab.workspaceID))
-        try await toggle(from: SidebarRail.expandedWidth, to: rail)
-        try await toggle(from: rail, to: SidebarRail.expandedWidth)
+        // The DOM cannot see movement of the WebKit surface inside its native split item.
+        if #available(macOS 14.4, *) {
+            let ready = await waitForScriptBool(on: shell, script: "!!document.querySelector('[data-browser-primary=native] .sidebar-search-row svg')")
+            XCTAssertTrue(ready)
+            _ = try await shell.evaluateJavaScript("""
+                const marker = document.createElement('style');
+                marker.textContent = '.sidebar-search-row svg { background: rgb(255,0,255) !important; }';
+                document.head.appendChild(marker); true
+                """)
+            let capture = try await SidebarIconCapture(window: window)
+            try await capture.start()
+            do {
+                let baseline = try await capture.waitForIcon()
+                try await toggle(from: SidebarRail.expandedWidth, to: rail)
+                try await toggle(from: rail, to: SidebarRail.expandedWidth)
+                try await capture.stop()
+                let samples = capture.positions
+                XCTAssertGreaterThan(samples.count, 2)
+                XCTAssertTrue(samples.allSatisfy { $0.map { abs($0 - baseline) <= 1 } == true },
+                              "Search moved or disappeared in window coordinates: \(samples)")
+            } catch {
+                try? await capture.stop()
+                throw error
+            }
+        } else {
+            try await toggle(from: SidebarRail.expandedWidth, to: rail)
+            try await toggle(from: rail, to: SidebarRail.expandedWidth)
+        }
         XCTAssertTrue(session.webView(for: id) === page)
         let draft = try await page.evaluateJavaScript("document.querySelector('#draft').value") as? String
         XCTAssertEqual(draft, "Keep this edit")
