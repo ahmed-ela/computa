@@ -24,6 +24,12 @@ struct WebWorkspaceView: View {
 
     private var commandPanelPresented: Bool { launcherPresented || editingBrowserID != nil }
 
+    var sidebarCollapseBinding: Binding<Bool> {
+        Binding(get: { windowTabs.isSidebarCollapsed }, set: { collapsed in
+            state.workspaceWindows.withWindow(windowTabs) { state.isTaskSidebarCollapsed = collapsed }
+        })
+    }
+
     private func openBrowserAddress() {
         guard launcherAllowed, let id = state.addressableBrowserPage(in: windowTabs) else { return }
         launcherPresented = false
@@ -77,6 +83,7 @@ struct WebWorkspaceView: View {
             state.workspaceWindows.withWindow(windowTabs) { workspace(topInset: geometry.safeAreaInsets.top) }
         }
         .focusedSceneValue(\.tabWorkspace, state)
+        .focusedSceneValue(\.workspaceSidebarCollapsed, launcherAllowed && !commandPanelPresented ? sidebarCollapseBinding : nil)
         .focusedSceneValue(\.browserPageCommandsAllowed, launcherAllowed && !commandPanelPresented)
         .onChange(of: windowTabs.isSidebarCollapsed) { _, _ in sidebarPeeked = false }
         .onChange(of: windowTabs.requestedBrowserAddress, initial: true) { _, requested in
