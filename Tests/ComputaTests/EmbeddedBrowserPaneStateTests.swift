@@ -833,6 +833,84 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testPinnedLinkAndScriptOpenedPagesRestoreWithoutSignInPopups() async throws {
+        let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: """
+            <title>Popup pin fixture</title>
+            <a id="link" target="_blank" href="/human/start">Read article</a>
+            """)
+        let root = try await site.start()
+        defer { site.stop() }
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        let browser = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        let state = AppState(tasks: [], preferences: prefs, browserSession: browser, workspaceLayout: .mixedTabs)
+        let openerID = try browser.createTab(url: root.appendingPathComponent("human/final"))
+        let opener = try XCTUnwrap(browser.webView(for: openerID))
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1000, height: 680), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close(); browser.shutdown() }
+        await settleLayout(host)
+        let ui = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        func check(_ view: WKWebView, _ expression: String, line: UInt = #line) async throws {
+            let ok = await waitForScriptBool(on: view, script: expression)
+            XCTAssertTrue(ok, expression, line: line)
+            if !ok { throw CocoaError(.coderInvalidValue) }
+        }
+        func openChild(_ script: String) async throws -> EmbeddedBrowserTab {
+            let previous = Set(browser.workspaceBrowserTabs.map(\.id))
+            _ = try await opener.evaluateJavaScript(script + ";true")
+            for _ in 0..<150 {
+                if let child = browser.workspaceBrowserTabs.first(where: { !previous.contains($0.id) }) { return child }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            throw CocoaError(.coderValueNotFound)
+        }
+        func pin(_ tab: EmbeddedBrowserTab) async throws {
+            let row = "document.querySelector('[data-drag-id=\"\(tab.workspaceID)\"]')"
+            try await check(ui, "!!\(row)?.querySelector('.workspace-pin')")
+            _ = try await ui.evaluateJavaScript("\(row).querySelector('.workspace-pin').click();true")
+            try await check(ui, "\(row)?.dataset.pinned === 'true'")
+        }
+        try await check(opener, "!!document.getElementById('link')")
+        let direct = try XCTUnwrap(browser.humanTab(id: openerID))
+        try await pin(direct)
+        let link = try await openChild("document.getElementById('link').click()")
+        try await pin(link)
+        let script = try await openChild("const child = window.open('about:blank'); child.location.assign('/model/final#section')")
+        try await pin(script)
+        let linkView = try XCTUnwrap(browser.webView(for: link.id))
+        _ = try await linkView.evaluateJavaScript("history.pushState({}, '', '/callback?code=private&state=fixture');true")
+        let login = try await openChild("window.open('/model/final#access_token=temporary')")
+        let loginView = try XCTUnwrap(browser.webView(for: login.id))
+        try await check(loginView, "document.title === 'Popup pin fixture'")
+        _ = try await loginView.evaluateJavaScript("location.replace('/human/final');true")
+        try await check(loginView, "location.pathname === '/human/final' && document.title === 'Popup pin fixture'")
+        let loginRow = "document.querySelector('[data-drag-id=\"\(login.workspaceID)\"]')"
+        try await check(ui, "!!\(loginRow) && !\(loginRow).querySelector('.workspace-pin')")
+        XCTAssertFalse(browser.prepareToPin(login))
+        let pins = [direct, link, script].map { WorkspaceTabID.browser($0.workspaceID) }
+        state.selectWorkspaceTab(pins[1])
+        XCTAssertEqual(Array(state.workspaceTabs.pinnedTabs), pins)
+        _ = await state.shutdownRuntime()
+
+        let nextBrowser = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
+        defer { nextBrowser.shutdown() }
+        let next = AppState(tasks: [], preferences: prefs, browserSession: nextBrowser, workspaceLayout: .mixedTabs)
+        XCTAssertEqual(next.openWorkspaceTabs, pins)
+        XCTAssertEqual(Array(next.workspaceTabs.pinnedTabs), pins)
+        XCTAssertEqual(next.selectedWorkspaceTab, pins[1])
+        let restored = Dictionary(uniqueKeysWithValues: nextBrowser.restorablePages.map { ($0.id, $0.url) })
+        XCTAssertEqual(restored[link.workspaceID], root.appendingPathComponent("human/final"))
+        XCTAssertEqual(restored[script.workspaceID], URL(string: "model/final#section", relativeTo: root)?.absoluteURL)
+        XCTAssertNil(restored.index(forKey: login.workspaceID))
+        XCTAssertFalse(nextBrowser.workspaceBrowserTabs.contains(where: \.isPopup))
+    }
+
+    @MainActor
     func testMixedSidebarFaviconSwitchingReorderAndHistory() async throws {
         let html = """
         <title>Cedar rail</title>

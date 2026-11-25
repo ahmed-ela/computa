@@ -13,6 +13,8 @@ final class EmbeddedBrowserTab: Identifiable {
     // An explicit 100% differs from automatic fitting. Keep the choice with the tab across WebKit view replacement.
     fileprivate var userPageZoom: CGFloat?
     let isPopup: Bool
+    fileprivate var popupPinAddress: URL?
+    var canPin: Bool { !isPopup || (setupProvider == nil && popupPinAddress != nil) }
     let requestsMobileSite: Bool
     fileprivate let kimiProfileID: UUID?
     fileprivate(set) var setupProvider: EmbeddedWebModelTransport.Provider?
@@ -91,24 +93,38 @@ final class EmbeddedBrowserSession {
     var workspaceProfileID: UUID? { persistent ? persistentProfileIdentifier() : nil }
 
     var restorablePages: [SavedWorkspace.Page] {
-        restorablePages(includingSignInsPinnedIn: [])
+        restorablePages(pinnedIn: [])
     }
 
-    func restorablePages(includingSignInsPinnedIn pins: Set<WorkspaceTabID>) -> [SavedWorkspace.Page] {
+    func restorablePages(pinnedIn pins: Set<WorkspaceTabID>) -> [SavedWorkspace.Page] {
         guard persistent else { return [] }
-        return tabs.compactMap { restorablePage(for: $0, includeSignIn: pins.contains(.browser($0.workspaceID))) }
+        return tabs.compactMap { restorablePage(for: $0, pinned: pins.contains(.browser($0.workspaceID))) }
     }
 
-    func restorablePage(for tab: EmbeddedBrowserTab, includeSignIn: Bool = false) -> SavedWorkspace.Page? {
+    func restorablePage(for tab: EmbeddedBrowserTab, pinned: Bool = false) -> SavedWorkspace.Page? {
         if let provider = tab.setupProvider {
-            guard includeSignIn, !tab.isPopup else { return nil }
+            guard pinned, !tab.isPopup else { return nil }
             // OAuth redirects can contain credentials. Reconstruct a fresh provider homepage from its identity.
             return SavedWorkspace.Page(id: tab.workspaceID, url: nil, mobile: false,
                 signIn: .init(provider: provider.rawValue, kimiProfileID: tab.kimiProfileID))
         }
+        if tab.isPopup {
+            guard pinned, let url = entries[tab.id]?.restoreURL else { return nil }
+            return SavedWorkspace.Page(id: tab.workspaceID, url: url, mobile: tab.requestsMobileSite)
+        }
         if tab.isDormant { return SavedWorkspace.Page(id: tab.workspaceID, url: tab.url, mobile: tab.requestsMobileSite) }
         guard let entry = entries[tab.id], entry.isRestorable else { return nil }
         return SavedWorkspace.Page(id: tab.workspaceID, url: entry.restoreURL, mobile: tab.requestsMobileSite)
+    }
+
+    func prepareToPin(_ tab: EmbeddedBrowserTab) -> Bool {
+        guard tab.isPopup else { return true }
+        guard tab.canPin, let entry = entries[tab.id], !entry.view.isLoading,
+              let address = tab.popupPinAddress, address == entry.view.url,
+              entry.popupPinNavigation.address(address) == address else { return false }
+        // Freeze the explicitly chosen destination. Later redirects in the live popup cannot overwrite the pin.
+        entry.restoreURL = address
+        return true
     }
 
     func reopenWorkspacePage(_ page: SavedWorkspace.Page, at index: Int) throws {
@@ -320,6 +336,7 @@ final class EmbeddedBrowserSession {
         let usesIsolatedChatGPTProfile: Bool
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
+        var popupPinNavigation = PopupPinNavigation.pending
         var restoreURL: URL?
         // Only the initial GET of a standalone, read-only resource can be replayed.
         var initialReadOnlyRequest: URL?
@@ -1000,7 +1017,7 @@ final class EmbeddedBrowserSession {
     }
 
     fileprivate func createPopup(from source: WKWebView, tabID: UUID,
-                                 configuration: WKWebViewConfiguration, url: URL?) -> WKWebView? {
+                                 configuration: WKWebViewConfiguration, request: URLRequest) -> WKWebView? {
         guard let opener = entries[tabID], opener.view === source else { return nil }
         do {
             guard !opener.isModelOwned else { throw Failure.modelPopupUnsupported }
@@ -1013,7 +1030,7 @@ final class EmbeddedBrowserSession {
             }
             // window.open('', name) supplies an empty relative URL rather than
             // nil/about:blank. WebKit owns that initial blank document.
-            if let url, !url.absoluteString.isEmpty { try EmbeddedBrowserURLPolicy.validate(url) }
+            if let url = request.url, !url.absoluteString.isEmpty { try EmbeddedBrowserURLPolicy.validate(url) }
             guard configuration.websiteDataStore === source.configuration.websiteDataStore else {
                 throw Failure.popupProfileMismatch
             }
@@ -1022,6 +1039,8 @@ final class EmbeddedBrowserSession {
             let popup = try registerTab(configuration: configuration, select: true, modelOwned: false,
                                         popupOpenerTabID: tabID, kimiProfileID: opener.tab.kimiProfileID,
                                         requestsMobileSite: opener.tab.requestsMobileSite)
+            if case .signIn = opener.popupPinNavigation { popup.popupPinNavigation = .signIn }
+            popup.popupPinNavigation.request(request)
             popup.tab.setupProvider = opener.tab.setupProvider
             opener.openedPopup = true
             if popup.tab.setupProvider != nil { popup.tab.isWebInspectorAvailable = false }
@@ -1135,8 +1154,15 @@ final class EmbeddedBrowserSession {
         }
     }
 
-    func navigate(tabID: UUID, to url: URL) throws {
-        try navigate(entry(tabID), to: url, initialRequest: false)
+    func navigate(tabID: UUID, to url: URL, fromAddressBar: Bool = false) throws {
+        let entry = try entry(tabID)
+        if fromAddressBar, entry.tab.isPopup, entry.tab.setupProvider == nil {
+            try EmbeddedBrowserURLPolicy.validate(url)
+            // Explicitly leaving a sign-in flow starts an independent human navigation in the same tab.
+            entry.popupPinNavigation = .pending
+            entry.tab.popupPinAddress = nil
+        }
+        try navigate(entry, to: url, initialRequest: false)
     }
 
     private func navigate(_ entry: Entry, to url: URL, initialRequest: Bool) throws {
@@ -3844,6 +3870,10 @@ final class EmbeddedBrowserSession {
 
     fileprivate func recordMainRequest(_ request: URLRequest, view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view else { return }
+        if entry.tab.isPopup {
+            entry.tab.popupPinAddress = nil
+            entry.popupPinNavigation.request(request)
+        }
         entry.readOnlyGET = request.httpMethod == "GET" && request.url == entry.initialReadOnlyRequest ? request.url : nil
         entry.initialReadOnlyRequest = nil
         entry.readOnlyResponse = nil
@@ -3851,6 +3881,7 @@ final class EmbeddedBrowserSession {
 
     fileprivate func recordMainResponse(_ response: URLResponse, view: WKWebView, tabID: UUID) {
         guard let entry = entries[tabID], entry.view === view, let http = response as? HTTPURLResponse else { return }
+        if entry.tab.isPopup { entry.popupPinNavigation.receive(http) }
         defer { entry.readOnlyGET = nil }
         let readOnlyTypes = ["text/plain", "image/png", "image/jpeg", "image/webp", "image/gif"]
         guard let url = http.url, url == entry.readOnlyGET, http.statusCode == 200,
@@ -3958,6 +3989,13 @@ final class EmbeddedBrowserSession {
         if entry.tab.url?.host != view.url?.host || committedNavigation { entry.tab.favicon = nil }
         if entry.tab.url != view.url { entry.tab.documentID = UUID() }
         entry.tab.url = view.url
+        if entry.tab.isPopup {
+            if committedNavigation { entry.popupPinNavigation.commit(view.url) }
+            if !view.isLoading, case .document = entry.popupPinNavigation {
+                entry.popupPinNavigation.observe(view.url)
+            }
+            entry.tab.popupPinAddress = view.isLoading ? nil : entry.popupPinNavigation.address(view.url)
+        }
         entry.tab.isLoading = view.isLoading
         entry.tab.canGoBack = view.canGoBack
         entry.tab.canGoForward = view.canGoForward
@@ -4272,6 +4310,9 @@ final class EmbeddedBrowserSession {
     }
 
     fileprivate func serverRedirected(_ view: WKWebView, navigation: WKNavigation?, tabID: UUID) {
+        if let entry = entries[tabID], entry.view === view, entry.tab.isPopup, entry.navigation === navigation {
+            entry.popupPinNavigation.observe(view.url)
+        }
         if let entry = entries[tabID], entry.view === view, let navigation, entry.navigation === navigation,
            GeminiNavigationResponseDiagnostic.destination(entry.pendingConversationURL ?? view.url) != nil {
             entry.geminiDiagnosticJournal.recordRedirect(generation: entry.tab.documentGeneration, now: Date())
@@ -4931,7 +4972,7 @@ private final class EmbeddedBrowserDelegate: NSObject, WKNavigationDelegate, WKU
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         session?.createPopup(from: webView, tabID: tabID, configuration: configuration,
-                             url: navigationAction.request.url)
+                             request: navigationAction.request)
     }
 
     func webViewDidClose(_ webView: WKWebView) { session?.closePopup(webView, tabID: tabID) }
