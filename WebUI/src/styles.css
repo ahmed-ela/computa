@@ -83,8 +83,8 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 }
 :is(.nav-button, .task-row) > :first-child { justify-self: center; }
 .nav-button { width: 100%; min-width: 0; padding-inline: 0; }
-.new-task-button { grid-template-columns: var(--sidebar-icon-track) minmax(0, 1fr); border: 0; box-shadow: none; background: transparent; }
-.new-task-button:hover { background: var(--surface-hover); }
+.new-task-button { grid-template-columns: var(--sidebar-icon-track) minmax(0, 1fr); border: 0; box-shadow: none; background: var(--surface-subtle); }
+.new-task-button:is(:hover, :focus-visible) { background: var(--surface-selected); }
 .approval-nav { min-height: 32px; color: var(--orange); font-size: 12px; }
 .count-pill { margin-left: auto; font-variant-numeric: tabular-nums; }
 .connection-dot { width: 5px; height: 5px; flex: 0 0 5px; border-radius: 50%; background: currentColor; }
