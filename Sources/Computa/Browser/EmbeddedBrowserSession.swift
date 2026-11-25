@@ -535,6 +535,16 @@ final class EmbeddedBrowserSession {
             && (provider != .kimi || $0.kimiProfileID == kimiModelProfileID) }
     }
 
+    /// Navigation is a reason to check the catalog. Only the provider adapter can confirm access.
+    func checkSetupLanding(tabID: UUID) {
+        guard !isShutdown, selectedTabID == tabID, let entry = entries[tabID],
+              !entry.isModelOwned, !entry.isToolOwned, !entry.tab.isPopup, !entry.view.isLoading,
+              entry.recoverySettledGeneration == entry.tab.documentGeneration,
+              let provider = entry.tab.setupProvider, let url = entry.view.url,
+              provider.accepts(url.absoluteString), !EmbeddedBrowserURLPolicy.isSignInAddress(url) else { return }
+        onSetupPageReady?(tabID, entry.tab.documentGeneration)
+    }
+
     func openProviderSignIn(_ provider: EmbeddedWebModelTransport.Provider) throws {
         if provider == .kimi, kimiModelProfileID != nil {
             try openKimiSetup(usingDedicatedProfile: true)
@@ -1147,6 +1157,9 @@ final class EmbeddedBrowserSession {
             }
         }
         if !entry.isModelOwned && !entry.isToolOwned && !isShutdown { onWorkspaceTabClosed?(entry.tab.workspaceID, opener?.tab.workspaceID) }
+        if wasSelected, entry.tab.isPopup, let opener, entry.tab.setupProvider != nil {
+            checkSetupLanding(tabID: opener.tab.id)
+        }
         if !entry.isModelOwned { errorMessage = selectedTabID.flatMap { entries[$0]?.tab.error } }
         if let observation = postBlockObservation {
             observation.lease.exactViewClosed = true
@@ -3997,7 +4010,8 @@ final class EmbeddedBrowserSession {
         // Includes history.pushState/fragment navigation. This is intentionally conservative;
         // a document identity is not proof that arbitrary DOM content has remained unchanged.
         if entry.tab.url?.host != view.url?.host || committedNavigation { entry.tab.favicon = nil }
-        if entry.tab.url != view.url { entry.tab.documentID = UUID() }
+        let changedLocation = entry.tab.url != view.url
+        if changedLocation { entry.tab.documentID = UUID() }
         entry.tab.url = view.url
         if entry.tab.isPopup {
             if committedNavigation { entry.popupPinNavigation.commit(view.url) }
@@ -4013,6 +4027,7 @@ final class EmbeddedBrowserSession {
         entry.tab.isLoading = view.isLoading
         entry.tab.canGoBack = view.canGoBack
         entry.tab.canGoForward = view.canGoForward
+        if changedLocation && !committedNavigation { checkSetupLanding(tabID: id) }
         // A provisional load can still expose the old page URL. Observe the
         // committed document or settled native URL without inspecting its DOM.
         if entry.isRestorable, committedNavigation || !view.isLoading,
@@ -4394,10 +4409,7 @@ final class EmbeddedBrowserSession {
         if error == nil, let navigation, entry.humanCommittedNavigation === navigation,
            entry.recoveryCommittedGeneration == entry.tab.documentGeneration {
             entry.recoverySettledGeneration = entry.tab.documentGeneration
-            if !entry.tab.isPopup, let provider = entry.tab.setupProvider, let url = view.url,
-               provider.accepts(url.absoluteString), !EmbeddedBrowserURLPolicy.isSignInAddress(url) {
-                onSetupPageReady?(tabID, entry.tab.documentGeneration)
-            }
+            checkSetupLanding(tabID: tabID)
             observeHumanVerificationRecovery(entry)
             observeProviderSignInRecovery(entry)
         }

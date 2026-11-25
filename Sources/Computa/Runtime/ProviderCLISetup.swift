@@ -44,6 +44,10 @@ enum ProviderCLISetup {
 
     @MainActor static func run(route: String, intent: Intent) async throws {
         let arguments = try await command(route: route, intent: intent)
+        try await runInTerminal(arguments: arguments)
+    }
+
+    @MainActor static func runInTerminal(arguments: [String]) async throws {
         try Task.checkCancellation()
         guard let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else { throw Failure.terminal }
         let manager = FileManager.default

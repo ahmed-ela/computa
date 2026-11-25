@@ -592,6 +592,7 @@ final class AppState {
             } else if let tab = browserSession.setupTab(for: provider) {
                 selectWorkspaceTab(.browser(tab.workspaceID))
             }
+            if let id = websiteSetupTabs[provider] { browserSession.checkSetupLanding(tabID: id) }
         } catch {
             websiteModelsError = error.localizedDescription
             presentBrowserTabOpenError(error)
