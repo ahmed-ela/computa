@@ -10,6 +10,8 @@ final class EmbeddedBrowserTab: Identifiable {
     // The privileged sidebar receives this display handle, never a browser-tool target ID.
     let workspaceID: UUID
     fileprivate var isDormant = false
+    // An explicit 100% differs from automatic fitting. Keep the choice with the tab across WebKit view replacement.
+    fileprivate var userPageZoom: CGFloat?
     let isPopup: Bool
     let requestsMobileSite: Bool
     fileprivate let kimiProfileID: UUID?
@@ -302,16 +304,22 @@ final class EmbeddedBrowserSession {
         var isDesktopHumanRecoverySource: Bool { isRegularBrowserTab && !isToolOwned && !tab.requestsMobileSite }
         var isAvailableToBrowserTools: Bool { isRegularBrowserTab && tab.setupProvider == nil }
         private var pageFit: EmbeddedBrowserPageFit?
-        func fitPresentedPage() {
-            guard isAvailableToBrowserTools, !isToolOwned, !tab.requestsMobileSite,
-                  let presentationHost, view.superview === presentationHost else { return }
+        func fitPresentedPage(newDocument: Bool = false) {
+            guard let presentationHost, view.superview === presentationHost else { return }
+            if let zoom = tab.userPageZoom {
+                stopFittingPage(at: zoom)
+                return
+            }
+            guard isAvailableToBrowserTools, !isToolOwned, !tab.requestsMobileSite else { return }
+            if newDocument { stopFittingPage() }
             if pageFit == nil { pageFit = EmbeddedBrowserPageFit(view: view) }
             pageFit?.observeDocument()
         }
 
-        func stopFittingPage() {
+        func stopFittingPage(at zoom: CGFloat = 1) {
             pageFit?.stop()
             pageFit = nil
+            if view.pageZoom != zoom { view.pageZoom = zoom }
         }
 
         weak var presentationHost: NSView?
@@ -1129,6 +1137,14 @@ final class EmbeddedBrowserSession {
         prepareNavigation(entry)
         entry.pendingConversationURL = entry.view.backForwardList.forwardItem?.url
         entry.navigation = entry.view.goForward()
+    }
+
+    func changePageZoom(_ command: BrowserPageZoomCommand, tabID: UUID) {
+        guard let entry = entries[tabID], !entry.isModelOwned, !entry.isToolOwned,
+              let host = entry.presentationHost, entry.view.superview === host else { return }
+        let scale = command.scale(from: entry.tab.userPageZoom ?? entry.view.pageZoom)
+        entry.tab.userPageZoom = scale
+        entry.stopFittingPage(at: scale)
     }
 
     func reload(tabID: UUID) {
@@ -4324,9 +4340,7 @@ final class EmbeddedBrowserSession {
             entry.toolPopupContext = nil
             entry.tab.isWebInspectorAvailable = entry.isAvailableToBrowserTools && !entry.isToolOwned
         }
-        // Let the replacement document resolve its media queries at normal size first.
-        entry.stopFittingPage()
-        entry.fitPresentedPage()
+        entry.fitPresentedPage(newDocument: true)
         refresh(tabID, view: view, committedNavigation: true)
         emitGeminiPostBlockNativeEvent(entry, .committed)
     }
