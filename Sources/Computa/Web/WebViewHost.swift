@@ -12,6 +12,7 @@ struct WebWorkspaceView: View {
     }
 
     @State private var showsAccessModeSettings = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var sidebarRail = SidebarRailGeometry.fallback
     @State private var sidebarPeeked = false
@@ -131,6 +132,7 @@ struct WebWorkspaceView: View {
                 .frame(minWidth: browserPrimary ? sidebarWidth : 600,
                        idealWidth: browserPrimary ? sidebarWidth : 640,
                        maxWidth: browserPrimary ? sidebarWidth : .infinity, maxHeight: .infinity)
+                .animation(browserPrimary && !reduceMotion ? .easeInOut(duration: 0.14) : nil, value: compact)
                 // Each split item has its own safe area. Let the web sidebar
                 // paint behind the traffic lights using its actual width and theme.
                 .ignoresSafeArea(.container, edges: .top)

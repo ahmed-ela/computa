@@ -1629,6 +1629,95 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testSidebarMovesThroughIntermediateWidthsInChatAndOnAWebpage() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let task = AgentTask(title: "Sidebar motion", summary: "", status: .draft, workspace: "", model: "fixture")
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1080, height: 700),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.close() }
+        await settleLayout(host)
+        let shell = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let rail = try XCTUnwrap(SidebarRailGeometry.measured(in: window)).width
+
+        func toggle(from start: CGFloat, to end: CGFloat) async throws {
+            let ready = await waitForScriptBool(on: shell, script:
+                "Math.abs(document.querySelector('.sidebar')?.getBoundingClientRect().width - \(start)) < 1")
+            XCTAssertTrue(ready, "Start at the settled width \(start)")
+            _ = try await shell.evaluateJavaScript("""
+                (() => {
+                    const sidebar = document.querySelector('.sidebar');
+                    window.sidebarSamples = [];
+                    const sample = () => {
+                        const search = sidebar.querySelector('.sidebar-search-row svg').getBoundingClientRect();
+                        window.sidebarSamples.push([sidebar.getBoundingClientRect().width, search.left + search.width / 2]);
+                    };
+                    sample();
+                    window.sidebarObserver = new ResizeObserver(sample);
+                    window.sidebarObserver.observe(sidebar);
+                    const shell = sidebar.closest('.app-shell');
+                    if (document.hidden && !shell.hasAttribute('data-browser-primary')) {
+                        // An offscreen XCTest window has a paused CSS clock. Sample the actual
+                        // transition at known times using the same visible-window stylesheet.
+                        document.documentElement.setAttribute('data-page-visible', '');
+                        const changed = new MutationObserver(() => {
+                            changed.disconnect();
+                            const transition = sidebar.getAnimations().find(a => a.transitionProperty === 'flex-basis');
+                            if (transition) {
+                                for (const fraction of [0.25, 0.5, 0.75]) {
+                                    transition.currentTime = transition.effect.getTiming().duration * fraction;
+                                    sample();
+                                }
+                                transition.finish();
+                            }
+                            if (document.hidden) document.documentElement.removeAttribute('data-page-visible');
+                        });
+                        changed.observe(shell, { attributes: true, attributeFilter: ['data-sidebar-collapsed'] });
+                    }
+                    document.querySelector('#task-sidebar-toggle').click();
+                    return true;
+                })()
+                """)
+            let settled = await waitForScriptBool(on: shell, script:
+                "Math.abs(document.querySelector('.sidebar').getBoundingClientRect().width - \(end)) < 1")
+            XCTAssertTrue(settled, "Finish at \(end)")
+            let trace = try await shell.evaluateJavaScript("window.sidebarObserver.disconnect(); window.sidebarSamples")
+            let samples = try XCTUnwrap(trace as? [[CGFloat]])
+            let widths = samples.map { $0[0] }
+            let searchX = try XCTUnwrap(samples.first?[1])
+            XCTAssertTrue(samples.allSatisfy { abs($0[1] - searchX) <= 1 }, "Search should stay on its icon column: \(samples)")
+            let intermediate = widths.filter { $0 > min(start, end) + 1 && $0 < max(start, end) - 1 }
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                XCTAssertTrue(intermediate.isEmpty, "Reduce Motion should snap to the final width: \(widths)")
+            } else {
+                XCTAssertFalse(intermediate.isEmpty, "The divider should travel between \(start) and \(end): \(widths)")
+            }
+        }
+
+        try await toggle(from: 216, to: rail)
+        try await toggle(from: rail, to: 216)
+        let id = try session.createTab()
+        let tab = try XCTUnwrap(session.humanTab(id: id))
+        let page = try XCTUnwrap(session.webView(for: id))
+        page.loadHTMLString("<input id='draft' value='Keep this edit'>", baseURL: nil)
+        state.selectWorkspaceTab(.browser(tab.workspaceID))
+        try await toggle(from: SidebarRail.expandedWidth, to: rail)
+        try await toggle(from: rail, to: SidebarRail.expandedWidth)
+        XCTAssertTrue(session.webView(for: id) === page)
+        let draft = try await page.evaluateJavaScript("document.querySelector('#draft').value") as? String
+        XCTAssertEqual(draft, "Keep this edit")
+    }
+
+    @MainActor
     func testBothSidebarWidthsPreserveAgentRowsAndAnimateOnlyWorkingAgents() async throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)

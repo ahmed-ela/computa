@@ -55,7 +55,14 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
 /* One navigation column, one clear action, and compact recent tasks. */
-.sidebar { --sidebar-icon-track: 36px; --sidebar-inset: calc(var(--rail-center, 22px) - var(--sidebar-icon-track) / 2); --sidebar-end-inset: 4px; display: flex; width: 230px; flex: 0 0 230px; flex-direction: column; overflow: hidden; box-shadow: inset -1px 0 var(--border); background: var(--sidebar); user-select: none; }
+.sidebar {
+  --sidebar-icon-track: 36px; --sidebar-inset: calc(var(--rail-center, 22px) - var(--sidebar-icon-track) / 2); --sidebar-end-inset: 4px;
+  --sidebar-width: 230px;
+  display: flex; width: var(--sidebar-width); flex: 0 0 var(--sidebar-width); flex-direction: column; overflow: hidden;
+  box-shadow: inset -1px 0 var(--border); background: var(--sidebar); user-select: none;
+}
+/* A native browser page shares a moving split with the sidebar and supplies its width. */
+:root[data-page-visible] .app-shell:not([data-browser-primary="native"]) .sidebar { transition: flex-basis 140ms ease-in-out; }
 /* The native Settings controls overlay this space. The sidebar owns its width. */
 .app-shell[data-native-host] .sidebar::after {
   content: ""; flex: 0 0 34px; box-sizing: border-box; border-top: 1px solid var(--border);
@@ -102,7 +109,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .app-shell[data-sidebar-collapsed] .sidebar-address { padding: 0; }
 .sidebar-search-row { display: grid; grid-template-rows: 30px; padding: 5px var(--sidebar-end-inset) 5px var(--sidebar-inset); }
 .app-shell[data-sidebar-collapsed] .sidebar-search-row { box-shadow: inset 0 -1px var(--border); }
-.sidebar-search-icon { width: 100%; height: 100%; }
+.sidebar-search-icon { width: var(--sidebar-icon-track); height: 100%; }
 .task-search {
   display: grid; grid-template-columns: var(--sidebar-icon-track) minmax(0, 1fr) auto; align-items: center; min-width: 0;
   padding-right: 6px; box-shadow: inset 0 -1px var(--border); color: var(--text-secondary);
@@ -135,9 +142,9 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .sidebar-empty strong { margin-top: 4px; color: var(--text-secondary); font-weight: 500; }
 
 /* The compact rail leaves its title bar to the traffic lights and native sidebar controls. */
-.app-shell[data-sidebar-peeked] .sidebar { width: 230px; flex-basis: 230px; }
+.app-shell[data-sidebar-peeked] .sidebar { --sidebar-width: 230px; }
 .app-shell[data-sidebar-collapsed] .sidebar {
-  width: var(--rail-width, 44px); flex-basis: var(--rail-width, 44px);
+  --sidebar-width: var(--rail-width, 44px);
   --sidebar-end-inset: calc(var(--rail-width, 44px) - var(--rail-center, 22px) - var(--sidebar-icon-track) / 2);
 }
 .app-shell[data-native-sidebar-controls][data-sidebar-collapsed] .task-toolbar { padding-left: 92px; }
@@ -532,7 +539,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 @keyframes pulse { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 @media (max-width: 1180px) {
-  .sidebar { width: 216px; flex-basis: 216px; }
+  .sidebar { --sidebar-width: 216px; }
   .task-toolbar { padding: 0 20px; }
   .conversation-content { padding: 26px 24px 20px; }
   .composer-zone { padding: 10px 24px 20px; }
@@ -540,7 +547,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
   .tool-duration { display: none; }
 }
 @media (max-width: 760px) {
-  .sidebar { width: 190px; flex-basis: 190px; }
+  .sidebar { --sidebar-width: 190px; }
   .task-toolbar { padding: 0 16px; }
   .toolbar-actions { gap: 8px; }
   .conversation-content { padding-right: 18px; padding-left: 18px; }
@@ -555,7 +562,7 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 
 /* A browser takes the content area; the trusted sidebar document stays mounted. */
 .app-shell[data-browser-primary="native"] { min-width: 0; }
-.app-shell[data-browser-primary="native"] .sidebar { width: 100%; flex-basis: 100%; }
+.app-shell[data-browser-primary="native"] .sidebar { width: 100%; flex-basis: auto; }
 .app-shell[data-browser-primary] :is(.workspace,.inspector) { display: none; }
 .preview-browser-content { display: grid; flex: 1; align-content: center; justify-items: center; gap: 10px; }
 .workspace-tab-row { position: relative; width: 100%; height: var(--sidebar-row-height); }
