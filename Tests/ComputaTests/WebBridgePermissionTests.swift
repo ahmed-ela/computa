@@ -4,6 +4,25 @@ import XCTest
 
 final class WebBridgePermissionTests: XCTestCase {
     @MainActor
+    func testAccessibilityRecoveryUsesTheCurrentProcessAndOnlyOpensSettingsWhileDenied() {
+        let permissions = ScreenRecordingPermissionStub(requestResult: .notGranted)
+        let state = AppState(tasks: [], permissionClient: permissions, preferences: isolatedTestPreferences())
+        var openedURLs: [URL] = []
+        let bridge = WebBridge(state: state) { url in openedURLs.append(url); return true }
+        XCTAssertTrue(state.presentSettings())
+        XCTAssertTrue(openedURLs.isEmpty)
+        bridge.requestAccessibilityPermission()
+        XCTAssertEqual(openedURLs, [WebBridge.accessibilitySettingsURL])
+        XCTAssertEqual(permissions.accessibilityRequests, 1)
+        permissions.accessibility = .granted
+        state.refreshAutomationPermissions()
+        XCTAssertEqual(state.automationPermissions.accessibility, .granted)
+        XCTAssertEqual(permissions.accessibilityRequests, 1)
+        bridge.requestAccessibilityPermission()
+        XCTAssertEqual(openedURLs, [WebBridge.accessibilitySettingsURL])
+        XCTAssertEqual(permissions.requestCount, 0)
+    }
+    @MainActor
     func testDeniedHumanRequestOpensScreenRecordingSettings() {
         let permissions = ScreenRecordingPermissionStub(requestResult: .notGranted)
         let state = AppState(tasks: [], permissionClient: permissions, preferences: isolatedTestPreferences())
@@ -82,6 +101,8 @@ final class WebBridgePermissionTests: XCTestCase {
 private final class ScreenRecordingPermissionStub: AutomationPermissionClient {
     let requestResult: PermissionGrant
     private(set) var requestCount = 0
+    private(set) var accessibilityRequests = 0
+    var accessibility: PermissionGrant = .notGranted
     private var screenRecording: PermissionGrant = .notGranted
 
     init(requestResult: PermissionGrant) {
@@ -90,13 +111,14 @@ private final class ScreenRecordingPermissionStub: AutomationPermissionClient {
 
     func current() -> AutomationPermissionSnapshot {
         AutomationPermissionSnapshot(
-            accessibility: .notGranted,
+            accessibility: accessibility,
             screenRecording: screenRecording
         )
     }
 
     func requestAccessibility() -> AutomationPermissionSnapshot {
-        current()
+        accessibilityRequests += 1
+        return current()
     }
 
     func requestScreenRecording() -> AutomationPermissionSnapshot {

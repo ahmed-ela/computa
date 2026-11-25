@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 pub const SOURCE_COMMIT: &str = "4607249e430dac1c961df4dc615beae88e33cec8";
-pub const PATCH_SHA256: &str = "083202ea2ca3485652b2dd9e1356addde30e0a80cc8e3878eb477ec164a31af7";
+pub const PATCH_SHA256: &str = "f7f4fc173c7b16555e3fda08c2590418d54c39a1735a27a252dc14699fc476f2";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {

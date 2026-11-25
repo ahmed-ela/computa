@@ -50,7 +50,9 @@ struct NativeAccessibilityDenial: LocalizedError {
     static let tool = "computer_v2_open"
     static let error = "Kolmogor needs macOS Accessibility permission to inspect the app."
     static let explanation = "I couldn’t inspect the app because Kolmogor doesn’t have macOS Accessibility permission."
-    static let nextStep = "Enable Kolmogor in System Settings → Privacy & Security → Accessibility, then try again."
+    private static let enableStep = "Enable Kolmogor in System Settings → Privacy & Security → Accessibility, then try again."
+    private static let replaceStep = "If Kolmogor is already enabled, remove its old entry and add the running app using Show in Finder in Kolmogor Settings."
+    static let nextStep = enableStep + " " + replaceStep
 
     // Render only complete, independently evidenced sentences. A model can
     // append its own claims to the receipt even when asked to return it verbatim.
@@ -73,7 +75,8 @@ struct NativeAccessibilityDenial: LocalizedError {
             let missing = /(?:kolmogor (?:lacks|doesn't have|does not have) (?:the required )?(?:macos )?accessibility permission|(?:the desktop tool reported that )?(?:macos )?accessibility permission (?:isn't granted|is not granted|was not granted|wasn't granted|is missing|is required))\./
             return reason.wholeMatch(of: missing) != nil
         }) else { return nil }
-        return known.contains(nextStep) ? denial + " " + nextStep : denial
+        // The original one-sentence recovery is also stored in older receipts.
+        return ([denial] + [enableStep, replaceStep].filter(known.contains)).joined(separator: " ")
     }
 
     static var toolGuidance: String {

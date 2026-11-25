@@ -282,6 +282,7 @@ export type NativeAction =
   | { action: 'setShowToolPayloads'; value: boolean }
   | { action: 'refreshPermissions' }
   | { action: 'requestAccessibilityPermission' }
+  | { action: 'revealRunningApp' }
   | { action: 'requestScreenRecordingPermission' };
 
 declare global {

@@ -1,7 +1,7 @@
 //! Source setup preserves native installation gates without Python, Swift,
 //! Node or shell-script subprocess dependencies.
 use crate::{
-    distribution::{self, Runner, checked, text},
+    distribution::{self, AppIdentity, Runner, checked, text},
     models,
 };
 use std::{
@@ -13,10 +13,24 @@ use std::{
 pub struct Options {
     pub check: bool,
     pub build_only: bool,
+    pub distribution_candidate: bool,
     pub no_launch: bool,
     pub download_model: bool,
     pub signing_identity: Option<String>,
     pub wasm_bindgen: Option<String>,
+}
+impl Options {
+    fn app_identity(&self) -> io::Result<AppIdentity> {
+        if !self.distribution_candidate {
+            return Ok(AppIdentity::RustDev);
+        }
+        if !self.build_only || self.signing_identity.is_none() {
+            return Err(distribution::invalid(
+                "--distribution-candidate requires --build-only and a Developer ID signing identity",
+            ));
+        }
+        Ok(AppIdentity::Public)
+    }
 }
 pub fn parse_options(args: &[String]) -> io::Result<Options> {
     let mut result = Options::default();
@@ -29,6 +43,7 @@ pub fn parse_options(args: &[String]) -> io::Result<Options> {
         match arg.as_str() {
             "--check" => result.check = true,
             "--build-only" => result.build_only = true,
+            "--distribution-candidate" => result.distribution_candidate = true,
             "--no-launch" => result.no_launch = true,
             "--download-model" => result.download_model = true,
             "--signing-identity" | "--wasm-bindgen" => {
@@ -59,6 +74,7 @@ pub fn parse_options(args: &[String]) -> io::Result<Options> {
             "--build-only cannot install model weights",
         ));
     }
+    result.app_identity()?;
     Ok(result)
 }
 fn version_at_least(actual: &str, minimum: &[u32]) -> bool {
@@ -158,11 +174,16 @@ fn require_product_profile(debug_assertions: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn render_info_plist(template: &str, version: &crate::version::AppVersion) -> io::Result<String> {
+fn render_info_plist(
+    template: &str,
+    version: &crate::version::AppVersion,
+    product: AppIdentity,
+) -> io::Result<String> {
     let plist = template
         .replace("$(DEVELOPMENT_LANGUAGE)", "en")
         .replace("$(EXECUTABLE_NAME)", "Kolmogor")
-        .replace("$(PRODUCT_BUNDLE_IDENTIFIER)", distribution::BUNDLE_ID)
+        .replace("$(PRODUCT_BUNDLE_IDENTIFIER)", product.identifier())
+        .replace("$(KOLMOGOR_DISPLAY_NAME)", product.display_name())
         .replace("$(PRODUCT_NAME)", "Kolmogor")
         .replace("$(PRODUCT_BUNDLE_PACKAGE_TYPE)", "APPL")
         .replace("$(MARKETING_VERSION)", &version.marketing)
@@ -176,8 +197,9 @@ fn render_info_plist(template: &str, version: &crate::version::AppVersion) -> io
     Ok(plist)
 }
 
-pub fn build_app(
+fn build_app(
     root: &Path,
+    product: AppIdentity,
     wasm_bindgen: &str,
     identity: &str,
     runner: &dyn Runner,
@@ -210,7 +232,7 @@ pub fn build_app(
         .prefix("build-")
         .tempdir_in(&products)?
         .keep();
-    let app = stage.join("Kolmogor.app");
+    let app = stage.join(format!("{}.app", product.display_name()));
     let contents = app.join("Contents");
     fs::create_dir_all(contents.join("MacOS"))?;
     fs::create_dir_all(contents.join("Resources"))?;
@@ -259,9 +281,10 @@ pub fn build_app(
     let plist = render_info_plist(
         &fs::read_to_string(root.join("Config/Kolmogor-Info.plist"))?,
         &version,
+        product,
     )?;
     fs::write(contents.join("Info.plist"), plist)?;
-    distribution::sign_bundle_with_source(&app, identity, false, runner, root, &source)?;
+    distribution::sign_bundle_with_source(&app, identity, product, runner, root, &source)?;
     if identity != "-" {
         checked(
             runner,
@@ -270,7 +293,11 @@ pub fn build_app(
                 "--verify",
                 "--strict",
                 "-R",
-                "=anchor apple generic",
+                if product == AppIdentity::Public {
+                    distribution::PUBLIC_APP_REQUIREMENT.trim()
+                } else {
+                    "=anchor apple generic"
+                },
                 text(&app)?,
             ],
         )?;
@@ -288,10 +315,13 @@ pub async fn setup(
     user_home: &Path,
     runner: &dyn Runner,
 ) -> io::Result<SetupResult> {
+    let product = options.app_identity()?;
     let wasm_bindgen = options.wasm_bindgen.as_deref().unwrap_or("wasm-bindgen");
     check_prerequisites(root, wasm_bindgen, runner)?;
     let identity = match options.signing_identity.as_deref() {
-        Some(identity) => distribution::signing_identity(identity, false, runner)?,
+        Some(identity) => {
+            distribution::signing_identity(identity, options.distribution_candidate, runner)?
+        }
         None => "-".into(),
     };
     if options.check {
@@ -299,20 +329,22 @@ pub async fn setup(
     }
     if !options.build_only {
         distribution::require_stopped(runner)?;
-        distribution::check_existing(user_home, runner)?;
+        distribution::check_existing_for(user_home, product, runner)?;
     }
-    let app = build_app(root, wasm_bindgen, &identity, runner)?;
+    let app = build_app(root, product, wasm_bindgen, &identity, runner)?;
     if options.build_only {
         return Ok(SetupResult::Built(app));
     }
     distribution::require_stopped(runner)?;
-    distribution::check_existing(user_home, runner)?;
+    distribution::check_existing_for(user_home, product, runner)?;
     let model_root = user_home.join("Library/Application Support/LocalCodex/MLX/models");
     let destination = model_root.join(models::reviewed_manifest()?.repo);
     if options.download_model || fs::symlink_metadata(destination).is_ok() {
         models::install_model(&model_root, options.download_model).await?;
     }
-    let installed = distribution::install_app(&app, user_home, runner)?;
+    let installed = distribution::install_source_app(&app, user_home, product, runner, |a, b| {
+        fs::rename(a, b)
+    })?;
     if !options.no_launch {
         checked(runner, &["/usr/bin/open", text(&installed.app)?])?;
     }
@@ -330,6 +362,18 @@ mod tests {
         assert!(parse_options(&args(&["--signing-identity", "--force"])).is_err());
         assert!(parse_options(&args(&["--check", "--check"])).is_err());
         assert!(parse_options(&args(&["--check"])).unwrap().check);
+        assert!(parse_options(&args(&["--distribution-candidate"])).is_err());
+        assert!(parse_options(&args(&["--build-only", "--distribution-candidate"])).is_err());
+        assert!(
+            parse_options(&args(&[
+                "--build-only",
+                "--distribution-candidate",
+                "--signing-identity",
+                "fixture"
+            ]))
+            .unwrap()
+            .distribution_candidate
+        );
     }
     #[test]
     fn product_build_requires_matching_release_installer_pin() {
@@ -348,14 +392,27 @@ mod tests {
             "MARKETING_VERSION = 0.1.1\nCURRENT_PROJECT_VERSION = 2\n",
         )
         .unwrap();
-        let rendered =
-            render_info_plist(include_str!("../../../Config/Kolmogor-Info.plist"), &version)
-                .unwrap();
+        let rendered = render_info_plist(
+            include_str!("../../../Config/Kolmogor-Info.plist"),
+            &version,
+            AppIdentity::RustDev,
+        )
+        .unwrap();
         assert!(
             rendered.contains("<key>CFBundleShortVersionString</key>\n\t<string>0.1.1</string>")
         );
         assert!(rendered.contains("<key>CFBundleVersion</key>\n\t<string>2</string>"));
         assert!(!rendered.contains("$("));
-        assert!(render_info_plist("$(UNREVIEWED)", &version).is_err());
+        assert!(rendered.contains("<string>Kolmogor Rust Dev</string>"));
+        assert!(rendered.contains("<string>com.ahmedelamin.LocalCodex.rust-dev</string>"));
+        let public = render_info_plist(
+            include_str!("../../../Config/Kolmogor-Info.plist"),
+            &version,
+            AppIdentity::Public,
+        )
+        .unwrap();
+        assert!(public.contains("<string>com.ahmedelamin.LocalCodex</string>"));
+        assert!(!public.contains("Rust Dev"));
+        assert!(render_info_plist("$(UNREVIEWED)", &version, AppIdentity::RustDev).is_err());
     }
 }

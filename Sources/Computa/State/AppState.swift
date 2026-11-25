@@ -1303,6 +1303,7 @@ final class AppState {
             presentedSheet = nil
             return false
         }
+        refreshAutomationPermissions()
         presentedSheet = .settings
         return true
     }

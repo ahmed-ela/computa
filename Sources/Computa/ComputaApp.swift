@@ -167,7 +167,8 @@ struct ComputaApp: App {
         let launchMode = ComputaLaunchMode.current
         self.launchMode = launchMode
         #if !SWIFT_PACKAGE
-        updates = launchMode == .application ? ComputaUpdates() : nil
+        updates = launchMode == .application && Bundle.main.bundleIdentifier == "com.ahmedelamin.LocalCodex"
+            ? ComputaUpdates() : nil
         #endif
         let state = launchMode.makeState()
         _state = State(initialValue: state)
@@ -259,6 +260,9 @@ final class ComputaAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         state?.recheckPendingCLIInstallations()
+        if let state, state.workspaceWindows.all.contains(where: { $0.presentedSheet == .settings }) {
+            state.refreshAutomationPermissions()
+        }
     }
 
     func prepareBrowserProfilesForTermination() {

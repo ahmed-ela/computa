@@ -427,6 +427,20 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(threadID: "thread").map(\.entry.body), [reply])
     }
 
+    func testPreviousAccessibilityGrantInstructionsStillValidateAfterUpdate() throws {
+        let originalStep = "Enable Kolmogor in System Settings → Privacy & Security → Accessibility, then try again."
+        let reply = NativeAccessibilityDenial.explanation + " " + originalStep
+        let record = try NativeAccessibilityDenial.record(threadID: "thread", turnID: "turn", callID: "bind", reply: reply)
+        // Use the original stored payload even if the current projector changes.
+        let historical = try withDiagnostic(record) { $0["reply"] = reply }
+        let store = try NativeFailureEvidenceStore(directory: directory)
+        _ = try store.append(historical)
+        let restored = try XCTUnwrap(store.load(threadID: "thread").first)
+        XCTAssertEqual(restored.entry.body, reply)
+        XCTAssertTrue(restored.presentation.first?.toolEvent?.output?.contains("already enabled") == true)
+        XCTAssertEqual(restored.presentation.first?.toolEvent?.status, .failed)
+    }
+
     private func withDiagnostic(_ record: NativeFailureEvidenceStore.Record,
                                 change: (inout [String: Any]) -> Void) throws -> NativeFailureEvidenceStore.Record {
         var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(record.diagnosticText.utf8)) as? [String: Any])

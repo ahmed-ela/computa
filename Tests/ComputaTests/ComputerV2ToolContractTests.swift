@@ -371,6 +371,24 @@ final class ComputerV2ToolContractTests: XCTestCase {
         }
     }
 
+    func testAppNameSearchRanksTheRequestedProductBeforeAnActiveLegacyIdentifier() throws {
+        func app(_ pid: Int32, _ id: String, _ name: String, active: Bool = false) -> RunningApplicationInfo {
+            .init(processIdentifier: pid, bundleIdentifier: id, localizedName: name, activationPolicy: .regular,
+                  isActive: active, isHidden: false, isTerminated: false)
+        }
+        let apps = [app(1, "com.ahmedelamin.LocalCodex", "Kolmogor", active: true),
+                    app(2, "com.openai.codex", "ChatGPT"), app(3, "com.openai.codex.helper", "Codex (Aperitif)")]
+        func bundleIDs(for query: String?) throws -> [String] {
+            try ComputerV2ToolContract.appInventory(apps, query: query).split(separator: "\n").dropFirst().map { line in
+                let row = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+                return try XCTUnwrap(row["bundle_id"] as? String)
+            }
+        }
+        XCTAssertEqual(try bundleIDs(for: "CodEx"), ["com.openai.codex", "com.openai.codex.helper", "com.ahmedelamin.LocalCodex"])
+        XCTAssertEqual(try bundleIDs(for: "com.ahmedelamin.LocalCodex"), ["com.ahmedelamin.LocalCodex"])
+        XCTAssertEqual(try bundleIDs(for: nil).first, "com.ahmedelamin.LocalCodex")
+    }
+
     func testAppQuerySchemaAndNativeValidationAgreeOnOmissionEmptyAndWhitespace() throws {
         let model = "api/cerebras/model/Z3B0LW9zcy0xMjBi"
         let catalogs = [ComputerV2ToolContract.specs,

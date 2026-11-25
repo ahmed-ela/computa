@@ -11,6 +11,35 @@ use std::{
     process::{Command, Stdio},
 };
 pub const BUNDLE_ID: &str = "com.ahmedelamin.LocalCodex";
+pub(crate) const PUBLIC_APP_REQUIREMENT: &str =
+    include_str!("../../../Config/PublicApp.requirement");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppIdentity {
+    Public,
+    RustDev,
+}
+impl AppIdentity {
+    pub fn identifier(self) -> &'static str {
+        match self {
+            Self::Public => BUNDLE_ID,
+            Self::RustDev => "com.ahmedelamin.LocalCodex.rust-dev",
+        }
+    }
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Public => "Kolmogor",
+            Self::RustDev => "Kolmogor Rust Dev",
+        }
+    }
+    fn installed_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Public => &["Kolmogor", "Computa", "Mactopus"],
+            Self::RustDev => &["Kolmogor Rust Dev"],
+        }
+    }
+}
+
 pub fn grounding_provenance() -> [(&'static str, &'static [u8]); 6] {
     [
         (
@@ -197,6 +226,14 @@ pub fn bundle_files(app: &Path) -> io::Result<Vec<FileEntry>> {
     Ok(result)
 }
 pub fn inspect_basic(app: &Path, executable: &str, runner: &dyn Runner) -> io::Result<()> {
+    inspect_basic_for(app, executable, AppIdentity::Public, runner)
+}
+fn inspect_basic_for(
+    app: &Path,
+    executable: &str,
+    product: AppIdentity,
+    runner: &dyn Runner,
+) -> io::Result<()> {
     safe_directory(app, false)?;
     read_regular(&app.join("Contents/Info.plist"), 1024 * 1024)?;
     let plist = app.join("Contents/Info.plist");
@@ -225,7 +262,7 @@ pub fn inspect_basic(app: &Path, executable: &str, runner: &dyn Runner) -> io::R
         ],
     )?;
     let matches_name = actual == executable || (executable == "Computa" && actual == "Kolmogor");
-    if identifier != BUNDLE_ID || !matches_name {
+    if identifier != product.identifier() || !matches_name {
         return Err(invalid("Refusing an app with an unknown bundle identity"));
     }
     let binary = app.join("Contents/MacOS").join(actual);
@@ -248,7 +285,14 @@ pub fn inspect_basic(app: &Path, executable: &str, runner: &dyn Runner) -> io::R
     Ok(())
 }
 pub fn inspect_rust_app(app: &Path, runner: &dyn Runner) -> io::Result<Vec<FileEntry>> {
-    inspect_basic(app, "Kolmogor", runner)?;
+    inspect_rust_app_for(app, AppIdentity::Public, runner)
+}
+fn inspect_rust_app_for(
+    app: &Path,
+    product: AppIdentity,
+    runner: &dyn Runner,
+) -> io::Result<Vec<FileEntry>> {
+    inspect_basic_for(app, "Kolmogor", product, runner)?;
     let files = bundle_files(app)?;
     if files.iter().any(|file| {
         file.path.starts_with("Contents/Resources/ChromeBridge/")
@@ -418,7 +462,7 @@ pub fn verify_release_gates(
             "--deep",
             "--strict",
             "-R",
-            APPLE_REQUIREMENT,
+            PUBLIC_APP_REQUIREMENT.trim(),
             text(app)?,
         ],
     )?;
@@ -506,7 +550,15 @@ pub fn sign_bundle_in_place(
     } else {
         None
     };
-    sign_bundle(app, identity, release, runner, None, old.as_ref())
+    sign_bundle(
+        app,
+        identity,
+        release,
+        AppIdentity::Public,
+        runner,
+        None,
+        old.as_ref(),
+    )
 }
 /// Source authority comes exclusively from a clean native checkpoint captured
 /// before the build. It is sealed after nested signing and checked again after
@@ -514,19 +566,20 @@ pub fn sign_bundle_in_place(
 pub fn sign_bundle_with_source(
     app: &Path,
     identity: &str,
-    release: bool,
+    product: AppIdentity,
     runner: &dyn Runner,
     source_root: &Path,
     snapshot: &crate::source_build::SourceSnapshot,
 ) -> io::Result<()> {
     crate::source_build::verify_unchanged(source_root, snapshot, runner)?;
-    sign_bundle(app, identity, release, runner, Some(snapshot), None)?;
+    sign_bundle(app, identity, false, product, runner, Some(snapshot), None)?;
     crate::source_build::verify_unchanged(source_root, snapshot, runner)
 }
 fn sign_bundle(
     app: &Path,
     identity: &str,
     release: bool,
+    product: AppIdentity,
     runner: &dyn Runner,
     source: Option<&crate::source_build::SourceSnapshot>,
     old: Option<&crate::source_build::VerifiedSourceReceipt>,
@@ -565,7 +618,7 @@ fn sign_bundle(
                 "runtime",
                 timestamp,
                 "--identifier",
-                &format!("{BUNDLE_ID}.{id}"),
+                &format!("{}.{id}", product.identifier()),
                 "--sign",
                 identity,
                 text(&app.join(relative))?,
@@ -606,7 +659,7 @@ fn sign_bundle(
     // SourceBuild omits only signature-envelope/resource-seal metadata to avoid
     // a receipt sealing its own hash through the CodeResources special slot.
     if let Some(snapshot) = source {
-        crate::source_build::write_receipt(app, snapshot, &bundle_files(app)?)?;
+        crate::source_build::write_receipt_for(product, app, snapshot, &bundle_files(app)?)?;
     } else if let Some(receipt) = old {
         crate::source_build::rebind_verified_receipt(app, receipt, &bundle_files(app)?)?;
     }
@@ -626,12 +679,12 @@ fn sign_bundle(
         )?;
         let files = bundle_files(app)?;
         if let Some(snapshot) = source {
-            crate::source_build::verify_receipt(app, snapshot, &files)?;
+            crate::source_build::verify_receipt_for(product, app, snapshot, &files)?;
         } else {
             crate::source_build::inspect_sealed_receipt(app, &files)?;
         }
     }
-    inspect_rust_app(app, runner)?;
+    inspect_rust_app_for(app, product, runner)?;
     Ok(())
 }
 pub fn sign_release(
@@ -659,7 +712,15 @@ pub fn sign_release(
         return Err(invalid("Signing copy differs from the verified source"));
     }
     let receipt = crate::source_build::load_verified_sealed_receipt(output, &copied, runner)?;
-    sign_bundle(output, &identity, true, runner, None, Some(&receipt))?;
+    sign_bundle(
+        output,
+        &identity,
+        true,
+        AppIdentity::Public,
+        runner,
+        None,
+        Some(&receipt),
+    )?;
     verify_release_gates(output, ReleaseChannel::SignedTest, runner)?;
     Ok(output.to_owned())
 }
@@ -669,27 +730,43 @@ fn require_separate(a: &Path, b: &Path) -> io::Result<()> {
     }
     Ok(())
 }
-fn existing_app(applications: &Path, runner: &dyn Runner) -> io::Result<Option<PathBuf>> {
+fn existing_app(
+    applications: &Path,
+    product: AppIdentity,
+    runner: &dyn Runner,
+) -> io::Result<Option<PathBuf>> {
     let mut app = None;
-    for name in ["Kolmogor", "Computa", "Mactopus"] {
+    for &name in product.installed_names() {
         let candidate = applications.join(format!("{name}.app"));
         if fs::symlink_metadata(&candidate).is_ok() {
             if app.is_some() {
                 return Err(invalid("Resolve duplicate installations before continuing"));
             }
-            inspect_basic(&candidate, name, runner)?;
+            let executable = if product == AppIdentity::RustDev {
+                "Kolmogor"
+            } else {
+                name
+            };
+            inspect_basic_for(&candidate, executable, product, runner)?;
             app = Some(candidate);
         }
     }
     Ok(app)
 }
 pub fn check_existing(user_home: &Path, runner: &dyn Runner) -> io::Result<Option<PathBuf>> {
+    check_existing_for(user_home, AppIdentity::Public, runner)
+}
+pub(crate) fn check_existing_for(
+    user_home: &Path,
+    product: AppIdentity,
+    runner: &dyn Runner,
+) -> io::Result<Option<PathBuf>> {
     let applications = user_home.join("Applications");
     if fs::symlink_metadata(&applications).is_err() {
         return Ok(None);
     }
     safe_directory(&applications, false)?;
-    existing_app(&applications, runner)
+    existing_app(&applications, product, runner)
 }
 #[derive(Debug)]
 pub struct Installation {
@@ -710,20 +787,32 @@ pub fn install_app_with<F: FnMut(&Path, &Path) -> io::Result<()>>(
     runner: &dyn Runner,
     move_path: F,
 ) -> io::Result<Installation> {
-    let files = inspect_rust_app(source, runner)?;
-    crate::source_build::load_verified_sealed_receipt(source, &files, runner)?;
-    install_verified(source, user_home, "Kolmogor", true, runner, move_path)
+    install_source_app(source, user_home, AppIdentity::Public, runner, move_path)
+}
+pub(crate) fn install_source_app<F: FnMut(&Path, &Path) -> io::Result<()>>(
+    source: &Path,
+    user_home: &Path,
+    product: AppIdentity,
+    runner: &dyn Runner,
+    move_path: F,
+) -> io::Result<Installation> {
+    let files = inspect_rust_app_for(source, product, runner)?;
+    crate::source_build::load_verified_sealed_receipt_for(product, source, &files, runner)?;
+    install_verified(
+        source, user_home, "Kolmogor", true, product, runner, move_path,
+    )
 }
 fn inspect_install(
     source: &Path,
     executable: &str,
     rust: bool,
+    product: AppIdentity,
     runner: &dyn Runner,
 ) -> io::Result<Vec<FileEntry>> {
     if rust {
-        inspect_rust_app(source, runner)
+        inspect_rust_app_for(source, product, runner)
     } else {
-        inspect_basic(source, executable, runner)?;
+        inspect_basic_for(source, executable, product, runner)?;
         bundle_files(source)
     }
 }
@@ -732,35 +821,41 @@ fn install_verified<F: FnMut(&Path, &Path) -> io::Result<()>>(
     user_home: &Path,
     executable: &str,
     rust: bool,
+    product: AppIdentity,
     runner: &dyn Runner,
     mut move_path: F,
 ) -> io::Result<Installation> {
-    let source_files = inspect_install(source, executable, rust, runner)?;
+    let source_files = inspect_install(source, executable, rust, product, runner)?;
     require_stopped(runner)?;
     let applications = user_home.join("Applications");
     safe_directory(&applications, true)?;
-    let previous = existing_app(&applications, runner)?;
+    let previous = existing_app(&applications, product, runner)?;
     let previous_files = previous.as_ref().map(|p| bundle_files(p)).transpose()?;
     let stage = tempfile::Builder::new()
         .prefix(".computa-install-")
         .tempdir_in(&applications)?
         .keep();
-    let staged = stage.join(format!("{executable}.app"));
+    let name = if product == AppIdentity::RustDev {
+        product.display_name()
+    } else {
+        executable
+    };
+    let staged = stage.join(format!("{name}.app"));
     checked(runner, &["/usr/bin/ditto", text(source)?, text(&staged)?])?;
-    if inspect_install(&staged, executable, rust, runner)? != source_files {
+    if inspect_install(&staged, executable, rust, product, runner)? != source_files {
         return Err(invalid(
             "Staged application differs from the verified source",
         ));
     }
     require_stopped(runner)?;
-    if existing_app(&applications, runner)? != previous
+    if existing_app(&applications, product, runner)? != previous
         || previous.as_ref().map(|p| bundle_files(p)).transpose()? != previous_files
     {
         return Err(invalid(
             "Installed app changed during staging; no app was replaced",
         ));
     }
-    let destination = applications.join(format!("{executable}.app"));
+    let destination = applications.join(format!("{name}.app"));
     let backup = if let Some(previous) = &previous {
         let backup_root = applications.join("Computa Backups");
         safe_directory(&backup_root, true)?;
@@ -794,7 +889,7 @@ fn install_verified<F: FnMut(&Path, &Path) -> io::Result<()>>(
             staged.display()
         )));
     }
-    let verified = inspect_install(&destination, executable, rust, runner)
+    let verified = inspect_install(&destination, executable, rust, product, runner)
         .is_ok_and(|files| files == source_files);
     if !verified {
         // Preserve the failed new copy in its stage before restoring the previous
@@ -842,15 +937,22 @@ pub fn restore_backup(
             "Restore source must be an app inside a retained backup container",
         ));
     }
-    let executable = match backup.file_name().and_then(|n| n.to_str()) {
-        Some("Kolmogor.app") => "Kolmogor",
-        Some("Computa.app") => "Computa",
-        Some("Mactopus.app") => "Mactopus",
+    let (product, executable) = match backup.file_name().and_then(|n| n.to_str()) {
+        Some("Kolmogor.app") => (AppIdentity::Public, "Kolmogor"),
+        Some("Computa.app") => (AppIdentity::Public, "Computa"),
+        Some("Mactopus.app") => (AppIdentity::Public, "Mactopus"),
+        Some("Kolmogor Rust Dev.app") => (AppIdentity::RustDev, "Kolmogor"),
         _ => return Err(invalid("Unknown native backup name")),
     };
-    install_verified(backup, user_home, executable, false, runner, |a, b| {
-        fs::rename(a, b)
-    })
+    install_verified(
+        backup,
+        user_home,
+        executable,
+        false,
+        product,
+        runner,
+        |a, b| fs::rename(a, b),
+    )
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1591,6 +1693,7 @@ mod tests {
             &home,
             "Kolmogor",
             true,
+            AppIdentity::Public,
             &FixtureRunner::new(),
             |a, b| {
                 moves += 1;
@@ -1623,9 +1726,15 @@ mod tests {
         let old = bundle_files(&previous).unwrap();
         let new = bundle_files(&source).unwrap();
         let runner = FixtureRunner::new();
-        let installed = install_verified(&source, &home, "Kolmogor", true, &runner, |a, b| {
-            fs::rename(a, b)
-        })
+        let installed = install_verified(
+            &source,
+            &home,
+            "Kolmogor",
+            true,
+            AppIdentity::Public,
+            &runner,
+            |a, b| fs::rename(a, b),
+        )
         .unwrap();
         let backup = installed.backup.unwrap();
         assert_eq!(bundle_files(&backup).unwrap(), old);
@@ -1658,6 +1767,7 @@ mod tests {
                 &home,
                 "Kolmogor",
                 true,
+                AppIdentity::Public,
                 &runner,
                 |a, b| fs::rename(a, b)
             )

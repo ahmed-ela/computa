@@ -892,6 +892,11 @@ function SettingsModal({ snapshot, nativeHost }: { snapshot: AppSnapshot; native
                 </Button>
               </span>
             </div>
+            {!accessibilityGranted && <div className="setting-row permission-row">
+              <span><strong>Already enabled?</strong><small>In macOS Accessibility settings, remove the old entry, then add the copy selected in Finder.</small></span>
+              <Button variant="outline" disabled={!nativeHost}
+                onClick={() => post({ action: 'revealRunningApp' })}>Show in Finder</Button>
+            </div>}
             <div className="setting-row permission-row">
               <span><strong>Screen Recording</strong><small>Required for screenshots.</small></span>
               <span className="permission-controls">

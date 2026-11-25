@@ -1,0 +1,3 @@
+// Stable public identity. Use only to stage a Developer ID distribution.
+KOLMOGOR_APP_IDENTIFIER = com.ahmedelamin.LocalCodex
+KOLMOGOR_DISPLAY_NAME = Kolmogor

@@ -6,8 +6,7 @@ leaves it out of the latest stable release. It does not publish stable tags.
 The Apple app keeps the numeric `MAJOR.MINOR.PATCH` version and a separate
 increasing build number. Use that build number as `N`.
 
-The current production build path is the Swift app through
-[`Scripts/setup.sh`](../Scripts/setup.sh). The Rust migration introduced in
+The production worker builds the Swift app with [the distribution configuration](../Config/Distribution.xcconfig), then verifies its Developer ID identity before notarization. Local Xcode and source builds use a separate identity. The Rust migration introduced in
 PR #3 remains incomplete with separate qualification gates; source integration
 does not qualify or promote the Rust app. A Developer ID signature, a verified package, and a
 successful publication are also separate from notarization and clean-Mac

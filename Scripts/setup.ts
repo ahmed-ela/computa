@@ -6,7 +6,8 @@ import { basename, join, resolve } from "node:path";
 import { checkVersion } from "./version";
 import { retiredBundleResources } from "./retired-bundle-resources";
 
-const bundleID = "com.ahmedelamin.LocalCodex";
+const bundleID = "com.ahmedelamin.LocalCodex.dev";
+const installedAppName = "Kolmogor Dev.app";
 const help = `Build Kolmogor from this checked-out source tree (Apple Silicon macOS only).
 
 Usage: ./Scripts/setup.sh [--check | --build-only] [--no-launch] [--download-model]
@@ -22,10 +23,9 @@ Usage: ./Scripts/setup.sh [--check | --build-only] [--no-launch] [--download-mod
   --help            Show this help.
 
 Default: build, prepare the private MLX Python environment, install into
-~/Applications/Kolmogor.app, and open it. No model weights are downloaded unless
---download-model is supplied. Existing apps are backed up; quit Kolmogor and
-legacy Mactopus first. A legacy Mactopus.app is upgraded with its name preserved
-in the backup. If both app names exist, setup stops for you to resolve them.
+~/Applications/Kolmogor Dev.app, and open it. No model weights are downloaded
+unless --download-model is supplied. Quit existing Kolmogor processes first.
+Setup backs up a previous Kolmogor Dev installation and leaves public and legacy copies in place.
 Default signing is ad-hoc. No macOS permissions are auto-granted.
 See docs/BUILDING.md.`;
 
@@ -150,15 +150,14 @@ export async function checkPrerequisites(context: SetupContext): Promise<void> {
   context.log("Prerequisites passed. Allow substantial Cargo build time and roughly 35–50 GB free build/cache space.");
 }
 
-async function inspectApp(context: SetupContext, app: string, expectedExecutable = "Kolmogor"): Promise<void> {
+async function inspectApp(context: SetupContext, app: string): Promise<void> {
   await requireSafeDirectory(app);
   const plist = join(app, "Contents/Info.plist");
   await requireRegular(plist);
   const identifier = await checked(context, ["/usr/bin/plutil", "-extract", "CFBundleIdentifier", "raw", "-o", "-", plist], true);
   const executable = await checked(context, ["/usr/bin/plutil", "-extract", "CFBundleExecutable", "raw", "-o", "-", plist], true);
-  const matchesExecutable = executable === expectedExecutable || (expectedExecutable === "Computa" && executable === "Kolmogor");
-  if (identifier !== bundleID || !matchesExecutable) {
-    throw new Error(`Refusing to replace or use an unknown app at ${app}. Expected ${expectedExecutable} (${bundleID}).`);
+  if (identifier !== bundleID || executable !== "Kolmogor") {
+    throw new Error(`Refusing to replace or use an unknown app at ${app}. Expected Kolmogor Dev (${bundleID}).`);
   }
   await requireRegular(join(app, "Contents/MacOS", executable));
   await checked(context, ["/usr/bin/codesign", "--verify", "--deep", "--strict", app], true);
@@ -175,15 +174,10 @@ async function requireStopped(context: SetupContext): Promise<void> {
 async function existingApp(context: SetupContext, applications: string): Promise<string | undefined> {
   if (!await exists(applications)) return undefined;
   await requireSafeDirectory(applications);
-  const candidates: string[] = [];
-  for (const name of ["Kolmogor", "Computa", "Mactopus"]) {
-    const app = join(applications, name + ".app");
-    if (await exists(app)) candidates.push(app);
-  }
-  if (candidates.length > 1) throw new Error("Resolve the duplicate installations in ~/Applications before setup.");
-  const [existing] = candidates;
-  if (existing) await inspectApp(context, existing, basename(existing, ".app"));
-  return existing;
+  const app = join(applications, installedAppName);
+  if (!await exists(app)) return undefined;
+  await inspectApp(context, app);
+  return app;
 }
 
 async function resolveSigningIdentity(options: Options, context: SetupContext): Promise<string> {
@@ -201,13 +195,13 @@ async function resolveSigningIdentity(options: Options, context: SetupContext): 
 
 export async function installApp(context: SetupContext, source: string): Promise<{ app: string; backup?: string }> {
   const applications = join(context.userHome, "Applications");
-  const destination = join(applications, "Kolmogor.app");
+  const destination = join(applications, installedAppName);
   if (await exists(applications)) await requireSafeDirectory(applications);
   else await mkdir(applications, { mode: 0o755 });
   await requireStopped(context);
   const previous = await existingApp(context, applications);
   const stage = await mkdtemp(join(applications, ".computa-install-"));
-  const stagedApp = join(stage, "Kolmogor.app");
+  const stagedApp = join(stage, installedAppName);
   // ditto preserves executable modes and symlinks within the sealed bundle.
   // All validation happens before the existing app is moved.
   await checked(context, ["/usr/bin/ditto", source, stagedApp]);

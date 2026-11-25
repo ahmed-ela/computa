@@ -3,7 +3,7 @@
 //! Main-code identity excludes CMS and the Info/CodeResources special slots:
 //! those slots change when the outer seal incorporates this receipt. Every
 //! executable code page is still checked against its signed SHA-256 page hash.
-use crate::distribution::{self, FileEntry, Runner, invalid};
+use crate::distribution::{self, AppIdentity, FileEntry, Runner, invalid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -665,22 +665,26 @@ fn code_identity(bytes: &[u8]) -> io::Result<Vec<CodeSlice>> {
     result.sort_by_key(|item| (item.cpu_type, item.cpu_subtype));
     Ok(result)
 }
-fn expected_code_identifier(path: &str) -> Option<String> {
+fn expected_code_identifier(path: &str, product: AppIdentity) -> Option<String> {
     match path {
-        MAIN_PATH => Some(distribution::BUNDLE_ID.into()),
+        MAIN_PATH => Some(product.identifier().into()),
         "Contents/Resources/AgentRuntime/codex-app-server" => {
-            Some(format!("{}.AgentRuntime", distribution::BUNDLE_ID))
+            Some(format!("{}.AgentRuntime", product.identifier()))
         }
         "Contents/Resources/InferenceRuntime/computa-inference-worker" => {
-            Some(format!("{}.InferenceWorker", distribution::BUNDLE_ID))
+            Some(format!("{}.InferenceWorker", product.identifier()))
         }
         "Contents/Resources/InferenceRuntime/computa-grounding-worker" => {
-            Some(format!("{}.GroundingWorker", distribution::BUNDLE_ID))
+            Some(format!("{}.GroundingWorker", product.identifier()))
         }
         _ => None,
     }
 }
-fn artifacts(app: &Path, provided: &[FileEntry]) -> io::Result<ProducedArtifacts> {
+fn artifacts(
+    app: &Path,
+    provided: &[FileEntry],
+    product: AppIdentity,
+) -> io::Result<ProducedArtifacts> {
     if distribution::bundle_files(app)? != provided || provided.len() > MAX_FILES {
         return Err(invalid(
             "Produced artifact inventory is stale or exceeds its bound",
@@ -696,7 +700,7 @@ fn artifacts(app: &Path, provided: &[FileEntry]) -> io::Result<ProducedArtifacts
         if !relative(&entry.path) || entry.kind != "file" || !hex_digest(&entry.sha256, 64) {
             return Err(invalid("Invalid produced artifact inventory"));
         }
-        if let Some(expected) = expected_code_identifier(&entry.path) {
+        if let Some(expected) = expected_code_identifier(&entry.path, product) {
             if !entry.executable {
                 return Err(invalid("Required signed code is not executable"));
             }
@@ -809,7 +813,15 @@ pub fn write_receipt(
     snapshot: &SourceSnapshot,
     produced: &[FileEntry],
 ) -> io::Result<()> {
-    let (artifacts, signed_code) = artifacts(app, produced)?;
+    write_receipt_for(AppIdentity::Public, app, snapshot, produced)
+}
+pub(crate) fn write_receipt_for(
+    product: AppIdentity,
+    app: &Path,
+    snapshot: &SourceSnapshot,
+    produced: &[FileEntry],
+) -> io::Result<()> {
+    let (artifacts, signed_code) = artifacts(app, produced, product)?;
     save(
         app,
         &Receipt {
@@ -822,9 +834,13 @@ pub fn write_receipt(
         None,
     )
 }
-fn inspect_inner(app: &Path, produced: &[FileEntry]) -> io::Result<(Receipt, String)> {
+fn inspect_inner(
+    app: &Path,
+    produced: &[FileEntry],
+    product: AppIdentity,
+) -> io::Result<(Receipt, String)> {
     let (receipt, digest) = receipt(app)?;
-    let (artifacts, code) = artifacts(app, produced)?;
+    let (artifacts, code) = artifacts(app, produced, product)?;
     if receipt.artifacts != artifacts || receipt.signed_code != code {
         return Err(invalid(
             "Signed product artifacts differ from the sealed source-build receipt",
@@ -835,14 +851,22 @@ fn inspect_inner(app: &Path, produced: &[FileEntry]) -> io::Result<(Receipt, Str
 /// The distribution caller must also verify the outer Apple app signature.
 /// This entry point verifies the sealed receipt without needing a checkout.
 pub fn inspect_sealed_receipt(app: &Path, produced: &[FileEntry]) -> io::Result<()> {
-    inspect_inner(app, produced).map(|_| ())
+    inspect_inner(app, produced, AppIdentity::Public).map(|_| ())
 }
 pub fn verify_receipt(
     app: &Path,
     expected: &SourceSnapshot,
     produced: &[FileEntry],
 ) -> io::Result<()> {
-    let (receipt, _) = inspect_inner(app, produced)?;
+    verify_receipt_for(AppIdentity::Public, app, expected, produced)
+}
+pub(crate) fn verify_receipt_for(
+    product: AppIdentity,
+    app: &Path,
+    expected: &SourceSnapshot,
+    produced: &[FileEntry],
+) -> io::Result<()> {
+    let (receipt, _) = inspect_inner(app, produced, product)?;
     if receipt.source != expected.provenance {
         return Err(invalid(
             "Installed candidate does not match the reviewed source checkpoint",
@@ -850,7 +874,12 @@ pub fn verify_receipt(
     }
     Ok(())
 }
-fn verify_outer(app: &Path, receipt: &Receipt, runner: &dyn Runner) -> io::Result<()> {
+fn verify_outer(
+    app: &Path,
+    receipt: &Receipt,
+    product: AppIdentity,
+    runner: &dyn Runner,
+) -> io::Result<()> {
     let team = &receipt
         .signed_code
         .get(MAIN_PATH)
@@ -859,7 +888,7 @@ fn verify_outer(app: &Path, receipt: &Receipt, runner: &dyn Runner) -> io::Resul
         .team;
     let requirement = format!(
         "=anchor apple generic and identifier \"{}\" and certificate leaf[subject.OU] = \"{team}\"",
-        distribution::BUNDLE_ID
+        product.identifier()
     );
     distribution::checked(
         runner,
@@ -881,8 +910,16 @@ pub fn load_verified_sealed_receipt(
     produced: &[FileEntry],
     runner: &dyn Runner,
 ) -> io::Result<VerifiedSourceReceipt> {
-    let (receipt, receipt_sha256) = inspect_inner(app, produced)?;
-    verify_outer(app, &receipt, runner)?;
+    load_verified_sealed_receipt_for(AppIdentity::Public, app, produced, runner)
+}
+pub(crate) fn load_verified_sealed_receipt_for(
+    product: AppIdentity,
+    app: &Path,
+    produced: &[FileEntry],
+    runner: &dyn Runner,
+) -> io::Result<VerifiedSourceReceipt> {
+    let (receipt, receipt_sha256) = inspect_inner(app, produced, product)?;
+    verify_outer(app, &receipt, product, runner)?;
     if distribution::bundle_files(app)? != produced {
         return Err(invalid(
             "Signed app changed during source receipt verification",
@@ -925,7 +962,7 @@ pub fn rebind_verified_receipt(
     if app != old.app || distribution::digest_file(&app.join(RECEIPT_PATH))? != old.receipt_sha256 {
         return Err(invalid("Re-signing receipt authority is stale"));
     }
-    let (artifacts, signed_code) = artifacts(app, produced)?;
+    let (artifacts, signed_code) = artifacts(app, produced, AppIdentity::Public)?;
     if signed_code != old.receipt.signed_code {
         return Err(invalid(
             "Re-signing changed executable code identity or Apple Team",
@@ -1268,6 +1305,29 @@ mod tests {
         assert!(verify_receipt(&app, &source, &distribution::bundle_files(&app).unwrap()).is_err());
     }
     #[test]
+    fn public_and_development_bundles_cannot_exchange_receipts() {
+        let fixture = Fixture::new();
+        let source = capture(&fixture.root, &fixture).unwrap();
+        let app = fixture.app();
+        let mut files = distribution::bundle_files(&app).unwrap();
+        write_receipt(&app, &source, &files).unwrap();
+        files = distribution::bundle_files(&app).unwrap();
+        assert!(
+            load_verified_sealed_receipt_for(AppIdentity::RustDev, &app, &files, &fixture).is_err()
+        );
+        fs::remove_file(app.join(RECEIPT_PATH)).unwrap();
+        fs::write(
+            app.join(MAIN_PATH),
+            mach(AppIdentity::RustDev.identifier(), 0x0100000c, 1, 2, 0),
+        )
+        .unwrap();
+        files = distribution::bundle_files(&app).unwrap();
+        write_receipt_for(AppIdentity::RustDev, &app, &source, &files).unwrap();
+        files = distribution::bundle_files(&app).unwrap();
+        load_verified_sealed_receipt_for(AppIdentity::RustDev, &app, &files, &fixture).unwrap();
+        assert!(load_verified_sealed_receipt(&app, &files, &fixture).is_err());
+    }
+    #[test]
     fn opaque_rebinding_requires_outer_signature_and_retains_same_team() {
         let fixture = Fixture::new();
         let source = capture(&fixture.root, &fixture).unwrap();
@@ -1318,7 +1378,14 @@ mod tests {
         fs::write(&path, duplicate).unwrap();
         assert!(inspect_sealed_receipt(&app, &distribution::bundle_files(&app).unwrap()).is_err());
         fs::remove_file(app.join(MAIN_PATH)).unwrap();
-        assert!(artifacts(&app, &distribution::bundle_files(&app).unwrap()).is_err());
+        assert!(
+            artifacts(
+                &app,
+                &distribution::bundle_files(&app).unwrap(),
+                AppIdentity::Public
+            )
+            .is_err()
+        );
     }
     #[test]
     fn universal_code_checks_every_slice_and_rejects_overlap() {
