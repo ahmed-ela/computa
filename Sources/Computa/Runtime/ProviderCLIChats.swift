@@ -133,6 +133,9 @@ actor ProviderCLIChats {
         do {
             _ = try await initialize(conn)
             let config = try await rpc(conn, "session/new", ["cwd": directory.path, "mcpServers": [Any]()])
+            guard let session = config["sessionId"] as? String, !session.isEmpty else {
+                throw AgentCLIError.protocolError("The provider did not confirm a CLI session.")
+            }
             var seen = Set<String>()
             let options = AgentCLIModels(session: config).entries.compactMap { row -> LocalModelOption? in
                 let id = provider.route + "/model/" + row.id

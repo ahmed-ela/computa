@@ -5,7 +5,7 @@ struct ModelProviderSetup: Codable, Equatable, Sendable {
     let route: String
     let name: String
     let connected: Bool
-    enum CheckStatus: String, Codable, Sendable { case checking, signInRequired, unavailable }
+    enum CheckStatus: String, Codable, Sendable { case checking, installRequired, signInRequired, settingUp, unavailable }
     var checkStatus: CheckStatus? = nil
     var detail: String? = nil
 
@@ -69,6 +69,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let appearance: String
     let browserAddressPlacement: BrowserAddressPlacement
     let accessMode: String
+    let defaultThinkingEffort: String?
     let defaultModel: String
     let modelOptions: [LocalModelOption]
     let selectedModelAvailableForNewPrompt: Bool
@@ -148,10 +149,12 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         appearance = state.appearance.rawValue
         browserAddressPlacement = state.browserAddressPlacement
         accessMode = state.accessMode.rawValue
+        defaultThinkingEffort = state.defaultThinkingEffort
         defaultModel = state.defaultModel
         modelOptions = state.modelOptions
         selectedModelAvailableForNewPrompt = LocalModelOption.availableForNewPrompt(
-            state.selectedTask?.model ?? state.defaultModel, in: modelOptions)
+            state.selectedTask?.model ?? state.defaultModel,
+            thinkingEffort: state.selectedTask.map(\.thinkingEffort) ?? state.defaultThinkingEffort, in: modelOptions)
         var setups = WebsiteModelCatalog.discoveryProviders.map { provider in
             ModelProviderSetup(route: "browser/" + provider, name: WebsiteModelCatalog.providerLabel(provider),
                 connected: state.websiteModelChoices.contains { choice in choice.provider == provider }
@@ -163,7 +166,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
                 connected: state.apiProviders.contains(where: \.isAlibabaModelStudioInference)))
         }
         setups.append(ModelProviderSetup(route: InstalledCodexCLI.route, name: "Codex CLI",
-            connected: !state.installedCLIOptions.isEmpty, checkStatus: state.installedCLICheckStatus,
+            connected: !state.installedCLIOptions.isEmpty, checkStatus: state.cliSetupInProgress(InstalledCodexCLI.route) ? .settingUp : state.installedCLICheckStatus,
             detail: state.installedCLIError))
         setups += state.providerCLISetups
         providerSetups = setups
@@ -195,6 +198,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
     let updatedAt: TimeInterval
     let workspace: String
     let model: String
+    let thinkingEffort: String?
     let hasBoundThread: Bool
     let modelSelectable: Bool
     let queuedPrompts: [QueuedPrompt]
@@ -240,6 +244,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         updatedAt = task.updatedAt.timeIntervalSince1970
         workspace = task.workspace
         model = task.model
+        thinkingEffort = task.thinkingEffort
         hasBoundThread = task.runtimeThreadID != nil
         self.modelSelectable = modelSelectable
         self.queuedPrompts = queuedPrompts
@@ -262,7 +267,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, summary, status, statusTone, updatedAt, workspace, model, modelSelectable, hasBoundThread
+        case id, title, summary, status, statusTone, updatedAt, workspace, model, thinkingEffort, modelSelectable, hasBoundThread
         case queuedPrompts, queuePaused, canStartQueuedTurn, canSteer, isBusy, websiteSessionCleanupAvailable
         case websiteSessionCleanupInProgress, websiteSessionCleanupOutcome, websiteSessionCleanupReceiptSaved
         case activeTurnStartedAt, activeActivityGroupID, hasUnreadCompletion, unreadCompletionID, branch, entries
@@ -278,6 +283,7 @@ struct WebTaskSnapshot: Codable, Equatable, Sendable {
         updatedAt = try values.decode(TimeInterval.self, forKey: .updatedAt)
         workspace = try values.decode(String.self, forKey: .workspace)
         model = try values.decode(String.self, forKey: .model)
+        thinkingEffort = try values.decodeIfPresent(String.self, forKey: .thinkingEffort)
         hasBoundThread = try values.decodeIfPresent(Bool.self, forKey: .hasBoundThread) ?? false
         modelSelectable = try values.decode(Bool.self, forKey: .modelSelectable)
         queuedPrompts = try values.decode([QueuedPrompt].self, forKey: .queuedPrompts)

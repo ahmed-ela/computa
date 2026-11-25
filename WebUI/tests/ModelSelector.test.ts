@@ -59,6 +59,24 @@ const selector = (model = options[1].id, label = 'Task model', disabled = false)
 })).html;
 
 describe('website model selectors', () => {
+  test('only models with effort choices get a thinking submenu, and selecting an effort binds it to that model', async () => {
+    const model = { ...options[1], id: 'cli/codex/model/example', label: 'Codex CLI / Example', thinkingEfforts: ['low', 'xhigh'], defaultThinkingEffort: 'low' };
+    const selected: unknown[][] = [];
+    selectionHandlers.length = 0;
+    const html = renderToStaticMarkup(h(ModelSelector, {
+      options: [model, options[1]], model: model.id, thinkingEffort: 'xhigh', label: 'Task model',
+      onSelect: (...args: unknown[]) => selected.push(args),
+    })).html;
+    const menus = await attributesBySelector(html, '[data-submenu-content]', 'aria-label');
+    expect(menus.filter(label => label.endsWith('thinking effort'))).toEqual(['Example thinking effort']);
+    expect(await textBySelector(html, '[aria-label="Example thinking effort"] [role="menuitemradio"]')).toEqual(['Default (Low)', 'Low', 'Extra high']);
+    expect(await textBySelector(html, '.model-effort-value')).toEqual(['Extra high']);
+    selectionHandlers[1]('xhigh');
+    selectionHandlers[1]('unsupported');
+    selectionHandlers[1]('');
+    expect(selected).toEqual([[model.id, 'xhigh'], [model.id]]);
+  });
+
   test('Codex CLI has its own setup and preserves the exact discovered model IDs', async () => {
     const setup = { route: 'cli/codex', name: 'Codex CLI', connected: false };
     const render = (choices: ModelOption[], detail?: string) => renderToStaticMarkup(h(ModelSelector, {
@@ -72,6 +90,20 @@ describe('website model selectors', () => {
     const html = render(models);
     expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual(models.map(m => m.id));
     expect(html).toContain('Task model: Codex CLI / one');
+  });
+
+  test('first launch presents the specific action for a missing, signed-out or in-progress CLI', async () => {
+    for (const [checkStatus, action] of [
+      ['installRequired', 'Install Codex CLI…'], ['signInRequired', 'Sign in with Codex CLI…'], ['settingUp', 'Stop waiting'],
+    ] as const) {
+      const html = renderToStaticMarkup(h(ModelSelector, {
+        options: [], setups: [{route: 'cli/codex', name: 'Codex CLI', connected: false, checkStatus}],
+        model: '', label: 'Task model', canConnect: true, onSelect: () => {},
+      })).html;
+      expect(html).toContain('Task model: Connect a provider');
+      expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toContain(action);
+      expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([]);
+    }
   });
 
   test('a bound CLI chat shows only its own provider and preserves nested model IDs', async () => {
@@ -103,13 +135,13 @@ describe('website model selectors', () => {
     const render = (models: ModelOption[]) => renderToStaticMarkup(h(ModelSelector, { ...props, options: models })).html;
     const html = render([saved]);
     expect((await renderedProviderGroups(html)).map((group) => group.name)).toEqual(names);
-    expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual(names.map(() => 'Check available models'));
+    expect(await textBySelector(html, '[data-submenu-content] [role="menuitem"]')).toEqual(names.flatMap(name => ['Sign in to ' + name, 'Check available models']));
     expect(await attributesBySelector(html, '[role="menuitemradio"]', 'data-value')).toEqual([]);
     const connected = render([saved, options[3]]);
     expect(connected).toContain('Task model: Choose model');
     expect(await attributesBySelector(connected, '[role="menuitemradio"]', 'data-value')).toEqual([options[3].id]);
     expect(connected).not.toContain('Sign in to Gemini');
-    expect(connected).not.toContain('Sign in to');
+    expect(connected).toContain('Sign in to ChatGPT');
   });
 
   test('only a confirmed signed-out result offers sign-in; other states allow a scoped check', async () => {

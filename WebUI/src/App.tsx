@@ -542,15 +542,16 @@ function Composer({
               key={task.id}
               className="model-picker"
               label="Task model"
-              model={task.model}
+              model={task.model} thinkingEffort={task.thinkingEffort}
               boundToRuntime={task.hasBoundThread}
               options={snapshot.modelOptions}
               setups={snapshot.providerSetups}
               canConnect={snapshot.canRefreshWebsiteModels === true}
               onConnect={(route) => post({ action: 'connectModelProvider', route })}
+              onCLISetup={(route, operation) => post({ action: 'manageCLISetup', route, operation })}
               onRefresh={post}
               disabled={!task.modelSelectable}
-              onSelect={(modelID) => post({ action: 'setTaskModel', taskID: task.id, modelID })}
+              onSelect={(modelID, thinkingEffort) => post({ action: 'setTaskModel', taskID: task.id, modelID, ...(thinkingEffort ? { thinkingEffort } : {}) })}
             />
             {isCodexCLIModel(task.model) ? (
               <CodexCLIUsage key={task.id} buckets={snapshot.codexCLIUsage}
@@ -768,11 +769,12 @@ function Inspector({ snapshot, task }: { snapshot: AppSnapshot; task: TaskSnapsh
 }
 
 function DefaultModelSelector({ snapshot }: { snapshot: AppSnapshot }) {
-  return <ModelSelector label="Default model for new tasks" model={snapshot.defaultModel}
+  return <ModelSelector label="Default model for new tasks" model={snapshot.defaultModel} thinkingEffort={snapshot.defaultThinkingEffort}
     options={snapshot.modelOptions} setups={snapshot.providerSetups} canConnect={snapshot.canRefreshWebsiteModels === true}
     onConnect={(route) => post({ action: 'connectModelProvider', route })}
+    onCLISetup={(route, operation) => post({ action: 'manageCLISetup', route, operation })}
     onRefresh={post}
-    onSelect={(modelID) => post({ action: 'setDefaultModel', modelID })} />;
+    onSelect={(modelID, thinkingEffort) => post({ action: 'setDefaultModel', modelID, ...(thinkingEffort ? { thinkingEffort } : {}) })} />;
 }
 
 function SettingsModal({ snapshot, nativeHost }: { snapshot: AppSnapshot; nativeHost: boolean }) {

@@ -163,6 +163,7 @@ struct AgentTask: Identifiable, Hashable, Codable, Sendable {
     var updatedAt: Date
     var workspace: String
     var model: String
+    var thinkingEffort: String?
     var branch: String?
     var entries: [TimelineEntry]
     var turnDiffs: [AgentTurnDiff]
@@ -176,6 +177,7 @@ struct AgentTask: Identifiable, Hashable, Codable, Sendable {
         updatedAt: Date = .now,
         workspace: String,
         model: String,
+        thinkingEffort: String? = nil,
         branch: String? = nil,
         entries: [TimelineEntry] = [],
         turnDiffs: [AgentTurnDiff] = []
@@ -188,6 +190,7 @@ struct AgentTask: Identifiable, Hashable, Codable, Sendable {
         self.updatedAt = updatedAt
         self.workspace = workspace
         self.model = model
+        self.thinkingEffort = thinkingEffort
         self.branch = branch
         self.entries = entries
         self.turnDiffs = turnDiffs

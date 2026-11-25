@@ -34,6 +34,8 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         // As in production, installed CLI and bundled engine must own distinct
         // inference servers and their respective tool-ownership callbacks.
         native.apiModelServerForTesting = nil
+        // Two processes cannot append independent wire sequences to the same test trace.
+        native.protocolTracePath = configuration.protocolTracePath.map { $0 + ".installed-cli" }
         #endif
         native.executable = .installedCLI
         native.backend = .external
@@ -112,6 +114,11 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     }
 
     func submit(prompt: String, toTaskID taskID: String, modelID: String, accessMode: AccessMode) async throws {
+        try await submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode, thinkingEffort: nil)
+    }
+
+    func submit(prompt: String, toTaskID taskID: String, modelID: String, accessMode: AccessMode, thinkingEffort: String?) async throws {
+        if thinkingEffort != nil, InstalledCodexCLI.slug(modelID) == nil { throw AgentRuntimeCapabilityError.thinkingEffortUnsupported }
         listen()
         if let provider = ProviderCLI(modelID: modelID) {
             guard owners[taskID] == nil, providerOwners[taskID].map({ $0 == provider }) != false else { throw InstalledCodexCLI.Failure.differentRuntime }
@@ -130,7 +137,7 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         defer { submitting.remove(taskID) }
         owners[taskID] = isCLI
         let target = runtime(for: taskID)
-        do { try await target.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode) }
+        do { try await target.submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode, thinkingEffort: thinkingEffort) }
         catch {
             if !(await target.hasBoundThread(taskID: taskID)) { owners.removeValue(forKey: taskID) }
             throw error

@@ -84,20 +84,57 @@ export function groupModelOptions(options: ModelOption[], model: string, setups:
   return [...groups.values()];
 }
 
-export function ModelSelector({ options, model, label, disabled = false, className,
-  setups = [], canConnect = false, boundToRuntime = false, onConnect, onRefresh, onSelect }: { boundToRuntime?: boolean; options: ModelOption[]; setups?: ModelProviderSetup[];
-  onRefresh?: (action: WebsiteModelsRefreshAction) => void; canConnect?: boolean; onConnect?: (route: string) => void; model: string; label: string; disabled?: boolean;
-  className?: string; onSelect: (model: string) => void }) {
+function effortLabel(value: string): string {
+  return value === 'xhigh' ? 'Extra high' : value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function ThinkingEffortSubmenu({ option, selected, effort, disabled, onSelect }: {
+  option: ModelOption; selected: boolean; effort?: string; disabled: boolean; onSelect: (model: string, effort?: string) => void;
+}) {
+  const name = modelOptionLabel(option);
+  return <DropdownMenuSub>
+    <DropdownMenuSubTrigger textValue={name} title={option.detail} disabled={disabled} className="model-provider-option">
+      <span className="model-provider-name">{name}</span>
+      {selected && <Icon name="check" size={12} />}
+    </DropdownMenuSubTrigger>
+    <DropdownMenuPortal>
+      <DropdownMenuSubContent className="model-selector-submenu" sideOffset={6} collisionPadding={12} aria-label={name + ' thinking effort'}>
+        <div className="model-setup-detail">Thinking effort</div>
+        <DropdownMenuRadioGroup value={selected ? effort ?? '' : undefined} onValueChange={(value: string) => onSelect(option.id, value || undefined)}>
+          <DropdownMenuRadioItem value="" disabled={disabled}>
+            {option.defaultThinkingEffort ? 'Default (' + effortLabel(option.defaultThinkingEffort) + ')' : 'Provider default'}
+          </DropdownMenuRadioItem>
+          {option.thinkingEfforts?.map(value => <DropdownMenuRadioItem key={value} value={value} textValue={effortLabel(value)} disabled={disabled}>
+            {effortLabel(value)}
+          </DropdownMenuRadioItem>)}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuSubContent>
+    </DropdownMenuPortal>
+  </DropdownMenuSub>;
+}
+
+type CLISetupOperation = Extract<NativeAction, { action: 'manageCLISetup' }>['operation'];
+export function ModelSelector({ options, model, thinkingEffort, label, disabled = false, className,
+  setups = [], canConnect = false, boundToRuntime = false, onConnect, onCLISetup, onRefresh, onSelect }: { boundToRuntime?: boolean; options: ModelOption[]; setups?: ModelProviderSetup[];
+  onRefresh?: (action: WebsiteModelsRefreshAction) => void; canConnect?: boolean; onConnect?: (route: string) => void; onCLISetup?: (route: string, operation: CLISetupOperation) => void; model: string; label: string; disabled?: boolean;
+  thinkingEffort?: string; className?: string; onSelect: (model: string, effort?: string) => void }) {
   const selected = options.find((option) => option.id === model);
+  const displayedEffort = thinkingEffort ?? selected?.defaultThinkingEffort;
+  const effortText = thinkingEffort && selected && !selected.thinkingEfforts?.includes(thinkingEffort)
+    ? (selected.thinkingEfforts?.length ? 'Choose effort' : 'Reselect model')
+    : displayedEffort && effortLabel(displayedEffort);
   const cliRoute = model.startsWith('cli/') ? model.split('/').slice(0, 2).join('/') : undefined;
   const groups = groupModelOptions(options, model, setups).filter(group =>
     !boundToRuntime || (cliRoute ? group.route === cliRoute : !group.route.startsWith('cli/')));
   const needsSelection = setups.length > 0 && (!selected || selected.available === false || selected.selectable === false);
+  const setupLabel = groups.some(group => group.options.some(option => option.available !== false)) ? 'Choose model' : 'Connect a provider';
   const [open, setOpen] = useState(false);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
-  const selectModel = (value: string) => {
-    if (disabled || !groups.some((group) => group.options.some((option) => option.id === value && option.available !== false))) return;
-    onSelect(value);
+  const selectModel = (value: string, effort?: string) => {
+    const option = groups.flatMap((group) => group.options).find((entry) => entry.id === value);
+    if (disabled || !option || option.available === false || (effort !== undefined && !option.thinkingEfforts?.includes(effort))) return;
+    if (effort === undefined) onSelect(value);
+    else onSelect(value, effort);
     setOpen(false);
   };
   return (
@@ -105,8 +142,9 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
       <DropdownMenuTrigger asChild disabled={disabled}>
         <Button type="button" variant="outline" size="sm" disabled={disabled}
           className={`model-selector-trigger ${className ?? ''}`}
-          aria-label={`${label}: ${needsSelection ? 'Choose model' : selected ? fullModelLabel(selected) : model}`} title={selected?.detail ?? model}>
-          {needsSelection ? <span>Choose model</span> : <ModelLabel model={model} option={selected} group={groups.find((group) => group.options.some((option) => option.id === model))} />}
+          aria-label={`${label}: ${needsSelection ? setupLabel : selected ? fullModelLabel(selected) : model}${!needsSelection && effortText ? ", " + effortText + " thinking effort" : ""}`} title={selected?.detail ?? model}>
+          {needsSelection ? <span>{setupLabel}</span> : <ModelLabel model={model} option={selected} group={groups.find((group) => group.options.some((option) => option.id === model))} />}
+          {!needsSelection && effortText && <span className="model-effort-value">{effortText}</span>}
           <span className="model-selector-chevron"><Icon name="chevron" size={12} /></span>
         </Button>
       </DropdownMenuTrigger>
@@ -124,7 +162,10 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
             <DropdownMenuSubContent className="model-selector-submenu" sideOffset={6} collisionPadding={12}
               aria-label={`${group.name} ${group.id === 'deepseek' ? 'modes' : 'models'}`}>
               <DropdownMenuRadioGroup value={model} onValueChange={selectModel}>
-                {group.options.filter((option) => !group.setup || option.available !== false).map((option) => <DropdownMenuRadioItem key={option.id} value={option.id}
+                {group.options.filter((option) => !group.setup || option.available !== false).map((option) => option.thinkingEfforts?.length ? (
+                  <ThinkingEffortSubmenu key={option.id} option={option} selected={model === option.id}
+                    effort={thinkingEffort} disabled={disabled || option.available === false} onSelect={selectModel} />
+                ) : <DropdownMenuRadioItem key={option.id} value={option.id}
                   textValue={modelOptionLabel(option)} title={option.detail} disabled={disabled || option.available === false}>
                   <span className="model-option-name">{modelOptionLabel(option)}</span>
                   {option.available === false && <span className="model-option-unavailable"> (unavailable)</span>}
@@ -132,7 +173,7 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
               </DropdownMenuRadioGroup>
               {group.setup && <ProviderSetupActions setup={group.setup}
                 hasModels={group.options.some((option) => option.available !== false)} disabled={disabled || !canConnect}
-                onConnect={() => { if (!group.route.startsWith('cli/')) setOpen(false); onConnect?.(group.route); }} onRefresh={onRefresh} />}
+                onCLISetup={(operation) => onCLISetup?.(group.route, operation)} onConnect={() => { if (!group.route.startsWith('cli/')) setOpen(false); onConnect?.(group.route); }} onRefresh={onRefresh} />}
             </DropdownMenuSubContent>
           </DropdownMenuPortal>
         </DropdownMenuSub>)}
@@ -142,16 +183,27 @@ export function ModelSelector({ options, model, label, disabled = false, classNa
   );
 }
 
-function ProviderSetupActions({ setup, hasModels, disabled, onConnect, onRefresh }: {
-  setup: ModelProviderSetup; hasModels: boolean; disabled: boolean; onConnect: () => void; onRefresh?: (action: WebsiteModelsRefreshAction) => void;
+function ProviderSetupActions({ setup, hasModels, disabled, onConnect, onCLISetup, onRefresh }: {
+  setup: ModelProviderSetup; hasModels: boolean; disabled: boolean; onConnect: () => void; onCLISetup: (operation: CLISetupOperation) => void; onRefresh?: (action: WebsiteModelsRefreshAction) => void;
 }) {
-  if (setup.route.startsWith('cli/')) return <>
+  if (setup.route.startsWith('cli/')) {
+    if (setup.checkStatus === 'settingUp') return <>
+      <div role="status" className="model-setup-detail">Continue setup in Terminal. Kolmogor will check the connection when it finishes.</div>
+      <DropdownMenuItem onSelect={() => onCLISetup('stopWaiting')}>Stop waiting</DropdownMenuItem>
+    </>;
+    return <>
     {setup.detail && <div role="status" className="model-setup-detail">{setup.detail}</div>}
+    {setup.checkStatus === 'installRequired' && <DropdownMenuItem disabled={disabled} onSelect={() => onCLISetup('install')}>
+      Install {setup.name}…
+    </DropdownMenuItem>}
+    {(setup.checkStatus === 'signInRequired' || setup.checkStatus === 'unavailable') && <DropdownMenuItem disabled={disabled}
+      onSelect={() => onCLISetup('signIn')}>Sign in with {setup.name}…</DropdownMenuItem>}
     <DropdownMenuItem disabled={disabled || setup.checkStatus === 'checking'} onSelect={(event: Event) => {
       event.preventDefault();
       onConnect();
     }}>{setup.checkStatus === 'checking' ? 'Checking available models…' : hasModels ? 'Refresh models' : 'Check available models'}</DropdownMenuItem>
   </>;
+  }
   if (hasModels) {
     return setup.route === 'browser/kimi'
       ? <DropdownMenuItem disabled={disabled} onSelect={onConnect}>Manage Kimi sign-in</DropdownMenuItem> : null;
@@ -162,8 +214,8 @@ function ProviderSetupActions({ setup, hasModels, disabled, onConnect, onRefresh
   </DropdownMenuItem>;
   const status = setup.checkStatus;
   return <>
-    {(status === 'signInRequired' || status === 'unavailable') && <DropdownMenuItem disabled={disabled} onSelect={onConnect}>
-      {status === 'signInRequired' ? 'Sign in to ' + setup.name : 'Open ' + setup.name}
+    {(status !== 'checking') && <DropdownMenuItem disabled={disabled} onSelect={onConnect}>
+      {status === 'unavailable' ? 'Open ' + setup.name : 'Sign in to ' + setup.name}
     </DropdownMenuItem>}
     <DropdownMenuItem disabled={disabled || !onRefresh || status === 'checking'} onSelect={(event: Event) => {
       event.preventDefault();

@@ -1125,7 +1125,11 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
     }
 
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
-        try await core.submit(prompt: prompt, taskID: taskID, modelID: modelID, accessMode: accessMode)
+        try await submit(prompt: prompt, toTaskID: taskID, modelID: modelID, accessMode: accessMode, thinkingEffort: nil)
+    }
+
+    func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode, thinkingEffort: String?) async throws {
+        try await core.submit(prompt: prompt, taskID: taskID, modelID: modelID, accessMode: accessMode, thinkingEffort: thinkingEffort)
     }
 
     func configureWorkspace(path: String, forTaskID taskID: AgentTask.ID) async throws {
@@ -2216,7 +2220,7 @@ private extension CodexAppServerRuntime {
             }
         }
 
-        func submit(prompt: String, taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws {
+        func submit(prompt: String, taskID: AgentTask.ID, modelID: String, accessMode: AccessMode, thinkingEffort: String?) async throws {
             let dispatchProfile = WebsiteDispatchProfile.begin(taskID: taskID, modelID: modelID, origin: .runtime)
             dispatchProfile?.mark(.coreEntered)
             defer { dispatchProfile?.mark(.coreExited) }
@@ -2240,6 +2244,7 @@ private extension CodexAppServerRuntime {
             guard !isPreparingCommandShutdown, !commandCleanupTasks.contains(taskID) else {
                 throw RuntimeError.serverError("Wait for this task's command cleanup to finish.")
             }
+            guard thinkingEffort == nil || configuration.usesInstalledCLI else { throw AgentRuntimeCapabilityError.thinkingEffortUnsupported }
             try configuration.validateSelectedModel(modelID)
             try requireHeadlessInferenceIdle(for: modelID)
             guard turnIdentity.activeTurnID(for: taskID) == nil,
@@ -2259,8 +2264,11 @@ private extension CodexAppServerRuntime {
             }
             let runtimeStarted = ContinuousClock.now
             try await start()
+            var turnEffort: String? = configuration.reasoningEffort
             if configuration.usesInstalledCLI {
-                guard try await installedCLIModels().contains(where: { $0.id == modelID }) else { throw InstalledCodexCLI.Failure.unavailable }
+                guard let option = try await installedCLIModels().first(where: { $0.id == modelID }) else { throw InstalledCodexCLI.Failure.unavailable }
+                guard option.allowsThinkingEffort(thinkingEffort) else { throw AgentRuntimeCapabilityError.thinkingEffortUnsupported }
+                turnEffort = thinkingEffort ?? option.defaultThinkingEffort
                 if threadForTask[taskID] == nil, UUID(uuidString: taskID) != nil,
                    try cliThreads.model(threadID: taskID) != nil {
                     threadForTask[taskID] = taskID
@@ -2486,7 +2494,7 @@ private extension CodexAppServerRuntime {
                     params: [
                         "threadId": threadID,
                         "input": try computerTurnInput(prompt: prompt, threadID: threadID, modelID: modelID),
-                        "effort": configuration.usesInstalledCLI ? NSNull() as Any : configuration.reasoningEffort,
+                        "effort": turnEffort as Any,
                         "model": InstalledCodexCLI.slug(modelID) ?? modelID,
                         "sandboxPolicy": accessMode.sandboxPolicy,
                         "approvalPolicy": accessMode.approvalPolicy,

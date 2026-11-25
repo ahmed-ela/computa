@@ -110,9 +110,9 @@ enum InstalledCodexCLI {
         case missing, incompatible, signedOut, invalidCatalog, unavailable, differentRuntime, busy
         var errorDescription: String? {
             switch self {
-            case .missing: "Install Codex CLI, run codex login in Terminal, then check available models."
+            case .missing: "Codex CLI is missing. Install it to connect your account."
             case .incompatible: "No installed Codex CLI could provide Kolmogor’s app-server interface. Update Codex CLI and check available models."
-            case .signedOut: "Run codex login in Terminal, then check available models."
+            case .signedOut: "Codex CLI is installed. Sign in to load your account’s models."
             case .invalidCatalog: "Codex CLI returned an unreadable model catalog. Update the CLI and check again."
             case .unavailable: "This model is unavailable in the current Codex CLI account. Check available models and select one."
             case .busy: "A message is already being submitted for this chat."
@@ -131,6 +131,7 @@ enum InstalledCodexCLI {
     static var candidateURLs: [URL] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [home.appendingPathComponent(".local/bin/codex").path,
+                home.appendingPathComponent(".local/share/kolmogor/bin/codex").path,
                 "/opt/homebrew/bin/codex", "/usr/local/bin/codex",
                 "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
                 "/Applications/Codex.app/Contents/Resources/codex"].map { URL(fileURLWithPath: $0) }
@@ -149,6 +150,9 @@ enum InstalledCodexCLI {
             let displayName: String
             let description: String?
             let hidden: Bool
+            struct Effort: Decodable { let reasoningEffort: String }
+            var supportedReasoningEfforts: [Effort]?
+            var defaultReasoningEffort: String?
         }
         let data: [Model]
         let nextCursor: String?
@@ -165,7 +169,14 @@ enum InstalledCodexCLI {
                 let id = prefix + row.model
                 guard slug(id) != nil, seen.insert(id).inserted else { continue }
                 let label = row.displayName.isEmpty ? row.model : row.displayName
-                options.append(LocalModelOption(id: id, label: "Codex CLI / " + label, detail: row.description ?? row.model, highMemory: false))
+                var efforts: [String] = []
+                for choice in row.supportedReasoningEfforts ?? [] {
+                    let value = choice.reasoningEffort
+                    if !value.isEmpty, !efforts.contains(value) { efforts.append(value) }
+                }
+                options.append(LocalModelOption(id: id, label: "Codex CLI / " + label, detail: row.description ?? row.model,
+                    highMemory: false, thinkingEfforts: efforts.isEmpty ? nil : efforts,
+                    defaultThinkingEffort: row.defaultReasoningEffort.flatMap { efforts.contains($0) ? $0 : nil }))
             }
             cursor = result.nextCursor
             if let cursor, !cursors.insert(cursor).inserted { throw Failure.invalidCatalog }

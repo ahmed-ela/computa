@@ -262,7 +262,7 @@ final class ProviderCLIIntegrationTests: XCTestCase {
                        ["cli/codex", "cli/antigravity", "cli/qwen", "cli/kimi", "cli/opencode", "cli/claude"])
         XCTAssertFalse(initial.modelOptions.contains { $0.id.hasPrefix("cli/") })
         state.connectModelProvider(route: route)
-        let missing = try await waitForSetup { $0.checkStatus == .unavailable }
+        let missing = try await waitForSetup { $0.checkStatus == .installRequired }
         XCTAssertTrue(missing.detail?.contains("Install OpenCode") == true)
         XCTAssertFalse(state.setDefaultModel(ProviderCLI.opencode.modelID))
 
@@ -293,9 +293,38 @@ final class ProviderCLIIntegrationTests: XCTestCase {
 
         try FileManager.default.removeItem(at: binary)
         state.connectModelProvider(route: route)
-        _ = try await waitForSetup { $0.checkStatus == .unavailable }
+        _ = try await waitForSetup { $0.checkStatus == .installRequired }
         XCTAssertFalse(state.setDefaultModel(model))
         XCTAssertEqual(state.defaultModel, model)
+        var launches = 0
+        state.performCLISetup = { _, _ in
+            launches += 1
+            try await Task.sleep(for: .seconds(60))
+        }
+        state.manageCLISetup(route: "cli/unknown", operation: "install")
+        state.manageCLISetup(route: route, operation: "signIn")
+        XCTAssertEqual(launches, 0)
+        state.manageCLISetup(route: route, operation: "install")
+        state.manageCLISetup(route: route, operation: "install")
+        _ = try await waitForSetup { $0.checkStatus == .settingUp && launches == 1 }
+        state.manageCLISetup(route: route, operation: "stopWaiting")
+        _ = try await waitForSetup { $0.checkStatus == .installRequired }
+        XCTAssertFalse(state.setDefaultModel(model))
+        let signedOut = source.replacingOccurrences(of: "result = {\"sessionId\":", with: """
+            print(json.dumps({"jsonrpc":"2.0", "id":request["id"], "error":{"code":-32000,"message":"Login required"}}), flush=True)
+                    continue
+                    result = {"sessionId":
+            """)
+        state.performCLISetup = { _, intent in
+            try Data((intent == .install ? signedOut : source).utf8).write(to: binary)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
+        }
+        state.manageCLISetup(route: route, operation: "install")
+        _ = try await waitForSetup { $0.checkStatus == .signInRequired }
+        XCTAssertFalse(state.setDefaultModel(model))
+        state.manageCLISetup(route: route, operation: "signIn")
+        _ = try await waitForSetup { $0.connected }
+        XCTAssertTrue(state.setDefaultModel(model))
         _ = await runtime.shutdown()
     }
 

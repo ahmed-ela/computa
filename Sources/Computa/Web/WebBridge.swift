@@ -430,10 +430,16 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
         case "setDefaultModel":
             guard let modelID = body["modelID"] as? String else { return }
-            state.setDefaultModel(modelID)
+            guard body["thinkingEffort"] == nil || body["thinkingEffort"] is String else { return }
+            state.setDefaultModel(modelID, thinkingEffort: body["thinkingEffort"] as? String)
 
         case "refreshWebsiteModels":
             Task { @MainActor [weak self] in await self?.refreshWebsiteModels(body: body) }
+
+        case "manageCLISetup":
+            guard Set(body.keys) == ["action", "route", "operation"], let route = body["route"] as? String,
+                  let operation = body["operation"] as? String else { return }
+            state.manageCLISetup(route: route, operation: operation)
 
         case "connectModelProvider":
             guard Set(body.keys) == ["action", "route"], let route = body["route"] as? String else { return }
@@ -447,7 +453,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
             guard let modelID = body["modelID"] as? String,
                   let taskID = body["taskID"] as? String
             else { return }
-            state.setTaskModel(modelID, taskID: taskID)
+            guard body["thinkingEffort"] == nil || body["thinkingEffort"] is String else { return }
+            state.setTaskModel(modelID, taskID: taskID, thinkingEffort: body["thinkingEffort"] as? String)
 
         case "setShowToolPayloads":
             guard let value = body["value"] as? Bool else { return }

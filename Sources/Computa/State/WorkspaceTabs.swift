@@ -26,6 +26,12 @@ struct WorkspaceTabID: Codable, Hashable, Sendable {
 
 /// Relaunch metadata only. WebKit leases, runtime handles and message contents never cross launches.
 struct SavedWorkspace: Codable, Equatable {
+    struct ThinkingSelection: Codable, Equatable {
+        let model: String
+        let effort: String
+    }
+    var thinkingSelections: [String: ThinkingSelection]? = nil
+
     struct ProviderSignIn: Codable, Equatable {
         let provider: String
         let kimiProfileID: UUID?
@@ -43,16 +49,18 @@ struct SavedWorkspace: Codable, Equatable {
         let summary: String
         let workspace: String
         let model: String
+        let thinkingEffort: String?
 
         init(_ task: AgentTask) {
             title = task.title
             summary = task.summary
             workspace = task.workspace
             model = task.model
+            thinkingEffort = task.thinkingEffort
         }
 
         func task(id: String) -> AgentTask {
-            AgentTask(id: id, title: title, summary: summary, status: .draft, workspace: workspace, model: model)
+            AgentTask(id: id, title: title, summary: summary, status: .draft, workspace: workspace, model: model, thinkingEffort: thinkingEffort)
         }
     }
 

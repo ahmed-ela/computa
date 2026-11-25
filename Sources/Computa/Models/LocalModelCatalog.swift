@@ -7,10 +7,16 @@ struct LocalModelOption: Codable, Equatable, Sendable {
     let highMemory: Bool
     var available: Bool? = nil
     var selectable: Bool? = nil
+    var thinkingEfforts: [String]? = nil
+    var defaultThinkingEffort: String? = nil
 
-    static func availableForNewPrompt(_ model: String, in options: [Self]) -> Bool {
-        guard model.hasPrefix("browser/") || model.hasPrefix("cli/") else { return true }
-        return options.contains { $0.id == model && $0.available != false && $0.selectable != false }
+    func allowsThinkingEffort(_ effort: String?) -> Bool {
+        effort.map { thinkingEfforts?.contains($0) == true } ?? true
+    }
+
+    static func availableForNewPrompt(_ model: String, thinkingEffort: String? = nil, in options: [Self]) -> Bool {
+        guard thinkingEffort != nil || model.hasPrefix("browser/") || model.hasPrefix("cli/") else { return true }
+        return options.contains { $0.id == model && $0.available != false && $0.selectable != false && $0.allowsThinkingEffort(thinkingEffort) }
     }
 }
 
