@@ -1412,7 +1412,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     @MainActor
     func testAddressPlacementSwitchesInSettingsAndTitleBarEditsInPlace() async throws {
         let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Address placement</title>")
-        let url = try await site.start().appendingPathComponent("human/final")
+        let origin = try await site.start()
+        let url = origin.appendingPathComponent("human/final")
+        let destination = origin.appendingPathComponent("model/final")
         defer { site.stop() }
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
@@ -1438,6 +1440,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertTrue(ready)
         XCTAssertEqual(state.browserAddressPlacement, .titleBar)
         let light = try XCTUnwrap(window.standardWindowButton(.closeButton))
+        // Hit the centers of the three 22-point toolbar buttons (2-point gaps, 8-point leading inset).
+        func historyPoint(_ index: Int) -> NSPoint {
+            let leading = page.convert(page.bounds, to: nil).minX
+            return NSPoint(x: leading + 19 + CGFloat(index) * 24, y: light.convert(light.bounds, to: nil).midY)
+        }
         for (width, collapsed) in [(1100, false), (850, true)] {
             window.setContentSize(.init(width: width, height: 730))
             state.isTaskSidebarCollapsed = collapsed
@@ -1450,7 +1457,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             let field = try XCTUnwrap(editor.delegate as? NSTextField)
             let frame = field.convert(field.bounds, to: nil)
             XCTAssertEqual(frame.midY, lightY, accuracy: 3)
-            XCTAssertGreaterThan(frame.minX, pageFrame.minX)
+            XCTAssertGreaterThan(frame.minX, historyPoint(2).x)
             XCTAssertLessThanOrEqual(frame.maxX, pageFrame.maxX)
             XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: url.absoluteString.utf16.count))
             editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
@@ -1458,10 +1465,26 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
         BrowserAddressPalette.request(in: window)
         let editor = try await commandEditor("browser-address", in: host, window: window)
-        editor.insertText(url.appendingPathComponent("edited").absoluteString, replacementRange: editor.selectedRange())
+        editor.insertText(destination.absoluteString, replacementRange: editor.selectedRange())
         editor.doCommand(by: #selector(NSResponder.insertNewline(_:)))
-        let navigated = await waitForScriptBool(on: page, script: "location.pathname.endsWith('/edited')")
+        let navigated = await waitForScriptBool(on: page, script: "location.pathname === '/model/final' && document.title === 'Address placement'")
         XCTAssertTrue(navigated)
+        // Another window can own the global session selection while this window shows its own page.
+        let otherWindow = state.workspaceWindows.createTemporary()
+        let otherPageID = state.workspaceWindows.withWindow(otherWindow) { state.newWorkspaceBrowserTab(url: url) }
+        XCTAssertNotNil(otherPageID)
+        XCTAssertNotEqual(session.selectedTabID, id)
+        XCTAssertEqual(state.selectedWorkspaceTab, tab)
+        try await clickInWindow(at: historyPoint(0), window: window, throughApplication: true)
+        let wentBack = await waitForScriptBool(on: page, script: "location.pathname === '/human/final'")
+        XCTAssertTrue(wentBack)
+        try await clickInWindow(at: historyPoint(1), window: window, throughApplication: true)
+        let wentForward = await waitForScriptBool(on: page, script: "location.pathname === '/model/final' && document.title === 'Address placement'")
+        XCTAssertTrue(wentForward)
+        _ = try await page.evaluateJavaScript("window.beforeReload = true")
+        try await clickInWindow(at: historyPoint(2), window: window, throughApplication: true)
+        let reloaded = await waitForScriptBool(on: page, script: "location.pathname === '/model/final' && document.title === 'Address placement' && !window.beforeReload")
+        XCTAssertTrue(reloaded)
         func choose(_ value: String) async throws {
             state.presentSettings()
             let picker = "document.querySelector('select[aria-label=\"Address bar location\"]')"

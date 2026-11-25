@@ -141,7 +141,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       {nativeHost && snapshot.browserAddressPlacement === 'titleBar' && !currentPage && !collapsed &&
         <Button variant="ghost" size="icon-xs" aria-label="Open Google in a new tab" title="Open Google in a new tab"
           onClick={() => post({ action: 'newWorkspaceBrowserTab' })}><Icon name="browser" size={15} /></Button>}
-      {nativeHost && currentPage && !collapsed && <div className="sidebar-browser-navigation" role="group" aria-label="Browser navigation">
+      {nativeHost && snapshot.browserAddressPlacement === 'sidebar' && currentPage && !collapsed && <div className="sidebar-browser-navigation" role="group" aria-label="Browser navigation">
         <Button variant="ghost" size="icon-xs" aria-label="Back" title="Back" disabled={!currentPage.canGoBack}
           onClick={() => post({ action: 'browserNavigation', id: currentPage.id, command: 'back' })}>
           <Icon name="back" size={16} /></Button>
