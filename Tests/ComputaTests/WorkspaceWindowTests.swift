@@ -5,6 +5,55 @@ import XCTest
 
 @MainActor
 final class WorkspaceWindowTests: XCTestCase {
+    func testNumberedShortcutsCountPinsAndUseTheLastTabOfTheActiveWindow() throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let tasks = (1...10).map { AgentTask(title: "Agent \($0)", summary: "", status: .draft, workspace: "", model: "local") }
+        let state = AppState(tasks: tasks, preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let agents = tasks.map { WorkspaceTabID.agent($0.id) }
+        for agent in agents { state.workspaceTabs.open(agent) }
+        let pageID = try session.createTab()
+        let page = WorkspaceTabID.browser(try XCTUnwrap(session.humanTab(id: pageID)).workspaceID)
+        state.workspaceTabs.setPinned(page, pinned: true)
+        state.workspaceTabs.setPinned(agents[3], pinned: true)
+
+        var expected = [page, agents[3]] + agents.reversed().filter { $0 != agents[3] }
+        XCTAssertEqual(state.openWorkspaceTabs, expected)
+        for number in 1...8 {
+            state.selectNumberedWorkspaceTab(number)
+            XCTAssertEqual(state.selectedWorkspaceTab, expected[number - 1])
+        }
+        state.selectNumberedWorkspaceTab(9)
+        XCTAssertEqual(state.selectedWorkspaceTab, agents[0])
+        state.workspaceTabs.setPinned(page, pinned: false)
+        expected.swapAt(0, 1)
+        XCTAssertEqual(state.openWorkspaceTabs, expected)
+        state.selectNumberedWorkspaceTab(1)
+        XCTAssertEqual(state.selectedWorkspaceTab, agents[3])
+
+        let detached = state.workspaceWindows.createTemporary()
+        state.focusWorkspace(detached)
+        state.selectNumberedWorkspaceTab(9)
+        XCTAssertNil(state.selectedWorkspaceTab)
+        state.createTask()
+        let first = try XCTUnwrap(state.selectedWorkspaceTab)
+        state.createTask()
+        let second = try XCTUnwrap(state.selectedWorkspaceTab)
+        XCTAssertEqual(state.openWorkspaceTabs, [second, first])
+        state.selectNumberedWorkspaceTab(8)
+        XCTAssertEqual(state.selectedWorkspaceTab, second)
+        state.selectNumberedWorkspaceTab(9)
+        XCTAssertEqual(state.selectedWorkspaceTab, first)
+        state.presentedSheet = .settings
+        state.selectNumberedWorkspaceTab(1)
+        XCTAssertEqual(state.selectedWorkspaceTab, first)
+        state.presentedSheet = nil
+
+        state.focusWorkspace(state.workspaceWindows.primary)
+        XCTAssertEqual(state.selectedWorkspaceTab, agents[3])
+    }
+
     func testSidebarKeyboardCommandKeepsItsWindowAndOnlyPersistsThePrimaryRail() {
         let prefs = isolatedTestPreferences()
         let state = AppState(tasks: [], preferences: prefs)

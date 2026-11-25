@@ -112,6 +112,7 @@ struct WorkspaceCommands: Commands {
     }
 
     var body: some Commands {
+        let tabs = state.commandTabs(inBrowserPane: usesBrowserShortcuts)
         CommandGroup(replacing: .newItem) {
             Button("New Window") { open(.window) }
                 .keyboardShortcut("n", modifiers: .command)
@@ -178,7 +179,17 @@ struct WorkspaceCommands: Commands {
                 Button("Select Next Workspace Tab") { state.selectAdjacentWorkspaceTab(.next, inBrowserPane: usesBrowserShortcuts) }
                     .keyboardShortcut("]", modifiers: [.command, .shift])
             }
-            .disabled(workspaceUnavailable || state.commandTabs(inBrowserPane: usesBrowserShortcuts).isEmpty)
+            .disabled(workspaceUnavailable || tabs.isEmpty)
+            Menu("Select Tab") {
+                ForEach(1...9, id: \.self) { number in
+                    Button(number == 9 ? "Last Tab" : "Tab \(number)") {
+                        tabWorkspace?.selectNumberedWorkspaceTab(number, inBrowserPane: usesBrowserShortcuts)
+                    }
+                    .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
+                    .disabled(number != 9 && number > tabs.count)
+                }
+            }
+            .disabled(workspaceUnavailable || tabWorkspace == nil || browserPageCommandsAllowed != true || tabs.isEmpty)
         }
     }
 }

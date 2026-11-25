@@ -371,6 +371,19 @@ extension AppState {
         inBrowserPane ? browserSession.workspaceBrowserTabs.map { .browser($0.workspaceID) } : openWorkspaceTabs
     }
 
+    func selectNumberedWorkspaceTab(_ number: Int, inBrowserPane: Bool = false) {
+        let tabs = commandTabs(inBrowserPane: inBrowserPane)
+        let target: WorkspaceTabID
+        switch number {
+        case 1...8 where number <= tabs.count: target = tabs[number - 1]
+        case 9:
+            guard let last = tabs.last else { return }
+            target = last
+        default: return
+        }
+        if target != commandTab(inBrowserPane: inBrowserPane) { selectWorkspaceTab(target) }
+    }
+
     func selectAdjacentWorkspaceTab(_ direction: TabDirection, inBrowserPane: Bool = false) {
         let tabs = commandTabs(inBrowserPane: inBrowserPane)
         guard let first = tabs.first, let last = tabs.last else { return }
@@ -429,7 +442,7 @@ extension AppState {
             removeWorkspaceTab(tab, wasSelected: primaryBrowserID == nil && selectedTaskID == tab.id)
         case .browser:
             if let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID.uuidString == tab.id }) {
-                if let saved = browserSession.restorablePage(for: page, includeSignIn: workspaceTabs.pinnedTabs.contains(tab)),
+                if let saved = browserSession.restorablePage(for: page, pinned: workspaceTabs.pinnedTabs.contains(tab)),
                    let index = browserSession.workspaceBrowserTabs.firstIndex(where: { $0.id == page.id }) {
                     workspaceTabs.rememberClose(.browser(saved, paneIndex: index))
                 }
