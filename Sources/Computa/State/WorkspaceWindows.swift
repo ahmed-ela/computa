@@ -58,7 +58,7 @@ extension AppState {
         guard !window.isClosed else { return }
         workspaceWindows.focus(window)
         if let page = window.selectedPage, let tab = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == page }),
-           browserSession.selectedTabID != tab.id, window.browserIsPrimary {
+           browserSession.selectedTabID != tab.id, window.showsPrimaryBrowser {
             browserSession.selectTab(tab.id)
         }
     }
@@ -144,6 +144,7 @@ extension AppState {
     func discardTemporaryWindow(_ window: WorkspaceTabs) {
         guard window !== workspaceWindows.primary, !window.isClosed else { return }
         let tabs = window.order
+        if let draft = window.newAgentDraft { composerDrafts.removeValue(forKey: draft.task.id) }
         let discardable = Set(tasks.filter {
             window.temporaryDraftIDs.contains($0.id) && $0.runtimeThreadID == nil && $0.entries.isEmpty
                 && !isBusy(taskID: $0.id) && queuedPrompts[$0.id, default: []].isEmpty

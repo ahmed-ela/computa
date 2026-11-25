@@ -100,7 +100,7 @@ struct BrowserAddressPalette: View {
 
     private func perform(_ choice: Choice, _ input: String) {
         let session = state.browserSession
-        guard !window.isClosed, window.browserIsPrimary, window.selectedPage == tab.workspaceID,
+        guard !window.isClosed, window.showsPrimaryBrowser, window.selectedPage == tab.workspaceID,
               !state.approvalGateBlocksInteraction, window.presentedSheet == nil else { close(); return }
         switch choice {
         case .navigate:

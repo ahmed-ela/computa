@@ -97,7 +97,7 @@ struct WorkspaceCommands: Commands {
             }
             .keyboardShortcut("n", modifiers: .command)
             .disabled(workspaceUnavailable)
-            Button("New Agent") { state.createTask() }
+            Button("New Agent") { state.presentNewAgent() }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(workspaceUnavailable)
             Button("New Tab") { WorkspaceTabLauncher.request(in: NSApp.keyWindow) }
@@ -111,7 +111,7 @@ struct WorkspaceCommands: Commands {
                 }
                 .keyboardShortcut("w", modifiers: .command)
                 .disabled(workspaceUnavailable || (!tabWorkspace.workspaceTabs.order.isEmpty
-                    && tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil))
+                    && !tabWorkspace.workspaceTabs.showsNewAgent && tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil))
             }
             Button("Reopen Closed Tab") { state.reopenClosedTab() }
                 .keyboardShortcut("t", modifiers: [.command, .shift])

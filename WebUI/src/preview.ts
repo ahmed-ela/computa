@@ -306,16 +306,19 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
   let nextID = 0;
   const issueID = () => `preview-action-${++nextID}`;
   const profiles = new Map<string, AgentProfile>();
+  let newAgentDraft: TaskSnapshot | undefined;
   const publish = (next: AppSnapshot) => {
-    const task = next.tasks.find(item => item.id === next.selectedTaskID);
+    const composing = !next.primaryBrowserID && newAgentDraft?.id === next.selectedTaskID ? newAgentDraft : undefined;
+    const task = composing ?? next.tasks.find(item => item.id === next.selectedTaskID);
     snapshot = {
-      ...next, revision: snapshot.revision + 1, selectedAgentProfile: task && profiles.get(task.id),
+      ...next, newAgentDraft: composing, revision: snapshot.revision + 1, selectedAgentProfile: task && profiles.get(task.id),
       canStartFresh: !!task && !next.primaryBrowserID && !task.isBusy && !task.queuedPrompts.length && task.status === 'Completed',
       agentNames: Object.fromEntries(Array.from(profiles, ([id, agent]) => [id, agent.name])),
     };
     receive(snapshot);
   };
-  const selectedTask = () => snapshot.tasks.find((task) => task.id === snapshot.selectedTaskID);
+  const taskByID = (id: string | undefined) => newAgentDraft && newAgentDraft.id === id ? newAgentDraft : snapshot.tasks.find(task => task.id === id);
+  const selectedTask = () => taskByID(snapshot.selectedTaskID);
   const openTab = (tab: WorkspaceTab) => {
     const order = [...(snapshot.workspaceOrder ?? [])];
     if (!order.some(other => other.kind === tab.kind && other.id === tab.id)) {
@@ -327,6 +330,7 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
     option.id === id && option.available !== false && option.selectable !== false,
   );
   const updateTask = (id: string, transform: (task: TaskSnapshot) => TaskSnapshot) => {
+    if (newAgentDraft?.id === id) newAgentDraft = transform(newAgentDraft);
     publish({
       ...snapshot,
       tasks: snapshot.tasks.map((task) => task.id === id ? transform(task) : task),
@@ -449,6 +453,11 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
           model: previous?.model ?? snapshot.defaultModel, modelSelectable: true, entries: [],
           queuedPrompts: [], queuePaused: false, canStartQueuedTurn: true, canSteer: false, isBusy: false, hasUnreadCompletion: false,
         };
+        if (action.action === 'createTask') {
+          newAgentDraft ??= task;
+          publish({ ...snapshot, selectedTaskID: newAgentDraft.id, selectedEntryID: undefined, primaryBrowserID: undefined });
+          return;
+        }
         const order = snapshot.workspaceOrder ?? [];
         if (previous) {
           const profile = profiles.get(previous.id) ?? {name: previous.title, instructions: '', history: []};
@@ -462,14 +471,14 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
       }
 
       case 'chooseTaskWorkspace': {
-        const task = snapshot.tasks.find((candidate) => candidate.id === action.taskID);
+        const task = taskByID(action.taskID);
         if (!task || task.status !== 'Draft' || task.entries.length || task.isBusy) return;
         updateTask(task.id, (candidate) => ({ ...candidate, workspace: previewWorkspace }));
         return;
       }
 
       case 'submitPrompt': {
-        const task = snapshot.tasks.find((candidate) => candidate.id === action.taskID);
+        const task = taskByID(action.taskID);
         const prompt = action.prompt.trim();
         const accepted = Boolean(
           task
@@ -484,6 +493,10 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         if (!task || !accepted) {
           publish({ ...snapshot, promptReceipts });
           return;
+        }
+        if (newAgentDraft?.id === task.id) {
+          newAgentDraft = undefined;
+          snapshot = { ...snapshot, tasks: [task, ...snapshot.tasks], workspaceOrder: openTab({ kind: 'agent', id: task.id }) };
         }
         const timestamp = Math.floor(Date.now() / 1000);
         if (task.isBusy || task.queuePaused || task.queuedPrompts.length > 0) {
@@ -696,7 +709,8 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
         return;
       case 'setTaskModel':
         if (!isSelectableModel(action.modelID)) return;
-        if (!snapshot.tasks.some((task) => task.id === action.taskID && task.modelSelectable)) return;
+        if (!taskByID(action.taskID)?.modelSelectable) return;
+        if (newAgentDraft?.id === action.taskID) newAgentDraft = { ...newAgentDraft, model: action.modelID };
         publish({
           ...snapshot, defaultModel: action.modelID,
           tasks: snapshot.tasks.map((task) => task.id === action.taskID ? { ...task, model: action.modelID } : task),

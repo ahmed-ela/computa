@@ -108,7 +108,8 @@ final class WorkspaceWindowHosting: NSObject {
         guard let state, let window, let host = host(for: window), window.attachedSheet == nil,
               !state.approvalGateBlocksInteraction, host.tabs.presentedSheet == nil, !host.tabs.isAPIProvidersPresented else { return }
         state.workspaceWindows.withWindow(host.tabs) {
-            if let tab = state.commandTab(inBrowserPane: inBrowserPane) { state.closeWorkspaceTab(tab) }
+            if host.tabs.showsNewAgent && !inBrowserPane { host.tabs.showsNewAgent = false }
+            else if let tab = state.commandTab(inBrowserPane: inBrowserPane) { state.closeWorkspaceTab(tab) }
         }
         if host.tabs.order.isEmpty { window.performClose(nil) }
     }

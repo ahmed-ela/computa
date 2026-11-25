@@ -10,8 +10,9 @@ final class AppStateTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
         let runtime = RejectingRuntime(tasks: [], firstMessageStore: .init(directory: folder))
         let state = AppState(tasks: [], runtime: runtime, preferences: prefs)
-        state.createTask()
-        let id = try XCTUnwrap(state.selectedTaskID)
+        let id = state.presentNewAgent().id
+        XCTAssertTrue(state.openWorkspaceTabs.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(runtime.firstMessageStore).load().isEmpty)
         let accepted = await state.submit(prompt: "first delivery fixture", toTaskID: id)
         XCTAssertFalse(accepted)
         let expected = try XCTUnwrap(state.selectedTask).entries

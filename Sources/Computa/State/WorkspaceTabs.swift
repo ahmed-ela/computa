@@ -80,6 +80,16 @@ final class WorkspaceTabs {
     var selectedTaskID: String? {
         didSet { if selectedTaskID != oldValue { onChange?() } }
     }
+    // A window can show a composer without changing its restorable tab selection.
+    struct NewAgentDraft {
+        var task: AgentTask
+        var profile: SavedWorkspace.Agent?
+    }
+    var newAgentDraft: NewAgentDraft?
+    var launcherChat: LauncherChat?
+    var showsNewAgent = false
+    var presentedTaskID: String? { showsNewAgent ? newAgentDraft?.task.id : selectedTaskID }
+    var showsPrimaryBrowser: Bool { !showsNewAgent && browserIsPrimary }
     var selectedEntryID: String?
     var selectedPage: UUID?
     var savedChatSelection: AppState.SavedChatSelection?
@@ -223,10 +233,15 @@ final class WorkspaceTabs {
     }
 
     func agent(for task: AgentTask) -> SavedWorkspace.Agent? {
-        agents[(task.runtimeThreadID ?? task.id).lowercased()] ?? agents[task.id.lowercased()]
+        if newAgentDraft?.task.id == task.id { return newAgentDraft?.profile }
+        return agents[(task.runtimeThreadID ?? task.id).lowercased()] ?? agents[task.id.lowercased()]
     }
 
     func setAgent(_ agent: SavedWorkspace.Agent, for task: AgentTask) {
+        if newAgentDraft?.task.id == task.id {
+            newAgentDraft?.profile = agent
+            return
+        }
         agents[(task.runtimeThreadID ?? task.id).lowercased()] = agent
         onChange?()
     }
@@ -307,7 +322,7 @@ final class WorkspaceTabs {
 
 extension AppState {
     var primaryBrowserID: UUID? {
-        workspaceTabs.browserIsPrimary ? displayedBrowserTab?.workspaceID : nil
+        workspaceTabs.showsPrimaryBrowser ? displayedBrowserTab?.workspaceID : nil
     }
 
     var openWorkspaceTabs: [WorkspaceTabID] {
@@ -322,7 +337,8 @@ extension AppState {
     enum TabDirection: Int { case previous = -1, next = 1 }
 
     var selectedWorkspaceTab: WorkspaceTabID? {
-        primaryBrowserID.map(WorkspaceTabID.browser) ?? selectedTaskID.map(WorkspaceTabID.agent)
+        guard !workspaceTabs.showsNewAgent else { return nil }
+        return primaryBrowserID.map(WorkspaceTabID.browser) ?? selectedTaskID.map(WorkspaceTabID.agent)
     }
 
     func commandTab(inBrowserPane: Bool) -> WorkspaceTabID? {
@@ -364,6 +380,7 @@ extension AppState {
         case .browser:
             guard workspaceTabs.order.contains(tab), let id = UUID(uuidString: tab.id),
                   let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == id }) else { return }
+            workspaceTabs.showsNewAgent = false
             browserSession.selectTab(page.id)
             if mixesBrowserTabsInSidebar {
                 savedChatSelection = nil

@@ -19,6 +19,7 @@ struct WorkspaceTabLauncher: View {
     }
 
     var library: ChromeProfileLibrary? = nil
+    var error: String?
     let launch: (NewTabDestination, String) -> Void
     let openPage: (URL) -> Void
     let cancel: () -> Void
@@ -37,6 +38,9 @@ struct WorkspaceTabLauncher: View {
                                       else { launch(.browser, value) }
                                   }, cancel: cancel)
         } choices: {
+            if let error {
+                Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 10)
+            }
             Divider()
             ForEach(NewTabDestination.allCases, id: \.self) { destination in
                 WorkspaceCommandRow(title: destination.label, icon: destination.icon, selected: selection == (destination == .browser ? 0 : 1)) {

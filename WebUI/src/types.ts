@@ -180,7 +180,7 @@ export interface AppSnapshot {
   selectedAgentProfile?: AgentProfile;
   agentNames?: Record<string, string>;
   canStartFresh?: boolean;
-  launcherChat?: { taskID: string; unsentDraft?: string };
+  launcherChat?: { id: string; taskID: string; unsentDraft?: string };
   nativeSidebarControls?: boolean;
   revision: number;
   allowsBrowserSidePane?: boolean;
@@ -197,6 +197,7 @@ export interface AppSnapshot {
   sidebarRail?: { width: number; iconCenter: number };
   selectedTaskID?: string;
   selectedEntryID?: string;
+  newAgentDraft?: TaskSnapshot;
   tasks: TaskSnapshot[];
   promptReceipts: PromptReceiptSnapshot[];
   pendingApprovalCount: number;
@@ -245,7 +246,7 @@ export type NativeAction =
   | { action: 'chooseTaskWorkspace'; taskID: string }
   | { action: 'prepareWebsiteModel'; taskID: string }
   | { action: 'refreshCodexCLIUsage'; taskID: string }
-  | { action: 'launcherChatReady'; taskID: string }
+  | { action: 'launcherChatReady'; taskID: string; requestID: string }
   | { action: 'submitPrompt'; requestID: string; taskID: string; prompt: string }
   | { action: 'interruptTask'; taskID: string }
   | { action: 'retryWebsiteSessionCleanup'; taskID: string }

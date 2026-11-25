@@ -560,6 +560,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try press("\u{f701}", code: 125)
         try press("\r", code: 36)
         let empty = try XCTUnwrap(state.selectedTaskID)
+        XCTAssertTrue(state.tasks.isEmpty)
+        XCTAssertEqual(state.openWorkspaceTabs.map(\.kind), [.browser, .browser])
         let focused = await waitForScriptBool(on: web, script: "document.activeElement?.id === 'task-prompt'")
         XCTAssertTrue(focused)
         try press("z", code: 6)
@@ -587,15 +589,15 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertEqual(calls.map(\.id), [sent])
         XCTAssertEqual(calls.map(\.prompt), [message])
         XCTAssertEqual(calls.map(\.modelID), [syntheticQwenChoice.modelID])
-        XCTAssertEqual(state.tasks.count, 2)
+        XCTAssertEqual(state.tasks.count, 1)
         XCTAssertEqual(browser.workspaceBrowserTabs.count, 2)
-        state.selectTask(empty)
+        XCTAssertEqual(state.presentNewAgent().id, empty)
         let preserved = await waitForScriptBool(on: web, script: "document.querySelector('#task-prompt')?.value === 'z'")
         XCTAssertTrue(preserved)
         _ = try await open()
         try press("\u{1b}", code: 53)
         XCTAssertEqual(state.selectedTaskID, empty)
-        XCTAssertEqual(state.tasks.count, 2)
+        XCTAssertEqual(state.tasks.count, 1)
         XCTAssertEqual(browser.workspaceBrowserTabs.count, 2)
 
         await settleLayout(host)
@@ -607,7 +609,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         try press("\u{f701}", code: 125)
         try press("\r", code: 36)
         let background = try XCTUnwrap(state.selectedTaskID)
-        state.selectTask(empty)
+        XCTAssertEqual(state.presentNewAgent().id, empty)
         for _ in 0..<100 where await runtime.submissions.count < 2 {
             try await Task.sleep(for: .milliseconds(20))
         }
@@ -620,13 +622,28 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         disconnected.insertText("Save this draft", replacementRange: disconnected.selectedRange())
         try press("\u{f701}", code: 125)
         try press("\r", code: 36)
-        let draftKept = await waitForScriptBool(on: web, script: """
-            document.activeElement?.id === 'task-prompt' && document.activeElement.value === 'Save this draft'
-                && document.querySelector('.composer-submit-status')?.textContent.includes('available model') === true
+        XCTAssertEqual(disconnected.string, "Save this draft")
+        XCTAssertEqual(state.composerDrafts[empty], "z")
+        XCTAssertEqual(state.tasks.count, 2)
+        try press("\u{1b}", code: 53)
+        XCTAssertEqual(state.selectedTaskID, empty)
+        let canSendDraft = await waitForScriptBool(on: web, script: """
+            document.querySelector('#task-prompt')?.value === 'z'
+                && document.querySelector('button[aria-label="Send prompt"]')?.disabled === false
             """)
-        XCTAssertTrue(draftKept)
+        XCTAssertTrue(canSendDraft)
+        _ = try await web.evaluateJavaScript("document.querySelector('button[aria-label=\"Send prompt\"]').click(); true")
+        let sentDraft = await waitForScriptBool(on: web, script: """
+            Array.from(document.querySelectorAll('.user-message')).some(row => row.textContent.includes('z'))
+                && document.querySelector('#task-prompt')?.value === ''
+            """)
+        XCTAssertTrue(sentDraft)
         let finalCalls = await runtime.submissions
-        XCTAssertEqual(finalCalls.count, 2)
+        XCTAssertEqual(finalCalls.map(\.id), [sent, background, empty])
+        XCTAssertEqual(finalCalls.map(\.prompt), [message, "Keep working", "z"])
+        XCTAssertEqual(state.openWorkspaceTabs.filter { $0.kind == .agent }.count, 3)
+        XCTAssertNil(state.workspaceTabs.newAgentDraft)
+
     }
 
     @MainActor
@@ -897,12 +914,12 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let compose = try composeButton(in: chat)
         let composeRect = compose.convert(compose.bounds, to: nil)
         try await clickInWindow(at: NSPoint(x: composeRect.midX, y: composeRect.midY), window: window)
-        try await requireDOM("!!document.querySelector('[data-tab-kind=agent][aria-current=page]')")
+        try await requireDOM("document.activeElement?.id === 'task-prompt' && !document.querySelector('[data-tab-kind=agent][aria-current=page]')")
         try await requireDOM("document.querySelector('#task-search')?.value === ''")
-        XCTAssertEqual(state.tasks.count, taskCount + 1)
+        XCTAssertEqual(state.tasks.count, taskCount)
         let newAgent = try XCTUnwrap(state.selectedTaskID)
         XCTAssertNotEqual(newAgent, task.id)
-        XCTAssertEqual(state.openWorkspaceTabs, [.agent(newAgent)])
+        XCTAssertTrue(state.openWorkspaceTabs.isEmpty)
         XCTAssertTrue(session.workspaceBrowserTabs.isEmpty)
         _ = await state.shutdownRuntime()
     }
@@ -1174,7 +1191,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             }
             let count = state.tasks.count
             try await clickInWindow(at: NSPoint(x: button.midX, y: button.midY), window: window)
-            XCTAssertEqual(state.tasks.count, count + 1)
+            XCTAssertEqual(state.tasks.count, count)
+            XCTAssertEqual(state.selectedTaskID, state.workspaceTabs.newAgentDraft?.task.id)
             XCTAssertNotEqual(state.selectedTaskID, task.id)
             state.selectTask(task.id)
 

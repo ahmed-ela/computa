@@ -109,7 +109,7 @@ final class AppState {
         set { workspaceTabs.savedChatSelection = newValue }
     }
     var selectedTaskID: AgentTask.ID? {
-        get { workspaceTabs.selectedTaskID }
+        get { workspaceTabs.presentedTaskID }
         set { workspaceTabs.selectedTaskID = newValue }
     }
     var selectedEntryID: TimelineEntry.ID? {
@@ -418,6 +418,7 @@ final class AppState {
     }
 
     var selectedTask: AgentTask? {
+        if workspaceTabs.showsNewAgent { return workspaceTabs.newAgentDraft?.task }
         guard let selectedTaskID else { return nil }
         return tasks.first { $0.id == selectedTaskID }
     }
@@ -1202,6 +1203,7 @@ final class AppState {
     }
 
     func updateSelectedConversation(_ id: AgentTask.ID?, acknowledging: Bool) {
+        workspaceTabs.showsNewAgent = false
         savedChatSelection = nil
         taskSelectionRevision &+= 1
         selectedTaskID = id
@@ -1349,30 +1351,80 @@ final class AppState {
         if let id = local ?? saved { selectSidebarChat(id) }
     }
 
-    func createTask() {
-        let task = AgentTask(
-            title: "Untitled task",
-            summary: "A new local task",
-            status: .draft,
-            workspace: "No workspace selected",
-            model: defaultModel
-        )
-        if workspaceTabs !== workspaceWindows.primary { workspaceTabs.temporaryDraftIDs.insert(task.id) }
-        tasks.insert(task, at: 0)
+    @discardableResult
+    func presentNewAgent() -> AgentTask {
+        let draft = workspaceTabs.newAgentDraft ?? .init(task: AgentTask(
+            title: "Untitled task", summary: "A new local task", status: .draft,
+            workspace: "No workspace selected", model: defaultModel
+        ))
+        workspaceTabs.newAgentDraft = draft
+        workspaceTabs.launcherChat = .init(taskID: draft.task.id, unsentDraft: nil)
+        workspaceTabs.showsNewAgent = true
         savedChatSelection = nil
         taskSelectionRevision &+= 1
-        selectedTaskID = task.id
-        workspaceTabs.browserIsPrimary = false
-        workspaceTabs.open(.agent(task.id))
-        // A new draft briefly inherits the user's default model. Pause rather
-        // than discard an unused root while the user chooses this task's model.
         updateWebsitePrewarming(preserveUnusedRootOnDeselection: true)
-        selectedEntryID = nil
-        composerText = ""
+        composerText = composerDrafts[draft.task.id] ?? ""
         reviewGeneration &+= 1
         reviewRefresh?.cancel()
         review = nil
-        if isReviewPresented { requestReviewRefresh(taskID: task.id) }
+        return draft.task
+    }
+
+    enum NewAgentLaunchError: LocalizedError {
+        case unavailableModel, invalidPrompt
+        var errorDescription: String? {
+            switch self {
+            case .unavailableModel: "Choose an available model in New Agent before sending. Your earlier draft is saved in this window."
+            case .invalidPrompt: "Shorten the message before sending."
+            }
+        }
+    }
+
+    func launchNewAgent(prompt: String) throws -> LauncherChat {
+        guard !prompt.isEmpty else { return LauncherChat(taskID: presentNewAgent().id, unsentDraft: nil) }
+        // An explicit launcher request must never send or overwrite a different unsent message.
+        let parked = workspaceTabs.newAgentDraft.flatMap { draft in
+            composerDrafts[draft.task.id]?.isEmpty == false ? draft : nil
+        }
+        if parked != nil {
+            guard validatedPrompt(prompt) != nil else { throw NewAgentLaunchError.invalidPrompt }
+            guard LocalModelOption.availableForNewPrompt(defaultModel, in: modelOptions) else {
+                throw NewAgentLaunchError.unavailableModel
+            }
+            workspaceTabs.newAgentDraft = nil
+        }
+        let task = presentNewAgent()
+        if LocalModelOption.availableForNewPrompt(task.model, in: modelOptions),
+           acceptPrompt(prompt: prompt, taskID: task.id, requestID: UUID().uuidString) {
+            workspaceTabs.newAgentDraft = parked
+            return LauncherChat(taskID: task.id, unsentDraft: nil)
+        }
+        if let parked {
+            workspaceTabs.newAgentDraft = parked
+            throw NewAgentLaunchError.invalidPrompt
+        }
+        composerDrafts[task.id] = prompt
+        return LauncherChat(taskID: task.id, unsentDraft: prompt)
+    }
+
+    /// Only an accepted first submission promotes the window's draft into the workspace.
+    @discardableResult
+    func registerSubmittedTask(_ id: String) -> Bool {
+        if tasks.contains(where: { $0.id == id }) { return true }
+        guard !workspaceTabs.isClosed, let draft = workspaceTabs.newAgentDraft, draft.task.id == id else { return false }
+        let wasVisible = workspaceTabs.showsNewAgent
+        workspaceTabs.newAgentDraft = nil
+        workspaceTabs.showsNewAgent = false
+        if workspaceTabs !== workspaceWindows.primary { workspaceTabs.temporaryDraftIDs.insert(id) }
+        tasks.insert(draft.task, at: 0)
+        if let profile = draft.profile { workspaceTabs.setAgent(profile, for: draft.task) }
+        if wasVisible {
+            workspaceTabs.selectedTaskID = id
+            workspaceTabs.browserIsPrimary = false
+            selectedEntryID = nil
+        }
+        workspaceTabs.open(.agent(id))
+        return true
     }
 
     func toggleReview() {
@@ -1501,6 +1553,10 @@ final class AppState {
         guard taskID == selectedTaskID, canChooseTaskWorkspace, url.isFileURL,
               let runtime else { return }
         try await runtime.configureWorkspace(path: url.path, forTaskID: taskID)
+        if workspaceTabs.newAgentDraft?.task.id == taskID {
+            workspaceTabs.newAgentDraft?.task.workspace = url.path
+            return
+        }
         guard taskID == selectedTaskID, let index = tasks.firstIndex(where: { $0.id == taskID }), tasks[index].status == .draft,
               tasks[index].entries.isEmpty else { return }
         tasks[index].workspace = url.path
@@ -1526,9 +1582,15 @@ final class AppState {
     @discardableResult
     func setTaskModel(_ modelID: String, taskID: AgentTask.ID) -> Bool {
         guard let option = modelOptions.first(where: { $0.id == modelID }), option.available != false,
-              option.selectable != false,
-              let index = tasks.firstIndex(where: { $0.id == taskID }),
-              canChangeModel(for: taskID),
+              option.selectable != false, canChangeModel(for: taskID) else { return false }
+        if workspaceTabs.newAgentDraft?.task.id == taskID {
+            workspaceTabs.newAgentDraft?.task.model = modelID
+            rememberDefaultModel(modelID)
+            requestAutomaticWebsiteModelRefresh(for: modelID)
+            updateWebsitePrewarming()
+            return true
+        }
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }),
               tasks[index].runtimeThreadID == nil || ((InstalledCodexCLI.slug(tasks[index].model) != nil) == (InstalledCodexCLI.slug(modelID) != nil)
                 && ProviderCLI(modelID: tasks[index].model) == ProviderCLI(modelID: modelID))
         else { return false }
@@ -1548,7 +1610,7 @@ final class AppState {
     }
 
     func canChangeModel(for taskID: AgentTask.ID) -> Bool {
-        tasks.contains(where: { $0.id == taskID })
+        (workspaceTabs.newAgentDraft?.task.id == taskID || tasks.contains(where: { $0.id == taskID }))
             && !isBusy(taskID: taskID)
             && queuedPrompts[taskID, default: []].allSatisfy {
                 $0.status == .failed && $0.deliveryUncertain == false
@@ -2705,11 +2767,8 @@ final class AppState {
         profile?.mark(.appCleanupFinished, since: cleanupStarted)
         guard !Task.isCancelled else { return .notDelivered("Submission was cancelled before delivery.") }
         retireWebsiteModelSelections()
-        let userText = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !userText.isEmpty,
-              !isShuttingDown,
-              let index = tasks.firstIndex(where: { $0.id == taskID }),
-              !isBusy(taskID: taskID)
+        guard let userText = validatedPrompt(rawPrompt), !isShuttingDown, !isBusy(taskID: taskID),
+              registerSubmittedTask(taskID), let index = tasks.firstIndex(where: { $0.id == taskID })
         else {
             return .notDelivered("Submission was rejected before delivery.")
         }
@@ -2936,8 +2995,7 @@ final class AppState {
     }
 
     private func enqueuePrompt(prompt rawPrompt: String, taskID: String) -> Bool {
-        guard let prompt = validatedPrompt(rawPrompt), !isShuttingDown,
-              tasks.contains(where: { $0.id == taskID }) else { return false }
+        guard let prompt = validatedPrompt(rawPrompt), !isShuttingDown, registerSubmittedTask(taskID) else { return false }
         retireWebsiteModelSelections()
         if queuedPrompts[taskID, default: []].isEmpty && !isBusy(taskID: taskID) {
             pausedQueueTaskIDs.remove(taskID)
