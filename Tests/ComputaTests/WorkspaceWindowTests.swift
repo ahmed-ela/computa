@@ -5,6 +5,31 @@ import XCTest
 
 @MainActor
 final class WorkspaceWindowTests: XCTestCase {
+    func testSidebarKeyboardCommandKeepsItsWindowAndOnlyPersistsThePrimaryRail() {
+        let prefs = isolatedTestPreferences()
+        let state = AppState(tasks: [], preferences: prefs)
+        defer { state.browserSession.shutdown() }
+        let primary = state.workspaceWindows.primary
+        let secondary = state.workspaceWindows.createTemporary()
+        let primaryCommand = WebWorkspaceView(state: state, window: primary).sidebarCollapseBinding
+        let secondaryCommand = WebWorkspaceView(state: state, window: secondary).sidebarCollapseBinding
+
+        state.focusWorkspace(secondary)
+        primaryCommand.wrappedValue.toggle()
+        XCTAssertTrue(primary.isSidebarCollapsed)
+        XCTAssertFalse(secondary.isSidebarCollapsed)
+        XCTAssertTrue(prefs.bool(forKey: "taskSidebarCollapsed"))
+
+        state.focusWorkspace(primary)
+        secondaryCommand.wrappedValue.toggle()
+        secondaryCommand.wrappedValue.toggle()
+        XCTAssertFalse(secondary.isSidebarCollapsed)
+        XCTAssertTrue(primaryCommand.wrappedValue)
+        XCTAssertTrue(prefs.bool(forKey: "taskSidebarCollapsed"))
+        primaryCommand.wrappedValue.toggle()
+        XCTAssertFalse(prefs.bool(forKey: "taskSidebarCollapsed"))
+    }
+
     func testNewAgentDoesNotChangeSidebarSearchOrRestoredSelectionUntilFirstSend() throws {
         let prefs = isolatedTestPreferences()
         let browser = EmbeddedBrowserSession(profileID: UUID(), defaults: prefs)
