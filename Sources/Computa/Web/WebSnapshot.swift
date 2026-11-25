@@ -42,6 +42,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     var sidebarRail = SidebarRailGeometry.fallback
     var isTaskSidebarPeeked = false
     var nativeSidebarControls = false
+    var canViewConversation: Bool?
     var launcherChat: LauncherChat?
     let titlebarHeight: CGFloat?
     let allowsBrowserSidePane: Bool

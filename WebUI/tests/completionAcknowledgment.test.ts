@@ -41,13 +41,22 @@ describe('displayed completion acknowledgment', () => {
     for (const [visible, focused] of [[false, true], [true, false], [false, false]]) {
       expect(displayedCompletionAcknowledgment(snapshot, visible, focused)).toBeUndefined();
     }
-    for (const changes of [{ isSettingsPresented: true }, { isReviewPresented: true }, { pendingApprovalCount: 1 }, { selectedTaskID: 'missing' }]) {
+    for (const changes of [{ isSettingsPresented: true }, { isReviewPresented: true }, { pendingApprovalCount: 1 },
+      { primaryBrowserID: 'browser' }, { savedChatSelection: { id: 'loading' } }, { newAgentDraft: snapshot.tasks[0] },
+      { selectedTaskID: 'missing' }]) {
       expect(displayedCompletionAcknowledgment({ ...snapshot, ...changes }, true, true)).toBeUndefined();
     }
     for (const changes of [{ hasUnreadCompletion: false }, { unreadCompletionID: undefined }, { status: 'Failed' }, { status: 'Waiting' }, { isBusy: true }]) {
       const changed = { ...snapshot, tasks: [{ ...task, ...changes }] };
       expect(displayedCompletionAcknowledgment(changed, true, true)).toBeUndefined();
     }
+  });
+  test('native window visibility is authoritative when keyboard focus is outside WebKit', () => {
+    const snapshot = fixture();
+    expect(displayedCompletionAcknowledgment({ ...snapshot, canViewConversation: true }, true, false)?.taskID)
+      .toBe(snapshot.selectedTaskID);
+    expect(displayedCompletionAcknowledgment({ ...snapshot, canViewConversation: false }, true, true)).toBeUndefined();
+    expect(displayedCompletionAcknowledgment({ ...snapshot, canViewConversation: true }, false, true)).toBeUndefined();
   });
   test('does not acknowledge until a rendered frame and rechecks visibility and focus', () => {
     const h = harness();

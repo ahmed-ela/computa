@@ -1,5 +1,6 @@
 import type { AgentProfile, AppSnapshot, EntrySnapshot, NativeAction, ReviewScope, ReviewState, TaskSnapshot, WorkspaceTab } from './types';
 import { reorderQueuedPrompts } from './promptQueue';
+import { displayedConversationID, unreadCompletionID } from './completionAcknowledgment';
 
 const previewWorkspace = '/Users/preview/Projects/localcodex-demo';
 const modelChatGPT = 'browser/chatgpt/choice/preview-instant';
@@ -412,11 +413,9 @@ export function installPreviewBridge(receive: (snapshot: AppSnapshot) => void): 
       }
 
       case 'acknowledgeTaskCompletion': {
-        if (snapshot.selectedTaskID !== action.taskID || snapshot.isSettingsPresented
-          || snapshot.isReviewPresented || snapshot.pendingApprovalCount > 0) return;
+        if (displayedConversationID(snapshot) !== action.taskID) return;
         const task = selectedTask();
-        if (!task || task.status !== 'Completed' || task.isBusy || !task.hasUnreadCompletion
-          || task.unreadCompletionID !== action.completionID) return;
+        if (!task || unreadCompletionID(task) !== action.completionID) return;
         updateTask(task.id, (candidate) => ({ ...candidate, hasUnreadCompletion: false, unreadCompletionID: undefined }));
         return;
       }

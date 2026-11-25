@@ -1,16 +1,28 @@
-import type { AppSnapshot, NativeAction } from './types';
+import type { AppSnapshot, NativeAction, TaskSnapshot } from './types';
 
 type CompletionAction = Extract<NativeAction, { action: 'acknowledgeTaskCompletion' }>;
+
+export function unreadCompletionID(task: Pick<TaskSnapshot, 'status' | 'isBusy' | 'hasUnreadCompletion' | 'unreadCompletionID'>) {
+  if (task.status === 'Completed' && !task.isBusy && task.hasUnreadCompletion) return task.unreadCompletionID;
+}
+
+/** The chat actually on screen. A selected task can sit behind a browser, draft or modal. */
+export function displayedConversationID(snapshot: AppSnapshot | null): string | undefined {
+  if (!snapshot || snapshot.canViewConversation === false || snapshot.primaryBrowserID
+    || snapshot.savedChatSelection || snapshot.newAgentDraft || snapshot.isSettingsPresented
+    || snapshot.isReviewPresented || snapshot.pendingApprovalCount > 0) return;
+  return snapshot.selectedTaskID;
+}
 
 export function displayedCompletionAcknowledgment(
   snapshot: AppSnapshot | null, visible: boolean, focused: boolean,
 ): CompletionAction | undefined {
-  if (!snapshot || snapshot.primaryBrowserID || !visible || !focused || snapshot.isSettingsPresented
-    || snapshot.isReviewPresented || snapshot.pendingApprovalCount > 0) return;
-  const task = snapshot.tasks.find((candidate) => candidate.id === snapshot.selectedTaskID);
-  if (!task || task.status !== 'Completed' || task.isBusy || !task.hasUnreadCompletion
-    || !task.unreadCompletionID) return;
-  return { action: 'acknowledgeTaskCompletion', taskID: task.id, completionID: task.unreadCompletionID };
+  if (!snapshot || !visible || !(snapshot.canViewConversation ?? focused)) return;
+  const id = displayedConversationID(snapshot);
+  if (!id) return;
+  const task = snapshot.tasks.find((candidate) => candidate.id === id);
+  const completionID = task && unreadCompletionID(task);
+  if (completionID) return { action: 'acknowledgeTaskCompletion', taskID: id, completionID };
 }
 
 export interface CompletionDisplayEvents {

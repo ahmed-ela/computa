@@ -24,7 +24,7 @@ import { ResponseMarkdown } from './ResponseMarkdown';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
 import { activityTimeline, systemMessageText, type ActivityGroup, type ConversationEntry } from './activityTimeline';
 import { formatWorkedFor } from './duration';
-import { observeDisplayedCompletion } from './completionAcknowledgment';
+import { displayedConversationID, observeDisplayedCompletion } from './completionAcknowledgment';
 import { previewSnapshot, installPreviewBridge } from './preview';
 import {
   composerPrimaryAction,
@@ -961,9 +961,8 @@ export function App() {
         document.removeEventListener('visibilitychange', callback);
       };
     },
-  }, post), [snapshot?.selectedTaskID, selectedTask?.unreadCompletionID,
-    selectedTask?.hasUnreadCompletion, selectedTask?.status, selectedTask?.isBusy,
-    snapshot?.primaryBrowserID, snapshot?.isSettingsPresented, snapshot?.isReviewPresented, snapshot?.pendingApprovalCount]);
+  }, post), [displayedConversationID(snapshot), selectedTask?.unreadCompletionID,
+    selectedTask?.hasUnreadCompletion, selectedTask?.status, selectedTask?.isBusy]);
 
   useEffect(() => {
     if (import.meta.env.DEV && !nativeHost) return installPreviewBridge(setSnapshot);

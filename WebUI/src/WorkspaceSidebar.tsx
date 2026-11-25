@@ -4,6 +4,7 @@ import { AgentStatusIcon } from './AgentStatusIcon';
 import { Icon } from './Icon';
 import { sidebarRowHeight, useSidebarWindow } from './sidebarWindow';
 import { TaskActivityIndicator } from './TaskActivityIndicator';
+import { displayedConversationID } from './completionAcknowledgment';
 import { isTaskActive, sidebarAgentStatus, startSidebarClock } from './sidebarActivity';
 import type { AppSnapshot, NativeAction, TaskSnapshot, WorkspaceBrowser, WorkspaceTab } from './types';
 
@@ -83,6 +84,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
   const tabList = useRef<HTMLElement | null>(null);
   const active = snapshot.tasks.some(isTaskActive);
   const collapsed = sidebarIsCompact(snapshot);
+  const viewedChat = displayedConversationID(snapshot);
   useEffect(() => {
     if (collapsed || !active) return;
     return startSidebarClock(setNow, { now: () => Date.now() / 1000, everySecond: (tick) => {
@@ -191,7 +193,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
             <span className={collapsed || dividerOnly ? 'sr-only' : undefined}>{heading}</span>
           </h2>;
         }
-        const status = item.task && sidebarAgentStatus(item.task);
+        const status = item.task && sidebarAgentStatus(item.task, item.task.id === viewedChat);
         const selected = keyOf(item.ref) === selectedTab;
         const label = status ? item.title + (status === 'working' ? ' — Working' : ' — Ready to read') : item.title;
         return <div key={keyOf(item.ref)} className="workspace-tab-row" data-pinned={item.pinned ? 'true' : undefined}
@@ -219,7 +221,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
             }}>
             {item.browser ? <SiteIcon tab={item.browser} /> : <AgentStatusIcon taskID={item.ref.id} />}
             {!collapsed && <span className="task-row-title">{item.title}</span>}
-            {!collapsed && item.task && <TaskActivityIndicator task={item.task} now={now} />}
+            {item.task && <TaskActivityIndicator task={item.task} status={status} compact={collapsed} now={now} />}
           </Button>
           {item.open && !collapsed && <Button variant="ghost" size="icon-xs" className="workspace-pin"
             aria-label={(item.pinned ? 'Unpin tab: ' : 'Pin tab: ') + item.title} title={item.pinned ? 'Unpin tab' : 'Pin tab'}

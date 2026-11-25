@@ -1743,7 +1743,11 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         await settleLayout(hosting)
         let chat = try XCTUnwrap(nativeViews(in: hosting).compactMap { $0 as? WKWebView }
             .first { $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil })
-        let expanded = await waitForScriptBool(on: chat, script: "document.querySelectorAll('.task-row').length === 25 && document.querySelectorAll('.task-row .agent-status-icon').length === 25 && !!document.querySelector('[aria-label=\"Archived 20\"]') && !document.querySelector('.agent-rail')")
+        let expanded = await waitForScriptBool(on: chat, script: """
+            document.querySelectorAll('.task-row').length === 25 && document.querySelectorAll('.task-row .agent-status-icon').length === 25
+                && !!document.querySelector('[aria-label="Archived 20"]') && !document.querySelector('.agent-rail')
+                && !document.querySelector('.task-row-status, .task-row-unread')
+            """)
         XCTAssertTrue(expanded)
         let titleFits = await waitForScriptBool(on: chat, script: """
             (() => {
@@ -1827,7 +1831,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.apply(.taskStatusChanged(taskID: tasks[2].id, status: .completed))
         let finished = await waitForScriptBool(on: chat, script: """
             document.querySelectorAll('.agent-rail .task-row').length === 25
-                && document.querySelectorAll('[data-agent-status=working]').length === 1 && !!document.querySelector('.agent-rail [data-agent-status=ready]')
+                && document.querySelectorAll('[data-agent-status=working]').length === 1
+                && document.querySelectorAll('.agent-rail [data-agent-status=ready] .task-row-unread').length === 1
             """)
         XCTAssertTrue(finished)
         XCTAssertTrue(state.hasUnreadCompletion(for: tasks[2].id))
