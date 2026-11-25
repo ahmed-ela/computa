@@ -19,6 +19,7 @@ import Pin from '@octanejs/lucide/icons/pin';
 import PinOff from '@octanejs/lucide/icons/pin-off';
 import SquarePen from '@octanejs/lucide/icons/square-pen';
 import Play from '@octanejs/lucide/icons/play';
+import Plus from '@octanejs/lucide/icons/plus';
 import RotateCw from '@octanejs/lucide/icons/rotate-cw';
 import Search from '@octanejs/lucide/icons/search';
 import Settings from '@octanejs/lucide/icons/settings';
@@ -48,6 +49,7 @@ const icons = {
   pin: Pin,
   unpin: PinOff,
   compose: SquarePen,
+  plus: Plus,
   resume: Play,
   search: Search,
   send: ArrowUp,
