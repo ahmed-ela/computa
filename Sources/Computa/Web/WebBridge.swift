@@ -61,6 +61,38 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         return .init(kind: kind, id: id)
     }
 
+    var presentTabMenu: (NSMenu) -> Void = { $0.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil) }
+
+    private func pinMenu(for tab: WorkspaceTabID) -> NSMenu {
+        let menu = NSMenu()
+        guard let state, let view = webView, view.window != nil else { return menu }
+        let pinned = windowTabs.pinnedTabs.contains(tab)
+        let page = state.browserSession.workspaceBrowserTabs.first { .browser($0.workspaceID) == tab }
+        let title = pinned ? "Unpin Tab" : (page?.pinIsTemporary == true ? "Pin Tab for This Session" : "Pin Tab")
+        let item = menu.addItem(withTitle: title, action: #selector(choosePinAction(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = (tab, !pinned)
+        return menu
+    }
+
+    @objc private func choosePinAction(_ item: NSMenuItem) {
+        guard let (tab, pinned) = item.representedObject as? (WorkspaceTabID, Bool) else { return }
+        setPinned(tab, pinned: pinned)
+    }
+
+    private func setPinned(_ tab: WorkspaceTabID, pinned: Bool) {
+        guard let state, !windowTabs.isClosed else { return }
+        state.workspaceWindows.withWindow(windowTabs) {
+            guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
+                  state.openWorkspaceTabs.contains(tab), windowTabs.pinnedTabs.contains(tab) != pinned else { return }
+            if tab.kind == .browser {
+                guard let page = state.browserSession.workspaceBrowserTabs.first(where: { .browser($0.workspaceID) == tab }) else { return }
+                state.browserSession.setPopupPinned(page, pinned: pinned)
+            }
+            windowTabs.setPinned(tab, pinned: pinned)
+        }
+    }
+
     func attach(webView: WKWebView) {
         self.webView = webView
         Self.diagnostic("attached frame=\(webView.frame) bounds=\(webView.bounds) safeArea=\(webView.safeAreaInsets)")
@@ -158,19 +190,17 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "newWorkspaceBrowserTab":
             state.newWorkspaceBrowserTab()
 
-        case "selectWorkspaceTab", "closeWorkspaceTab", "moveWorkspaceTab", "setWorkspaceTabPinned":
+        case "selectWorkspaceTab", "closeWorkspaceTab", "moveWorkspaceTab", "setWorkspaceTabPinned", "showWorkspaceTabMenu":
             guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
                   let tab = Self.workspaceTab(body["tab"]), state.openWorkspaceTabs.contains(tab) else { return }
             switch action {
             case "selectWorkspaceTab": state.selectWorkspaceTab(tab)
             case "closeWorkspaceTab": state.closeWorkspaceTab(tab)
             case "setWorkspaceTabPinned":
-                guard let pinned = body["pinned"] as? Bool, state.workspaceTabs.pinnedTabs.contains(tab) != pinned else { return }
-                if pinned && tab.kind == .browser {
-                    guard let page = state.browserSession.workspaceBrowserTabs.first(where: { .browser($0.workspaceID) == tab }),
-                          state.browserSession.prepareToPin(page) else { return }
-                }
-                state.workspaceTabs.setPinned(tab, pinned: pinned)
+                if let pinned = body["pinned"] as? Bool { setPinned(tab, pinned: pinned) }
+            case "showWorkspaceTabMenu":
+                guard let view = webView, view.window != nil else { return }
+                presentTabMenu(pinMenu(for: tab))
             default:
                 guard let target = Self.workspaceTab(body["target"]), state.openWorkspaceTabs.contains(target) else { return }
                 state.workspaceTabs.move(tab, to: target)

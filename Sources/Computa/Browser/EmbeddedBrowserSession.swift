@@ -14,7 +14,7 @@ final class EmbeddedBrowserTab: Identifiable {
     fileprivate var userPageZoom: CGFloat?
     let isPopup: Bool
     fileprivate var popupPinAddress: URL?
-    var canPin: Bool { !isPopup || (setupProvider == nil && popupPinAddress != nil) }
+    var pinIsTemporary: Bool { isPopup && (setupProvider != nil || popupPinAddress == nil) }
     let requestsMobileSite: Bool
     fileprivate let kimiProfileID: UUID?
     fileprivate(set) var setupProvider: EmbeddedWebModelTransport.Provider?
@@ -117,14 +117,21 @@ final class EmbeddedBrowserSession {
         return SavedWorkspace.Page(id: tab.workspaceID, url: entry.restoreURL, mobile: tab.requestsMobileSite)
     }
 
-    func prepareToPin(_ tab: EmbeddedBrowserTab) -> Bool {
-        guard tab.isPopup else { return true }
-        guard tab.canPin, let entry = entries[tab.id], !entry.view.isLoading,
-              let address = tab.popupPinAddress, address == entry.view.url,
-              entry.popupPinNavigation.address(address) == address else { return false }
-        // Freeze the explicitly chosen destination. Later redirects in the live popup cannot overwrite the pin.
+    /// A live tab can always join Pinned. Only a verified, standalone destination may be saved.
+    func setPopupPinned(_ tab: EmbeddedBrowserTab, pinned: Bool) {
+        guard tab.isPopup, let entry = entries[tab.id] else { return }
+        entry.awaitingPopupPinAddress = pinned
+        entry.restoreURL = nil
+        capturePopupPinIfReady(entry)
+    }
+
+    private func capturePopupPinIfReady(_ entry: Entry) {
+        guard entry.awaitingPopupPinAddress, entry.tab.setupProvider == nil,
+              let address = entry.tab.popupPinAddress, address == entry.view.url,
+              entry.popupPinNavigation.address(address) == address else { return }
+        // Freeze the first eligible address. Subsequent navigations cannot replace the pin.
         entry.restoreURL = address
-        return true
+        entry.awaitingPopupPinAddress = false
     }
 
     func reopenWorkspacePage(_ page: SavedWorkspace.Page, at index: Int) throws {
@@ -337,6 +344,7 @@ final class EmbeddedBrowserSession {
         let usesIsolatedChatGPTProfile: Bool
         let navigationChanges = EmbeddedModelChangeChannel(ownerToken: UUID().uuidString)
         let popupOpenerTabID: UUID?
+        var awaitingPopupPinAddress = false
         var popupPinNavigation = PopupPinNavigation.pending
         var restoreURL: URL?
         // Only the initial GET of a standalone, read-only resource can be replayed.
@@ -3996,7 +4004,11 @@ final class EmbeddedBrowserSession {
             if !view.isLoading, case .document = entry.popupPinNavigation {
                 entry.popupPinNavigation.observe(view.url)
             }
-            entry.tab.popupPinAddress = view.isLoading ? nil : entry.popupPinNavigation.address(view.url)
+            entry.tab.popupPinAddress = entry.popupPinNavigation.address(view.url)
+            if entry.awaitingPopupPinAddress {
+                capturePopupPinIfReady(entry)
+                if !entry.awaitingPopupPinAddress { onWorkspacePageChanged?() }
+            }
         }
         entry.tab.isLoading = view.isLoading
         entry.tab.canGoBack = view.canGoBack

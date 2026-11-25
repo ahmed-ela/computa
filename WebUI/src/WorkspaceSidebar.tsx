@@ -199,8 +199,14 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
         const status = item.task && sidebarAgentStatus(item.task, item.task.id === viewedChat);
         const selected = keyOf(item.ref) === selectedTab;
         const label = status ? item.title + (status === 'working' ? ' — Working' : ' — Ready to read') : item.title;
+        const pinLabel = item.pinned ? 'Unpin tab' : item.browser?.pinIsTemporary ? 'Pin tab for this session' : 'Pin tab';
         return <div key={keyOf(item.ref)} className="workspace-tab-row" data-pinned={item.pinned ? 'true' : undefined}
           data-drag-id={item.ref.id} data-drag-kind={item.ref.kind} draggable={item.open}
+          onContextMenu={event => {
+            if (!nativeHost || !item.open) return;
+            event.preventDefault();
+            post({ action: 'showWorkspaceTabMenu', tab: item.ref });
+          }}
           onDragStart={event => {
             if (!item.open) return;
             if (nativeHost) {
@@ -226,8 +232,8 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
             {!collapsed && <span className="task-row-title">{item.title}</span>}
             {item.task && <TaskActivityIndicator task={item.task} status={status} compact={collapsed} now={now} />}
           </Button>
-          {item.open && !collapsed && (item.pinned || item.browser?.canPin !== false) && <Button variant="ghost" size="icon-xs" className="workspace-pin"
-            aria-label={(item.pinned ? 'Unpin tab: ' : 'Pin tab: ') + item.title} title={item.pinned ? 'Unpin tab' : 'Pin tab'}
+          {item.open && !collapsed && <Button variant="ghost" size="icon-xs" className="workspace-pin"
+            aria-label={pinLabel + ': ' + item.title} title={pinLabel}
             onClick={() => post({ action: 'setWorkspaceTabPinned', tab: item.ref, pinned: !item.pinned })}>
             <Icon name={item.pinned ? 'unpin' : 'pin'} size={13} /></Button>}
           {item.open && !collapsed && <Button variant="ghost" size="icon-xs" className="workspace-close" aria-label={'Close tab: ' + item.title}

@@ -156,7 +156,7 @@ export interface ModelProviderSetup {
 
 export interface WorkspaceTab { kind: 'agent' | 'browser'; id: string }
 export interface WorkspaceBrowser {
-  id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean; canPin?: boolean;
+  id: string; title: string; host?: string; favicon?: string; isFaviconLoading?: boolean; pinIsTemporary?: boolean;
   canGoBack?: boolean; canGoForward?: boolean; canReload?: boolean; isLoading?: boolean;
 }
 
@@ -243,7 +243,7 @@ export type NativeAction =
   | { action: 'createTask' | 'newWorkspaceBrowserTab' | 'openTabLauncher' }
   | { action: 'openBrowserAddress'; id: string }
   | { action: 'browserNavigation'; id: string; command: 'back' | 'forward' | 'reload' | 'stop' }
-  | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab'; tab: WorkspaceTab }
+  | { action: 'selectWorkspaceTab' | 'closeWorkspaceTab' | 'showWorkspaceTabMenu'; tab: WorkspaceTab }
   | { action: 'setWorkspaceTabPinned'; tab: WorkspaceTab; pinned: boolean }
   | { action: 'setComposerDraft'; taskID: string; text: string }
   | { action: 'beginWorkspaceTabDrag'; tab: WorkspaceTab }
