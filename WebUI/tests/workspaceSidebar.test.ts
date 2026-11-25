@@ -88,6 +88,10 @@ test('the browser address is separate from the tab filter and follows the active
   const render = () => renderToStaticMarkup(h(WorkspaceSidebar, {
     snapshot, search: '', setSearch: () => {}, nativeHost: true, post: () => {},
   })).html;
+  expect(snapshot.browserAddressPlacement).toBe('titleBar');
+  expect(render()).not.toContain('class="sidebar-address"');
+  expect(render()).toContain('id="task-search"');
+  snapshot.browserAddressPlacement = 'sidebar';
   const expanded = render();
   const controls = expanded.indexOf('class="sidebar-controls-row"');
   const toggle = expanded.indexOf('id="task-sidebar-toggle"');

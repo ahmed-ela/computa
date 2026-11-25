@@ -383,6 +383,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "dismissSettings":
             state.presentedSheet = nil
 
+        case "setBrowserAddressPlacement":
+            guard state.presentedSheet == .settings, !state.approvalGateBlocksInteraction,
+                  let raw = body["value"] as? String, let placement = BrowserAddressPlacement(rawValue: raw) else { return }
+            state.browserAddressPlacement = placement
+
         case "setAppearance":
             guard let value = body["value"] as? String,
                   let appearance = AppAppearance(rawValue: value)
