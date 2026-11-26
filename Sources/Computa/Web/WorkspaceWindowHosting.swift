@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import SwiftUI
 
 /// The app owns this drag. Browser documents and the system pasteboard never receive
 /// a tab handle. Coordinates are converted in each window's own point space.
@@ -39,6 +40,21 @@ final class WorkspaceWindowHosting: NSObject {
             guard fields[2] == "after", let index = tabs.order.firstIndex(of: row) else { return row }
             return tabs.order.dropFirst(index + 1).first
         }
+    }
+
+    fileprivate let browserAnchors = NSHashTable<BrowserTabAnchorView>.weakObjects()
+
+    private func browserAnchor(in host: Host, at point: CGPoint) -> BrowserTabAnchorView? {
+        browserAnchors.allObjects.first { view in
+            guard view.tabs === host.tabs, let window = view.window, window === host.window,
+                  !view.isHiddenOrHasHiddenAncestor else { return false }
+            return view.bounds.intersection(view.visibleRect).contains(view.convert(window.convertPoint(fromScreen: point), from: nil))
+        }
+    }
+
+    func beginBrowserTabDrag(_ tab: WorkspaceTabID, from tabs: WorkspaceTabs) {
+        guard drag == nil, tab.kind == .browser, let sidebar = hosts[tabs.id]?.sidebar else { return }
+        beginTabDrag(tab, from: tabs, sidebar: sidebar)
     }
 
     private enum Drag {
@@ -226,7 +242,7 @@ final class WorkspaceWindowHosting: NSObject {
         for window in NSApp.orderedWindows where window.isVisible && !window.isMiniaturized && !window.ignoresMouseEvents && window.frame.contains(point) {
             if case .window = drag, window === source?.window { continue }
             guard window.attachedSheet == nil, let host = host(for: window),
-                  host.sidebarFrame?.contains(point) == true, let source, let state,
+                  (host.sidebarFrame?.contains(point) == true || browserAnchor(in: host, at: point) != nil), let source, let state,
                   state.canTransferTabs(from: source.tabs, to: host.tabs) else { return nil }
             return host
         }
@@ -252,7 +268,13 @@ final class WorkspaceWindowHosting: NSObject {
         }
         if let target {
             Task { @MainActor in
-                let before = await target.row(at: point)
+                let before: WorkspaceTabID?
+                if let anchor = browserAnchor(in: target, at: point), let tab = anchor.tab, let window = anchor.window {
+                    let local = anchor.convert(window.convertPoint(fromScreen: point), from: nil)
+                    if local.x >= anchor.bounds.midX, let index = target.tabs.order.firstIndex(of: tab) {
+                        before = target.tabs.order.dropFirst(index + 1).first
+                    } else { before = tab }
+                } else { before = await target.row(at: point) }
                 guard self.hosts[source.tabs.id] === source, self.hosts[target.tabs.id] === target else { return }
                 let tabs: [WorkspaceTabID]
                 switch drag {
@@ -299,5 +321,24 @@ final class WorkspaceWindowHosting: NSObject {
         let area = screen.visibleFrame
         window.setFrameTopLeftPoint(.init(x: max(area.minX, min(point.x - 64, area.maxX - window.frame.width)),
                                           y: min(area.maxY, max(point.y + 12, area.minY + window.frame.height))))
+    }
+}
+
+/// App-owned geometry for dropping onto native browser tabs. No drag payload is exposed to webpages.
+final class BrowserTabAnchorView: NSView {
+    weak var tabs: WorkspaceTabs?
+    var tab: WorkspaceTabID?
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+struct BrowserTabDropAnchor: NSViewRepresentable {
+    let hosting: WorkspaceWindowHosting
+    let tabs: WorkspaceTabs
+    let tab: WorkspaceTabID
+    func makeNSView(context: Context) -> BrowserTabAnchorView { BrowserTabAnchorView() }
+    func updateNSView(_ view: BrowserTabAnchorView, context: Context) {
+        view.tabs = tabs
+        view.tab = tab
+        hosting.browserAnchors.add(view)
     }
 }

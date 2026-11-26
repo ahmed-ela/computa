@@ -10,6 +10,7 @@ struct EmbeddedBrowserPane: View {
     var tabRowHeight: CGFloat = 32
     var usesSidebarTabs = false
     var workspacePageID: UUID?
+    var workspace: (state: AppState, tabs: WorkspaceTabs)?
     var openTitlebarAddress: (() -> Void)?
     var reservesWindowTitlebar = false
     var showsNewTabButton = true
@@ -29,7 +30,10 @@ struct EmbeddedBrowserPane: View {
     @FocusState private var addressFocused: Bool
 
     private var selectedTab: EmbeddedBrowserTab? {
-        session.humanTabs.first { $0.id == (workspacePageID ?? session.selectedTabID) }
+        if let workspace {
+            return session.workspaceBrowserTabs.first { $0.workspaceID == workspace.tabs.selectedPage }
+        }
+        return session.humanTabs.first { $0.id == (workspacePageID ?? session.selectedTabID) }
     }
 
     var body: some View {
@@ -160,29 +164,55 @@ struct EmbeddedBrowserPane: View {
         .frame(height: tabRowHeight)
     }
 
+    private var visibleTabs: [EmbeddedBrowserTab] {
+        guard let workspace else { return session.workspaceBrowserTabs }
+        return workspace.state.workspaceWindows.withWindow(workspace.tabs) { workspace.state.windowBrowserTabs }
+    }
+
     private var tabPicker: some View {
         ScrollViewReader { scroll in
             ScrollView(.horizontal) {
                 HStack(spacing: 4) {
-                    ForEach(session.workspaceBrowserTabs) { tab in
+                    ForEach(visibleTabs) { tab in
+                        let ref = WorkspaceTabID.browser(tab.workspaceID)
+                        let pinned = workspace?.tabs.pinnedTabs.contains(ref) == true
                         EmbeddedBrowserTabButton(
                             tab: tab,
-                            selected: tab.id == session.selectedTabID,
+                            selected: tab.id == selectedTab?.id,
+                            pinned: pinned,
                             isKimiProfile: session.isKimiProfileTab(tab.id),
                             onSelect: { session.selectTab(tab.id) },
                             onClose: { onCloseTab(.browser(tab.workspaceID)) }
                         )
+                        .contextMenu {
+                            if let workspace {
+                                Button(pinned ? "Unpin Tab" : (tab.pinIsTemporary ? "Pin Tab for This Session" : "Pin Tab")) {
+                                    workspace.state.workspaceWindows.withWindow(workspace.tabs) {
+                                        workspace.state.setWorkspaceTabPinned(ref, pinned: !pinned)
+                                    }
+                                }
+                            }
+                        }
+                        .background {
+                            if let workspace {
+                                BrowserTabDropAnchor(hosting: workspace.state.windowHosting, tabs: workspace.tabs, tab: ref)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .simultaneousGesture(DragGesture(minimumDistance: 5).onChanged { _ in
+                            if let workspace { workspace.state.windowHosting.beginBrowserTabDrag(ref, from: workspace.tabs) }
+                        })
                         .id(tab.id)
                     }
                 }
                 .padding(.vertical, 2)
             }
             .scrollIndicators(.hidden)
-            .onChange(of: session.selectedTabID) { _, id in
+            .onChange(of: selectedTab?.id) { _, id in
                 if let id { scroll.scrollTo(id, anchor: .trailing) }
             }
             .onAppear {
-                if let id = session.selectedTabID { scroll.scrollTo(id, anchor: .trailing) }
+                if let id = selectedTab?.id { scroll.scrollTo(id, anchor: .trailing) }
             }
         }
     }
@@ -320,6 +350,7 @@ private struct LoadingFavicon: View {
 private struct EmbeddedBrowserTabButton: View {
     let tab: EmbeddedBrowserTab
     let selected: Bool
+    let pinned: Bool
     let isKimiProfile: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
@@ -347,6 +378,7 @@ private struct EmbeddedBrowserTabButton: View {
                         Image(systemName: tabIcon).font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if pinned { Image(systemName: "pin.fill").font(.caption2).accessibilityLabel("Pinned") }
                     Text(displayTitle)
                         .font(.system(size: 12))
                         .lineLimit(1)

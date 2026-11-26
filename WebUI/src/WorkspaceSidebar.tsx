@@ -13,7 +13,7 @@ type Item = {
   updatedAt: number; task?: TaskSnapshot; browser?: WorkspaceBrowser;
 };
 type Action = (action: NativeAction) => void;
-const keyOf = (ref: WorkspaceTab) => ref.kind + ':' + ref.id;
+const keyOf = (ref: WorkspaceTab) => ref.kind + ':' + ref.id.toLowerCase();
 
 export function sidebarIsCompact(snapshot: AppSnapshot): boolean {
   return Boolean(snapshot.isTaskSidebarCollapsed && !snapshot.isTaskSidebarPeeked);
@@ -28,7 +28,7 @@ export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
     available.set(keyOf(ref), { ref, task, title, open: false, pinned: false, updatedAt: task.updatedAt,
       searchText: [title, task.title, task.summary, task.workspace].join(' ') });
   }
-  if (needle) {
+  if (needle || !snapshot.mixesBrowserTabsInSidebar) {
     for (const chat of snapshot.savedChats ?? []) {
       const ref: WorkspaceTab = { kind: 'agent', id: chat.id };
       const title = snapshot.agentNames?.[chat.id.toLowerCase()] || chat.title;
@@ -55,14 +55,22 @@ export function workspaceItems(snapshot: AppSnapshot, search: string): Item[] {
       available.delete(key);
     }
   }
-  if (!needle) return open;
-  const closed = Array.from(available.values()).filter(item => item.ref.kind === 'agent');
+  if (!needle && snapshot.mixesBrowserTabsInSidebar) return open;
+  const prior = new Set(snapshot.priorAgentConversationIDs);
+  const closed = Array.from(available.values()).filter(item => {
+    if (item.ref.kind !== 'agent') return false;
+    if (needle) return true;
+    if (prior.has(item.ref.id.toLowerCase())) return false;
+    return !item.task || item.task.status !== 'Draft' || item.task.hasBoundThread || Boolean(snapshot.agentNames?.[item.ref.id]);
+  });
   const items = open.concat(closed.sort((a, b) => b.updatedAt - a.updatedAt));
   return items.filter(item => item.searchText.toLocaleLowerCase().includes(needle));
 }
 
 // Headings occupy one row so shortcuts, virtual scrolling and the compact rail share the same geometry.
-function sidebarRows(items: Item[]): (Item | 'pinned' | 'tabs')[] {
+function sidebarRows(items: Item[], showLibrary: boolean): (Item | 'pinned' | 'tabs' | 'saved')[] {
+  const firstSaved = showLibrary ? items.findIndex(item => !item.open) : -1;
+  if (firstSaved >= 0) return [...sidebarRows(items.slice(0, firstSaved), false), 'saved', ...items.slice(firstSaved)];
   if (!items[0]?.pinned) return items;
   const firstRegular = items.findIndex(item => !item.pinned);
   if (firstRegular === -1) return ['pinned', ...items];
@@ -92,11 +100,11 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     } });
   }, [active, collapsed]);
   const items = useMemo(() => workspaceItems(snapshot, search), [snapshot, search]);
-  const rows = useMemo(() => sidebarRows(items), [items]);
+  const rows = useMemo(() => sidebarRows(items, !snapshot.mixesBrowserTabsInSidebar), [items, snapshot.mixesBrowserTabsInSidebar]);
   const { start, end } = useSidebarWindow(tabList, rows.length);
   const selectedTab = snapshot.primaryBrowserID
-    ? 'browser:' + snapshot.primaryBrowserID
-    : 'agent:' + (snapshot.savedChatSelection?.id ?? snapshot.selectedTaskID);
+    ? 'browser:' + snapshot.primaryBrowserID.toLowerCase()
+    : 'agent:' + (snapshot.savedChatSelection?.id ?? snapshot.selectedTaskID ?? '').toLowerCase();
   useLayoutEffect(() => {
     if (tabList.current) tabList.current.scrollTop = 0;
   }, [search]);
@@ -112,7 +120,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       if (index >= 0) list.scrollTop = index * sidebarRowHeight;
     }
   }, [selectedTab]);
-  const noun = snapshot.mixesBrowserTabsInSidebar ? 'tabs' : 'chats';
+  const noun = snapshot.mixesBrowserTabsInSidebar ? 'tabs' : 'agents';
   const searchLabel = 'Search ' + noun;
   const select = (item: Item) => {
     if (item.ref.kind === 'agent') post({ action: 'selectTask', id: item.ref.id });
@@ -185,11 +193,11 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
     </nav>}
-    <nav ref={tabList} style={{ '--sidebar-row-height': sidebarRowHeight + 'px' }} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats'}>
+    <nav ref={tabList} style={{ '--sidebar-row-height': sidebarRowHeight + 'px' }} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Agents'}>
       {start > 0 && <div aria-hidden="true" style={{ height: start * sidebarRowHeight + 'px' }} />}
       {rows.slice(start, end).map((item,index) => {
         if (typeof item === 'string') {
-          const heading = item === 'pinned' ? 'Pinned' : snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Chats';
+          const heading = item === 'saved' ? 'Saved agents' : item === 'pinned' ? 'Pinned' : snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Agents';
           const dividerOnly = item === 'tabs' && snapshot.mixesBrowserTabsInSidebar;
           return <h2 key={item} className="sidebar-section-heading" data-section={item} title={dividerOnly ? undefined : heading}>
             {item === 'pinned' && <Icon name="pin" size={13} />}

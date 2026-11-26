@@ -58,7 +58,7 @@ extension AppState {
         guard !window.isClosed else { return }
         workspaceWindows.focus(window)
         if let page = window.selectedPage, let tab = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == page }),
-           browserSession.selectedTabID != tab.id, window.showsPrimaryBrowser {
+           browserSession.selectedTabID != tab.id, window.showsPrimaryBrowser || window.browserSidePaneOpen {
             browserSession.selectTab(tab.id)
         }
     }
@@ -69,7 +69,7 @@ extension AppState {
     }
 
     func canTransferTabs(from source: WorkspaceTabs, to destination: WorkspaceTabs) -> Bool {
-        !isShuttingDown && workspaceLayout == .mixedTabs && !approvalGateBlocksInteraction
+        !isShuttingDown && !approvalGateBlocksInteraction
             && !source.isClosed && !destination.isClosed && source.family == workspaceWindows.primary.family
             && destination.family == source.family && source.presentedSheet == nil && destination.presentedSheet == nil
             && !source.isAPIProvidersPresented && !destination.isAPIProvidersPresented

@@ -387,9 +387,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         }
         state.startRuntimeIfNeeded()
         do {
-            try await require("!!document.querySelector('.task-row') && document.querySelectorAll('.task-row').length === 1")
+            try await require("!!document.querySelector('[data-section=saved]') && document.querySelector('.task-list')?.scrollHeight >= 1717 * 28")
             _ = try await web.evaluateJavaScript("const field = document.querySelector('#task-search'); field.value = 'Saved chat'; field.dispatchEvent(new Event('input', {bubbles:true})); true")
-            try await require("document.querySelector('nav[aria-label=Chats]')?.scrollHeight >= 1717 * 28")
+            try await require("document.querySelector('nav[aria-label=Agents]')?.scrollHeight >= 1717 * 28")
             XCTAssertEqual(state.tasks.count + state.savedChats.count, 1717)
             try await require("document.querySelectorAll('.task-row').length < 80")
             _ = try await web.evaluateJavaScript("const list = document.querySelector('.task-list'); list.scrollTop = list.scrollHeight; true")
@@ -1307,6 +1307,73 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testMixedWorkspaceReopensAsAgentLibraryAndIndependentBrowserStrip() throws {
+        let prefs = isolatedTestPreferences(), profile = UUID()
+        let agent = AgentTask(id: "agent", title: "Agent", summary: "", status: .completed, workspace: "", model: "test")
+        let oldSession = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        let mixed = AppState(tasks: [agent], preferences: prefs, browserSession: oldSession, workspaceLayout: .mixedTabs)
+        let first = try XCTUnwrap(oldSession.humanTab(id: oldSession.createTab())?.workspaceID)
+        let second = try XCTUnwrap(oldSession.humanTab(id: oldSession.createTab())?.workspaceID)
+        mixed.setWorkspaceTabPinned(.browser(first), pinned: true)
+        mixed.selectWorkspaceTab(.browser(second))
+        let original = mixed.workspaceTabs.order
+        mixed.saveWorkspace()
+        oldSession.shutdown()
+
+        let session = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        let state = AppState(tasks: [agent], preferences: prefs, browserSession: session)
+        XCTAssertEqual(state.workspaceTabs.order, original)
+        XCTAssertEqual(state.openWorkspaceTabs, [.agent(agent.id)])
+        XCTAssertEqual(state.windowBrowserTabs.map(\.workspaceID), [first, second])
+        XCTAssertTrue(state.isBrowserPresented)
+        XCTAssertNil(state.primaryBrowserID)
+        XCTAssertEqual(state.selectedTaskID, agent.id)
+        XCTAssertEqual(state.commandTab(inBrowserPane: true), .browser(second))
+        state.toggleWorkspaceBrowser()
+        XCTAssertFalse(state.isBrowserPresented)
+        XCTAssertEqual(state.windowBrowserTabs.count, 2)
+        state.saveWorkspace()
+        session.shutdown()
+
+        let next = EmbeddedBrowserSession(profileID: profile, defaults: prefs)
+        defer { next.shutdown() }
+        let reopened = AppState(tasks: [agent], preferences: prefs, browserSession: next)
+        XCTAssertFalse(reopened.isBrowserPresented)
+        XCTAssertEqual(reopened.workspaceTabs.order, original)
+        reopened.toggleWorkspaceBrowser()
+        XCTAssertEqual(reopened.workspaceTabs.selectedPage, second)
+        XCTAssertEqual(reopened.selectedTaskID, agent.id)
+        reopened.closeWorkspaceTab(.browser(first))
+        reopened.reopenClosedTab()
+        XCTAssertEqual(reopened.commandTabs(inBrowserPane: true), [.browser(first), .browser(second)])
+        XCTAssertEqual(Array(reopened.workspaceTabs.pinnedTabs), [.browser(first)])
+        XCTAssertEqual(reopened.workspaceTabs.selectedPage, first)
+    }
+
+    @MainActor
+    func testAgentPaneKeepsBrowserTabsInTheirOwningWindow() throws {
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
+        let main = state.workspaceWindows.primary, other = state.workspaceWindows.createTemporary()
+        let page = try XCTUnwrap(session.humanTab(id: session.createTab())?.workspaceID)
+        try state.workspaceWindows.withWindow(other) {
+            state.presentNewAgent()
+            XCTAssertTrue(state.windowBrowserTabs.isEmpty)
+            let second = try session.createTab()
+            state.selectWorkspaceTab(.browser(try XCTUnwrap(session.humanTab(id: second)?.workspaceID)))
+            XCTAssertTrue(other.showsNewAgent)
+            XCTAssertTrue(state.isBrowserPresented)
+            XCTAssertEqual(state.windowBrowserTabs.count, 1)
+        }
+        XCTAssertFalse(main.browserSidePaneOpen)
+        XCTAssertEqual(state.commandTabs(inBrowserPane: true), [.browser(page)])
+        XCTAssertTrue(state.transferTabs([.browser(page)], from: main, to: other))
+        XCTAssertTrue(state.windowBrowserTabs.isEmpty)
+        XCTAssertEqual(state.workspaceWindows.withWindow(other) { state.windowBrowserTabs.count }, 2)
+    }
+
+    @MainActor
     func testLegacyOrderMigratesAndClosedTabsStayClosed() throws {
         let prefs = isolatedTestPreferences()
         let tasks = ["alpha", "beta"].map {
@@ -1495,14 +1562,23 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             XCTAssertLessThanOrEqual(address.convert(address.bounds, to: nil).maxY, window.contentLayoutRect.maxY)
 
             if width == 980 {
-                // Two tabs overflow the narrow strip. Select the first, add a tab,
-                // and close the new tab at its scrolled-into-view trailing edge.
-                try await clickInWindow(at: NSPoint(x: strip.minX + 44, y: trafficLight.midY), window: window)
+                // The strip uses saved workspace order. Hit the actual buttons in this
+                // clipped scroll view even when the newest tab is at the leading edge.
+                func clickTab(_ id: UUID, close: Bool = false) async throws {
+                    let page = try XCTUnwrap(session.humanTab(id: id)?.workspaceID)
+                    let anchor = try XCTUnwrap(nativeViews(in: pane).compactMap { $0 as? BrowserTabAnchorView }
+                        .first { $0.tab == .browser(page) })
+                    let rect = anchor.convert(anchor.bounds, to: nil)
+                    let point = NSPoint(x: close ? rect.maxX - 17 : rect.minX + 44, y: rect.midY)
+                    XCTAssertTrue(strip.contains(point))
+                    try await clickInWindow(at: point, window: window)
+                }
+                try await clickTab(first)
                 XCTAssertEqual(session.selectedTabID, first)
                 try await clickInWindow(at: NSPoint(x: strip.maxX + 16, y: trafficLight.midY), window: window)
                 XCTAssertEqual(session.humanTabs.count, 3)
                 XCTAssertFalse([first, second].contains(try XCTUnwrap(session.selectedTabID)))
-                try await clickInWindow(at: NSPoint(x: strip.maxX - 17, y: trafficLight.midY), window: window)
+                try await clickTab(XCTUnwrap(session.selectedTabID), close: true)
                 XCTAssertEqual(session.humanTabs.map(\.id), [first, second])
 
                 let site = try InitialRequestHTTPFixture(finalStatus: 200, finalHTML: "<title>Address field fixture</title>")
@@ -2318,7 +2394,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertFalse(state.isTaskSidebarCollapsed)
 
         let scrollable = await waitForScriptBool(on: chat, script: """
-            (() => { const list = document.querySelector('nav[aria-label="Chats"]');
+            (() => { const list = document.querySelector('nav[aria-label="Agents"]');
                 if (!list) return false;
                 const offset = Math.min(150, list.scrollHeight - list.clientHeight);
                 list.scrollTop = offset;

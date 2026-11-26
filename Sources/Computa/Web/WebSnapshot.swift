@@ -58,6 +58,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let selectedTaskID: String?
     let selectedEntryID: String?
     let selectedAgentProfile: SavedWorkspace.Agent?
+    let priorAgentConversationIDs: [String]
     let agentNames: [String: String]
     let canStartFresh: Bool
     let savedChats: [SavedChatSummary]
@@ -118,6 +119,11 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         for task in state.tasks {
             if let agent = state.workspaceTabs.agent(for: task) { names[task.id] = agent.name }
         }
+        let prior = Set(state.workspaceTabs.agents.values.flatMap { $0.history.map { $0.id.lowercased() } })
+        let priorLocalIDs = state.tasks.compactMap { task in
+            prior.contains((task.runtimeThreadID ?? task.id).lowercased()) ? task.id.lowercased() : nil
+        }
+        priorAgentConversationIDs = prior.union(priorLocalIDs).sorted()
         agentNames = names
         savedChats = state.savedChats
         savedChatSelection = state.savedChatSelection

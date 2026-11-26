@@ -20,11 +20,14 @@ final class SidebarRail: NSResponder {
 }
 
 struct SidebarTitlebarToggle: View {
-    @Bindable var state: AppState
+    let state: AppState
+    let tabs: WorkspaceTabs
 
     var body: some View {
-        let label = state.isTaskSidebarCollapsed ? "Expand chat sidebar" : "Collapse chat sidebar"
-        Button { state.isTaskSidebarCollapsed.toggle() } label: {
+        let label = tabs.isSidebarCollapsed ? "Expand agent sidebar" : "Collapse agent sidebar"
+        Button {
+            state.workspaceWindows.withWindow(tabs) { state.isTaskSidebarCollapsed.toggle() }
+        } label: {
             Image(systemName: "sidebar.left")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -35,7 +38,7 @@ struct SidebarTitlebarToggle: View {
         .accessibilityIdentifier("task-sidebar-toggle")
         .accessibilityLabel(label)
         .help(label)
-        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
+        .disabled(tabs.presentedSheet != nil || state.approvalGateBlocksInteraction)
     }
 }
 

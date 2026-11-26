@@ -182,6 +182,7 @@ export interface CodexCLIUsageBucket {
 export interface AppSnapshot {
   selectedAgentProfile?: AgentProfile;
   agentNames?: Record<string, string>;
+  priorAgentConversationIDs?: string[];
   canStartFresh?: boolean;
   launcherChat?: { id: string; taskID: string; unsentDraft?: string };
   nativeSidebarControls?: boolean;
