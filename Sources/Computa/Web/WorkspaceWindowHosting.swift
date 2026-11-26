@@ -54,7 +54,9 @@ final class WorkspaceWindowHosting: NSObject {
     private weak var state: AppState?
     private var hosts: [UUID: Host] = [:]
     private var pending: [UUID: PendingDetach] = [:]
-    var openScene: ((UUID) -> Void)?
+    var openScene: ((UUID) -> Void)? { didSet { openRestoredScenesIfReady() } }
+    private var awaitingSceneRequest: [UUID]
+    private var restoringFocus: UUID?
     private var source: Host?
     private var drag: Drag?
     private var highlighted: Host?
@@ -64,6 +66,8 @@ final class WorkspaceWindowHosting: NSObject {
 
     init(state: AppState) {
         self.state = state
+        awaitingSceneRequest = Array(state.workspaceWindows.restoredWindowIDs.dropFirst())
+        restoringFocus = state.workspaceWindows.restoredFocusID
         super.init()
         NotificationCenter.default.addObserver(self, selector: #selector(resignedActive(_:)), name: NSApplication.didResignActiveNotification, object: nil)
     }
@@ -76,13 +80,22 @@ final class WorkspaceWindowHosting: NSObject {
         let center = NotificationCenter.default
         for (selector, name) in [(#selector(focused(_:)), NSWindow.didBecomeKeyNotification),
                                  (#selector(closed(_:)), NSWindow.willCloseNotification),
+                                 (#selector(visibilityChanged(_:)), NSWindow.didChangeOcclusionStateNotification),
+                                 (#selector(frameChanged(_:)), NSWindow.didMoveNotification),
+                                 (#selector(frameChanged(_:)), NSWindow.didResizeNotification),
+                                 (#selector(frameChanged(_:)), NSWindow.didEndLiveResizeNotification),
                                  (#selector(willMove(_:)), NSWindow.willMoveNotification)] {
             center.removeObserver(self, name: name, object: window)
             center.addObserver(self, selector: selector, name: name, object: window)
         }
         window.tabbingMode = .disallowed
-        if tabs !== state.workspaceWindows.primary { window.isRestorable = false }
-        if window.isKeyWindow { state.focusWorkspace(tabs) }
+        // The workspace store opens each scene once, even if macOS Resume is disabled.
+        window.isRestorable = false
+        if tabs === state.workspaceWindows.primary { state.workspaceWindows.primaryIsClosed = false }
+        if restoringFocus == nil { recordFrame(host) }
+        if window.isKeyWindow && restoringFocus == nil { state.focusWorkspace(tabs) }
+        openRestoredScenesIfReady()
+        Task { @MainActor [weak self] in self?.finishRestoringFocus() }
         if let move = pending.removeValue(forKey: tabs.id) {
             // Scene creation is asynchronous. Keep the original tab until there
             // is a real destination window, then recheck its ownership.
@@ -95,6 +108,57 @@ final class WorkspaceWindowHosting: NSObject {
                 } else { window.close() }
             }
         }
+    }
+
+    private func openRestoredScenesIfReady() {
+        guard let state, let openScene, hosts[state.workspaceWindows.primary.id] != nil else { return }
+        let ids = awaitingSceneRequest
+        awaitingSceneRequest.removeAll()
+        for id in ids where hosts[id] == nil { openScene(id) }
+    }
+
+    private func finishRestoringFocus() {
+        guard let state, let id = restoringFocus, let host = hosts[id], let window = host.window,
+              state.workspaceWindows.restoredWindowIDs.allSatisfy({ hosts[$0]?.window?.isVisible == true }) else { return }
+        // WindowGroup cascades a newly ordered scene after attach. Apply the saved
+        // frames only once the real windows are on screen, before committing geometry.
+        for id in state.workspaceWindows.restoredWindowIDs {
+            guard let host = hosts[id], let saved = host.tabs.frame,
+                  let frame = Self.visibleFrame(for: saved) else { continue }
+            host.window?.setFrame(frame, display: false)
+        }
+        window.makeKeyAndOrderFront(nil)
+        restoringFocus = nil
+        for host in hosts.values { recordFrame(host) }
+        state.focusWorkspace(host.tabs)
+    }
+
+    static func visibleFrame(for saved: CGRect, screens: [CGRect] = NSScreen.screens.map(\.visibleFrame)) -> CGRect? {
+        guard !saved.isEmpty, !saved.isInfinite, !saved.isNull, let first = screens.first else { return nil }
+        // Retain the display with the largest overlap; recover onto the main display if it was unplugged.
+        let area = screens.reduce(first) { best, next in
+            let a = saved.intersection(best), b = saved.intersection(next)
+            return b.width * b.height > a.width * a.height ? next : best
+        }
+        let width = min(saved.width, area.width), height = min(saved.height, area.height)
+        return CGRect(x: min(max(saved.minX, area.minX), area.maxX - width),
+                      y: min(max(saved.minY, area.minY), area.maxY - height), width: width, height: height)
+    }
+
+    private func recordFrame(_ host: Host) {
+        guard restoringFocus == nil, let window = host.window, !window.inLiveResize, !window.isMiniaturized, !window.styleMask.contains(.fullScreen),
+              !window.frame.isEmpty, host.tabs.frame != window.frame else { return }
+        host.tabs.frame = window.frame
+        state?.saveWorkspace()
+    }
+
+    @objc private func visibilityChanged(_ note: Notification) {
+        guard restoringFocus != nil else { return }
+        Task { @MainActor [weak self] in self?.finishRestoringFocus() }
+    }
+
+    @objc private func frameChanged(_ note: Notification) {
+        if let host = host(note) { recordFrame(host) }
     }
 
     enum NewItem { case browser, agent, window }
@@ -145,7 +209,9 @@ final class WorkspaceWindowHosting: NSObject {
     }
 
     @objc private func focused(_ note: Notification) {
-        if let host = host(note) { state?.focusWorkspace(host.tabs) }
+        if restoringFocus != nil {
+            Task { @MainActor [weak self] in self?.finishRestoringFocus() }
+        } else if let host = host(note) { state?.focusWorkspace(host.tabs) }
     }
 
     @objc private func closed(_ note: Notification) {
@@ -153,7 +219,18 @@ final class WorkspaceWindowHosting: NSObject {
         if source === host || highlighted === host { cancelDrag() }
         hosts.removeValue(forKey: host.tabs.id)
         NotificationCenter.default.removeObserver(self, name: nil, object: window)
-        state?.discardTemporaryWindow(host.tabs)
+        guard let state, !state.isShuttingDown else { return }
+        if restoringFocus != nil { restoringFocus = nil }
+        if host.tabs === state.workspaceWindows.primary {
+            state.workspaceWindows.primaryIsClosed = true
+            let windows = state.workspaceWindows
+            let survivor = windows.temporary.first { $0 === windows.focused } ?? windows.temporary.first
+            if let survivor {
+                state.returnWindowPins(from: host.tabs, to: survivor)
+                state.focusWorkspace(survivor)
+            }
+            state.saveWorkspace()
+        } else { state.discardTemporaryWindow(host.tabs) }
     }
 
     func beginTabDrag(_ tab: WorkspaceTabID, from tabs: WorkspaceTabs, sidebar: WKWebView) {

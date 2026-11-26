@@ -304,7 +304,7 @@ final class AppState {
         catch { FirstMessageStore.log.error("Local first-message history could not be loaded.") }
         for record in localRecords {
             if let thread = record.threadID {
-                workspaceWindows.primary.restoreBinding(draft: record.localID.uuidString, thread: thread)
+                for window in workspaceWindows.all { window.restoreBinding(draft: record.localID.uuidString, thread: thread) }
                 missingRuntimeThreads.insert(record.id)
             }
             firstMessages[record.id.lowercased()] = record
@@ -314,7 +314,7 @@ final class AppState {
         threadThinkingSelections = snapshot?.thinkingSelections ?? [:]
         let existingIDs = Set((tasks + recovered).map(\.id))
         let savedDrafts = snapshot?.drafts ?? [:]
-        let openIDs = workspaceWindows.primary.order.filter { $0.kind == .agent }.map(\.id)
+        let openIDs = workspaceWindows.all.flatMap(\.order).filter { $0.kind == .agent }.map(\.id)
         let closedIDs = Set(savedDrafts.keys).subtracting(openIDs).sorted()
         let drafts = (openIDs + closedIDs).compactMap { id -> AgentTask? in
             guard !existingIDs.contains(id), let draft = savedDrafts[id] else { return nil }
@@ -323,12 +323,15 @@ final class AppState {
         restoredWorkspaceDraftIDs = Set(drafts.map(\.id))
         self.tasks = tasks + recovered + drafts
         waitingForWorkspaceHistory = tasks.isEmpty
-        if tasks.isEmpty {
-            selectedTaskID = self.tasks.first { $0.id == snapshot?.selectedAgent }?.id
-        } else {
-            selectedTaskID = workspaceTabs.initialAgent(in: self.tasks)
+        for window in workspaceWindows.all {
+            if !tasks.isEmpty {
+                let foreign = Set(workspaceWindows.all.filter { $0 !== window }.flatMap(\.order))
+                window.selectedTaskID = window.initialAgent(in: self.tasks.filter { !foreign.contains(.agent($0.id)) })
+            } else if snapshot?.windows == nil {
+                if let id = snapshot?.selectedAgent, window.order.contains(.agent(id)) { window.selectedTaskID = id }
+            }
+            window.selectedEntryID = self.tasks.first { $0.id == window.selectedTaskID }?.entries.last?.id
         }
-        selectedEntryID = selectedTask?.entries.last?.id
         retireWebsiteModelSelections()
         apiProviderSettings = APIProviderSettings(preferences: preferences,
             listModels: { provider, key in
@@ -349,14 +352,32 @@ final class AppState {
         if let snapshot, !self.cookieMaintenanceOnlyLaunch {
             self.browserSession.restoreWorkspacePages(snapshot)
             let restoredPrimary = snapshot.browserIsPrimary && self.browserSession.selectedTabID != nil
-            workspaceTabs.browserIsPrimary = mixesBrowserTabsInSidebar && restoredPrimary
+            if snapshot.windows == nil { workspaceTabs.browserIsPrimary = restoredPrimary }
+            if !mixesBrowserTabsInSidebar {
+                for window in workspaceWindows.all { window.browserIsPrimary = false }
+            }
             isBrowserPresented = snapshot.showsBrowserPane || (!mixesBrowserTabsInSidebar && restoredPrimary)
         }
-        for tab in self.browserSession.workspaceBrowserTabs { workspaceTabs.open(.browser(tab.workspaceID)) }
-        workspaceTabs.selectedPage = self.browserSession.workspaceBrowserTabs.first { $0.id == self.browserSession.selectedTabID }?.workspaceID
+        let pages = self.browserSession.workspaceBrowserTabs
+        let livePages = Set(pages.map { WorkspaceTabID.browser($0.workspaceID) })
+        for window in workspaceWindows.all {
+            window.removeTransferred(Set(window.order.filter { $0.kind == .browser && !livePages.contains($0) }))
+            if let page = window.selectedPage, !livePages.contains(.browser(page)) {
+                window.selectedPage = window.order.first { $0.kind == .browser }.flatMap { UUID(uuidString: $0.id) }
+                if window.selectedPage == nil { window.browserIsPrimary = false }
+            }
+        }
+        for tab in pages where workspaceWindows.owner(of: .browser(tab.workspaceID)) == nil { workspaceTabs.open(.browser(tab.workspaceID)) }
+        if snapshot?.windows == nil {
+            workspaceTabs.selectedPage = pages.first { $0.id == self.browserSession.selectedTabID }?.workspaceID
+        }
+        if let focused = workspaceWindows.all.first(where: { $0.id == snapshot?.focusedWindow }) {
+            focusWorkspace(focused)
+        }
         if !self.cookieMaintenanceOnlyLaunch {
-            workspaceTabs.onChange = { [weak self] in self?.saveWorkspace() }
-            self.browserSession.onWorkspacePageChanged = workspaceTabs.onChange
+            let save: () -> Void = { [weak self] in self?.saveWorkspace() }
+            for window in workspaceWindows.all { window.onChange = save }
+            self.browserSession.onWorkspacePageChanged = save
         }
         self.browserSession.onWorkspaceTabOpened = { [weak self] page, opener in
             guard let self else { return }
@@ -366,7 +387,7 @@ final class AppState {
         self.browserSession.onWorkspacePageSelected = { [weak self] page in
             guard let self, let owner = workspaceWindows.owner(of: .browser(page)), owner.selectedPage != page else { return }
             owner.selectedPage = page
-            if owner === workspaceWindows.primary { saveWorkspace() }
+            saveWorkspace()
         }
         self.browserSession.onWorkspaceTabClosed = { [weak self] id, opener in
             guard let self, let owner = workspaceWindows.owner(of: .browser(id)) else { return }
@@ -400,16 +421,17 @@ final class AppState {
         if !tasks.isEmpty { saveWorkspace() }
     }
 
-    func saveWorkspace(includingOpenWindows: Bool = false) {
+    func saveWorkspace() {
         guard !isShuttingDown, !cookieMaintenanceOnlyLaunch, !transferringWorkspaceTabs else { return }
         let workspaceTabs = workspaceWindows.primary
-        let previous = workspaceTabs.saved
         let byID = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
-        // A normal window close discards its unpinned tabs. Quit collects the
-        // still-open windows into the durable sidebar before AppKit tears them down.
-        let windows = includingOpenWindows ? workspaceWindows.all : [workspaceTabs]
+        let windows = workspaceWindows.openWindows
+        // Attaching the first native window reports its frame before agent history arrives.
+        // Preserve the fresh-profile history bootstrap until there is a real layout to save.
+        if waitingForWorkspaceHistory, workspaceTabs.saved == nil, windows.count == 1,
+           windows[0].order.isEmpty { return }
         let regularTabs = windows.flatMap { $0.order.dropFirst($0.pinnedCount) }
-        let pinnedTabs = workspaceWindows.all.flatMap(\.pinnedTabs)
+        let pinnedTabs = windows.flatMap(\.pinnedTabs)
         let pinSet = Set(pinnedTabs)
         let restorableTabs = Set(regularTabs).union(pinSet)
         let temporaryDrafts = Set(workspaceWindows.temporary.flatMap(\.temporaryDraftIDs))
@@ -417,7 +439,7 @@ final class AppState {
         let pages = browserSession.restorablePages(pinnedIn: pinSet)
             .filter { restorableTabs.contains(.browser($0.id)) }
         let pageIDs = Set(pages.map { $0.id.uuidString })
-        var drafts = waitingForWorkspaceHistory ? (previous?.drafts ?? [:]).filter { byID[$0.key] == nil } : [:]
+        var drafts: [String: SavedWorkspace.Draft] = [:]
         for task in tasks where task.status == .draft && task.runtimeThreadID == nil && task.entries.isEmpty
             && workspaceTabs.agent(for: task) != nil && !temporaryDrafts.contains(task.id) {
             drafts[task.id] = SavedWorkspace.Draft(task)
@@ -426,30 +448,39 @@ final class AppState {
             if tab.kind == .browser { return pageIDs.contains(tab.id) ? tab : nil }
             guard let task = byID[tab.id] else {
                 // Browser changes may arrive before the runtime has loaded conversation history.
-                return waitingForWorkspaceHistory ? tab : nil
+                guard waitingForWorkspaceHistory else { return nil }
+                drafts[tab.id] = workspaceTabs.saved?.drafts[tab.id]
+                return tab
             }
             if task.status == .draft, task.runtimeThreadID == nil, task.entries.isEmpty {
                 drafts[tab.id] = SavedWorkspace.Draft(task)
             }
             return .agent(task.runtimeThreadID ?? tab.id)
         }
-        let pins = pinnedTabs.compactMap(restorableTab)
-        let order = pins + regularTabs.compactMap(restorableTab)
-        let focused = workspaceWindows.focused
-        let selectionWindow = includingOpenWindows && focused.selection.flatMap(restorableTab) != nil
-            ? focused : workspaceTabs
-        let returningPin = selectionWindow.order.isEmpty ? pins.first : nil
-        let selected = selectionWindow.selectedTaskID.map { byID[$0]?.runtimeThreadID ?? $0 }
-            ?? (returningPin?.kind == .agent ? returningPin?.id : nil)
-            ?? (waitingForWorkspaceHistory && workspaceTabs.selectionRevision == 0 ? previous?.selectedAgent : nil)
-        let selectedPage = selectionWindow.selectedPage.flatMap { pageIDs.contains($0.uuidString) ? $0 : nil }
-            ?? returningPin.flatMap { $0.kind == .browser ? UUID(uuidString: $0.id) : nil }
+        var references: [WorkspaceTabID: WorkspaceTabID] = [:]
+        for tab in restorableTabs { references[tab] = restorableTab(tab) }
+        let pins = pinnedTabs.compactMap { references[$0] }
+        let order = pins + regularTabs.compactMap { references[$0] }
+        let layouts = windows.map { window in
+            let order = window.order.compactMap { references[$0] }
+            let agent = window.selectedTaskID.flatMap { references[.agent($0)] }
+                .flatMap { order.contains($0) ? $0.id : nil }
+                ?? order.first { $0.kind == .agent }?.id
+            let page = window.selectedPage.flatMap { order.contains(.browser($0)) ? $0 : nil }
+                ?? order.first { $0.kind == .browser }.flatMap { UUID(uuidString: $0.id) }
+            let temporaryIDs = window.temporaryDraftIDs.intersection(order.filter { $0.kind == .agent }.map(\.id))
+            return SavedWorkspace.Window(id: window.id, order: order, selectedAgent: agent, selectedPage: page,
+                                         browserIsPrimary: page != nil && (window.browserIsPrimary || agent == nil),
+                                         frame: window.frame,
+                                         temporaryDraftIDs: temporaryIDs.isEmpty ? nil : temporaryIDs)
+        }
+        let active = layouts.first { $0.id == workspaceWindows.focused.id } ?? layouts.first
         let temporaryKeys = Set(temporaryDrafts.map { $0.lowercased() })
         let profiles = workspaceTabs.agents.filter { !temporaryKeys.contains($0.key) }
-        workspaceTabs.save(SavedWorkspace(thinkingSelections: threadThinkingSelections.isEmpty ? nil : threadThinkingSelections, agents: profiles.isEmpty ? nil : profiles, order: order,
-            pinnedCount: pins.isEmpty ? nil : pins.count, selectedAgent: selected, drafts: drafts,
+        workspaceTabs.save(SavedWorkspace(windows: layouts, focusedWindow: active?.id, thinkingSelections: threadThinkingSelections.isEmpty ? nil : threadThinkingSelections, agents: profiles.isEmpty ? nil : profiles, order: order,
+            pinnedCount: pins.isEmpty ? nil : pins.count, selectedAgent: active?.selectedAgent, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
-            pages: pages, selectedPage: selectedPage, browserIsPrimary: selectedPage != nil && (selectionWindow.browserIsPrimary || returningPin?.kind == .browser),
+            pages: pages, selectedPage: active?.selectedPage, browserIsPrimary: active?.browserIsPrimary == true,
             showsBrowserPane: isBrowserPresented))
     }
 
@@ -2310,7 +2341,7 @@ final class AppState {
 
     func prepareWorkspaceForQuit() {
         guard !isShuttingDown else { return }
-        saveWorkspace(includingOpenWindows: true)
+        saveWorkspace()
         isShuttingDown = true
     }
 
