@@ -239,6 +239,54 @@ final class NativeVerificationRuntimeTests: XCTestCase {
         }
     }
 
+    func testTwoAppsWithoutAccessibleWindowsExplainFailedInspectionAcrossReload() async throws {
+        try await withHarness(mode: "bind-no-window") { runtime, root, audit, backend, background in
+            try await self.start(runtime, root: root, background: background, prompt: "Check both apps for a notice.")
+            try await self.waitFor { audit.status == .waiting || audit.status == .completed }
+            XCTAssertEqual(audit.status, .waiting)
+            let calls = try self.results(root)
+            XCTAssertEqual(calls.compactMap { $0["success"] as? Bool }, [false, false])
+            XCTAssertTrue(calls.allSatisfy { ($0["text"] as? String)?.contains("dispatch=not_dispatched") == true })
+            XCTAssertEqual(backend.actions, 0)
+            XCTAssertTrue(audit.assistant.isEmpty)
+            let messages = audit.entries.filter { $0.title == "App inspection blocked" }
+            XCTAssertEqual(messages.map(\.body), [NativeInspectionFailure.noWindow.message])
+            let stored = try NativeFailureEvidenceStore(directory: root.appendingPathComponent("heydash-native-failures"))
+                .load(threadID: self.taskID)
+            let restored = NativeFailureEvidenceStore.restoringFailures(stored, in: messages)
+            XCTAssertEqual(restored.map(\.id), messages.map(\.id))
+            XCTAssertEqual(restored.map(\.body), messages.map(\.body))
+            try await runtime.submit(prompt: "Say hi.", toTaskID: self.taskID, modelID: self.modelID)
+            try await self.waitFor { audit.status == .completed }
+            XCTAssertEqual(audit.assistant, ["NEXT_TURN_OK"])
+        }
+    }
+
+    func testInspectionDiagnosticRequiresOnlyMatchingUndispatchedReadFailures() throws {
+        var ledger = ComputerActionEvidence(turnID: "turn")
+        let failures: [(String, Error)] = [
+            ("computer_v2_snapshot", AutomationError.accessibilityFailure(operation: "read AXRole", code: -25204)),
+            ("computer_v2_capture", AutomationError.permissionNotGranted(.screenRecording)),
+        ]
+        for (tool, error) in failures {
+            let reason = try XCTUnwrap(NativeInspectionFailure(tool: tool, error: error))
+            try ledger.begin(operationID: tool, tool: tool, targetID: "fixture", requiresVerification: false)
+            try ledger.recordFailure(operationID: tool, code: reason.rawValue, message: "fixture", dispatch: .notDispatched)
+        }
+        let diagnostic = try XCTUnwrap(NativeInspectionDiagnostic(ledger: ledger, turnID: "turn", otherDiagnostic: nil))
+        XCTAssertEqual(diagnostic.failures, [.accessibilityRead, .screenCapture])
+        XCTAssertEqual(diagnostic.unresolvedOperations, 2)
+        XCTAssertNil(NativeInspectionDiagnostic(ledger: ledger, turnID: "previous", otherDiagnostic: nil))
+        XCTAssertNil(NativeInspectionDiagnostic(ledger: ledger, turnID: "turn", otherDiagnostic: "search incomplete"))
+        XCTAssertNil(NativeInspectionFailure(tool: "computer_v2_ax", error: failures[0].1))
+        XCTAssertNil(NativeInspectionFailure(tool: "computer_v2_open", error: ApplicationWindowReadError.windowUnavailable))
+        XCTAssertNil(NativeInspectionFailure(tool: "computer_v2_capture", error: NSError(domain: "model text", code: 1)))
+        try ledger.begin(operationID: "click", tool: "computer_v2_click", targetID: "fixture")
+        try ledger.recordFailure(operationID: "click", code: "tool_failed", message: "fixture", dispatch: .unknown)
+        XCTAssertNil(NativeInspectionDiagnostic(ledger: ledger, turnID: "turn", otherDiagnostic: nil))
+        XCTAssertNotNil(ledger.completionDiagnostic)
+    }
+
     func testAccessibilityDenialCannotExcuseAnIndependentFailedRead() async throws {
         try await withHarness(mode: "bind-denied-other-debt") { runtime, root, audit, _, background in
             try await self.start(runtime, root: root, background: background, prompt: "Inspect the app.")
@@ -396,7 +444,11 @@ final class NativeVerificationRuntimeTests: XCTestCase {
         config.codexHomePath = root.path
         config.protocolTracePath = root.appendingPathComponent("protocol.jsonl").path
         config.computerInteractionPolicy = .backgroundOnly
-        config.fixtureDenyAppBindAccessibility = mode.hasPrefix("bind-denied")
+        if mode.hasPrefix("bind-denied") { config.fixtureAppBindError = AutomationError.permissionNotGranted(.accessibility) }
+        if mode.hasPrefix("bind-no-window") {
+            config.fixtureAppBindError = ApplicationWindowReadError.windowSelectionUnavailable(.init(reason: .noSelectedWindow,
+                windowsCode: 0, windowCount: 0, focusedCode: -25212, focusedPresent: false, mainCode: -25212, mainPresent: false))
+        }
         if let gate { config.fixtureBeforeNativeVerificationRead = { await gate.pauseOnce() } }
         let runtime = CodexAppServerRuntime(configuration: config, visualGrounder: NoModelGrounder())
         let backend = Backend()

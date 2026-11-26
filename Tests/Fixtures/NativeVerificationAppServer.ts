@@ -47,6 +47,11 @@ function received(message: any) {
   rows.push({ tool: lastTool, success, text });
   persist();
   const previousStep = step++;
+  if (mode === "bind-no-window") {
+    if (previousStep === 0) return call("computer_v2_open", { bundle_id: "com.example.second", activation: "none" });
+    answer("There are no matching messages.");
+    return finish();
+  }
   if (mode.startsWith("bind-denied")) {
     if (mode === "bind-denied-other-debt" && previousStep === 0) return call("computer_v2_snapshot");
     const match = /reply exactly: ([^\n]+)/.exec(rows[0].text);
@@ -114,7 +119,7 @@ input.on("line", line => {
         if (!existsSync(join(root, "continue"))) return;
         clearInterval(waiting);
         waiting = undefined;
-        if (mode.startsWith("bind-denied")) call("computer_v2_open", { bundle_id: "com.example.readonly", activation: "none" });
+        if (mode.startsWith("bind-denied") || mode === "bind-no-window") call("computer_v2_open", { bundle_id: "com.example.readonly", activation: "none" });
         else call("computer_v2_snapshot");
       }, 5);
       break;

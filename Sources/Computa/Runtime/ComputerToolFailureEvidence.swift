@@ -1,6 +1,42 @@
 import AutomationCore
 import Foundation
 
+/// Reasons the host can establish for an unsuccessful read. Only the enum
+/// values enter durable diagnostics, never window titles or model text.
+enum NativeInspectionFailure: String, Codable, CaseIterable {
+    case noWindow = "no_accessible_window"
+    case accessibilityRead = "accessibility_read_failed"
+    case screenCapture = "screen_capture_permission_denied"
+
+    var tool: String {
+        switch self {
+        case .noWindow: "computer_v2_open"
+        case .accessibilityRead: "computer_v2_snapshot"
+        case .screenCapture: "computer_v2_capture"
+        }
+    }
+
+    init?(tool: String, error: Error) {
+        if case let ApplicationWindowReadError.windowSelectionUnavailable(detail) = error,
+           detail.reason == .noSelectedWindow {
+            self = .noWindow
+        } else if case AutomationError.accessibilityFailure = error {
+            self = .accessibilityRead
+        } else if case AutomationError.permissionNotGranted(.screenRecording) = error {
+            self = .screenCapture
+        } else { return nil }
+        guard tool == self.tool else { return nil }
+    }
+
+    var message: String {
+        switch self {
+        case .noWindow: "Kolmogor couldn’t find an accessible window to inspect. Open the window you want checked, then try again."
+        case .accessibilityRead: "macOS couldn’t read the requested window’s controls. Bring the window into view and try again."
+        case .screenCapture: "macOS denied the screen capture. To allow screenshots, enable Screen Recording for Kolmogor in System Settings."
+        }
+    }
+}
+
 /// Describe the native failure we actually measured, without turning an unknown
 /// cause into a website, permission, or policy diagnosis. This is evidence for
 /// the model, not a replacement for approval, policy, or execution checks.

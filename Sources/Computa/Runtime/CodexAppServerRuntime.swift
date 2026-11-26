@@ -1053,7 +1053,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         /// Synthetic failure at the native boundary, only with an explicit
         /// fixture transport. Never enabled for a bundled production runtime.
         var fixtureActivationFailurePID: Int32? = nil
-        var fixtureDenyAppBindAccessibility = false
+        var fixtureAppBindError: (any Error & Sendable)?
         var fixtureBeforeNativeVerificationRead: (@Sendable () async throws -> Void)? = nil
         /// Metadata/read substitutes only for owned JSON-RPC fixtures. Neither
         /// is consulted by a bundled production runtime.
@@ -5031,6 +5031,14 @@ private extension CodexAppServerRuntime {
                     events.yield(.timelineEntryAppended(taskID: taskID, entry: record.entry))
                     return
                 }
+                if let inspection = NativeInspectionDiagnostic(ledger: computerEvidence[taskID], turnID: turnID,
+                    otherDiagnostic: computerSearchEvidence[taskID]?.completionDiagnostic ?? nativeMessageEvidence[taskID]?.completionDiagnostic) {
+                    let record = try inspection.record(threadID: threadForTask[taskID] ?? taskID, turnID: turnID)
+                    displayed = inspection.message
+                    try nativeFailureStore().append(record)
+                    events.yield(.timelineEntryAppended(taskID: taskID, entry: record.entry))
+                    return
+                }
                 let diagnostic = try ComputerOutcomeDiagnostic.make(kind: .unverified,
                     unresolvedOperations: max(1, unresolved.count), failedOperations: unresolved.filter { $0.failureCode != nil }.count)
                 _ = try nativeFailureStore().append(.init(threadID: threadForTask[taskID] ?? taskID, turnID: turnID,
@@ -5435,7 +5443,12 @@ private extension CodexAppServerRuntime {
                                 targetWasUnbound: error is ComputerV2ToolContract.ValidationError
                                     && computerV2Sessions[taskID]?.application == nil)
                         } else {
-                            try? computerEvidence[taskID]?.recordFailure(operationID: callID, code: "tool_failed", message: message, dispatch: operation.dispatch)
+                            let failure = NativeInspectionFailure(tool: tool, error: error)
+                            try? computerEvidence[taskID]?.recordFailure(operationID: callID, code: failure?.rawValue ?? "tool_failed",
+                                message: message, dispatch: operation.dispatch)
+                            if failure != nil, operation.dispatch == .notDispatched, operation.foregroundEffect == nil {
+                                message += " If another authorized source is available, check it. Otherwise explain what prevented inspection."
+                            }
                         }
                     }
                     if computerActiveOperation[taskID] == callID { computerActiveOperation.removeValue(forKey: taskID) }
@@ -6844,8 +6857,8 @@ private extension CodexAppServerRuntime {
                 let bound: RunningApplicationBinding
                 do {
                     #if DEBUG
-                    if case .fixture = configuration.executable, configuration.fixtureDenyAppBindAccessibility {
-                        throw AutomationError.permissionNotGranted(.accessibility)
+                    if case .fixture = configuration.executable, let error = configuration.fixtureAppBindError {
+                        throw error
                     }
                     #endif
                     bound = try await RunningApplicationBinder().bindWhenReady(bundleIdentifier: bundleID)
