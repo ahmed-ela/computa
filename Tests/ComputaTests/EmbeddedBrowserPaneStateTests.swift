@@ -2047,6 +2047,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let expanded = await waitForScriptBool(on: chat, script: """
             document.querySelectorAll('.task-row').length === 25 && document.querySelectorAll('.task-row .agent-status-icon').length === 25
                 && !!document.querySelector('[aria-label="Archived 20"]') && !document.querySelector('.agent-rail')
+                && document.querySelector('[aria-label="Archived 20"] .agent-status-icon > path')?.getAttribute('d')
+                    === document.querySelector('[data-agent-status=working] .agent-status-icon mask > path')?.getAttribute('d')
+                && document.querySelectorAll('.task-row:not([data-agent-status=working]) .agent-status-icon > path').length === 23
                 && !document.querySelector('.task-row-status, .task-row-unread')
             """)
         XCTAssertTrue(expanded)
@@ -2083,7 +2086,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let working = await waitForScriptBool(on: chat, script: """
             document.querySelectorAll('.agent-rail .task-row').length === 25
                 && document.querySelectorAll('[data-agent-status="working"]').length === 2
-                && document.querySelectorAll('.bot-sparkle-star').length === 50
+                && document.querySelectorAll('[data-agent-status=working] .bot-sparkle-star').length === 4
+                && !document.querySelector('.task-row:not([data-agent-status=working]) .bot-sparkle-star')
                 && getComputedStyle(document.querySelector('[data-agent-status=working] .bot-sparkle-pass')).animationName
                     === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-pass')
                 && document.querySelector('.sidebar').getBoundingClientRect().width === 44
@@ -2133,6 +2137,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             document.querySelectorAll('.agent-rail .task-row').length === 25
                 && document.querySelectorAll('[data-agent-status=working]').length === 1
                 && document.querySelectorAll('.agent-rail [data-agent-status=ready] .task-row-unread').length === 1
+                && !!document.querySelector('[data-agent-status=ready] .agent-status-icon > path')
+                && !document.querySelector('[data-agent-status=ready] .bot-sparkle-star')
             """)
         XCTAssertTrue(finished)
         XCTAssertTrue(state.hasUnreadCompletion(for: tasks[2].id))
@@ -2181,10 +2187,18 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertEqual(collapsedHistoryCenters, scrolledCenters)
         state.apply(.taskStatusChanged(taskID: tasks[1].id, status: .completed))
         let idle = await waitForScriptBool(on: chat, script: """
-            !!document.querySelector('.agent-rail') && document.querySelectorAll('.agent-rail .agent-status-icon').length === 25 && !document.querySelector('[data-agent-status=working]') && getComputedStyle(document.querySelector('.agent-rail .bot-sparkle-pass')).animationName === 'none'
+            !!document.querySelector('.agent-rail') && document.querySelectorAll('.agent-rail .agent-status-icon').length === 25 && !document.querySelector('[data-agent-status=working]')
+                && document.querySelectorAll('.agent-rail .agent-status-icon > path').length === 25 && !document.querySelector('.agent-rail .bot-sparkle-pass')
                 && !!document.querySelector('[data-native-sidebar-controls=true]') && !document.querySelector('.sidebar [aria-label="New agent"]')
             """)
         XCTAssertTrue(idle)
+
+        state.apply(.taskStatusChanged(taskID: tasks[1].id, status: .running))
+        let workingAgain = await waitForScriptBool(on: chat, script: """
+            document.querySelectorAll('[aria-label="Research — Working"] .bot-sparkle-star').length === 2
+                && document.querySelectorAll('.agent-rail .agent-status-icon > path').length === 24
+            """)
+        XCTAssertTrue(workingAgain)
     }
 
     @MainActor
