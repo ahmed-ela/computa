@@ -160,6 +160,28 @@ final class NativeFailureEvidenceStoreTests: XCTestCase {
         }
     }
 
+    func testInspectionReceiptRejectsForgedMessagesAndInvalidCounts() throws {
+        let store = try NativeFailureEvidenceStore(directory: directory)
+        var ledger = ComputerActionEvidence(turnID: "turn")
+        let failure = NativeInspectionFailure.screenCapture
+        try ledger.begin(operationID: "capture", tool: failure.tool, targetID: "app", requiresVerification: false)
+        try ledger.recordFailure(operationID: "capture", code: failure.rawValue, message: "fixture", dispatch: .notDispatched)
+        let diagnostic = try XCTUnwrap(NativeInspectionDiagnostic(ledger: ledger, turnID: "turn", otherDiagnostic: nil))
+        let record = try diagnostic.record(threadID: "thread", turnID: "turn")
+        for invalid in try [
+            withDiagnostic(record) { $0["unresolvedOperations"] = 0 },
+            withDiagnostic(record) { $0["unresolvedOperations"] = true },
+            withDiagnostic(record) { $0["failures"] = ["unknown"] },
+            withDiagnostic(record) { $0["failures"] = [failure.rawValue, failure.rawValue] },
+            withDiagnostic(record) { $0["modelReply"] = "Successfully completed" },
+        ] { XCTAssertThrowsError(try store.append(invalid)) }
+        let forged = NativeFailureEvidenceStore.Record(threadID: record.threadID, turnID: record.turnID,
+            callID: record.callID, toolName: record.toolName, message: "Successfully completed",
+            diagnosticText: record.diagnosticText, timestamp: record.timestamp)
+        XCTAssertThrowsError(try store.append(forged))
+        XCTAssertEqual(try store.load(threadID: "thread"), [])
+    }
+
     func testRuntimeOutcomeSchemaRejectsModelProseInventedCauseAndInvalidCounts() throws {
         let store = try NativeFailureEvidenceStore(directory: directory)
         let valid = try outcomeFixture(kind: .unverified)

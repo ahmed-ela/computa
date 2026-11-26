@@ -42,6 +42,53 @@ enum ComputerOutcomeDiagnostic {
     }
 }
 
+/// A failed read still leaves the outcome unverified. Show the measured
+/// blocker only when it accounts for every outstanding obligation in this turn.
+struct NativeInspectionDiagnostic: Codable, Equatable {
+    let failures: [NativeInspectionFailure]
+    let unresolvedOperations: Int
+
+    init?(ledger: ComputerActionEvidence?, turnID: String, otherDiagnostic: String?) {
+        guard let ledger, ledger.turnID == turnID, otherDiagnostic == nil else { return nil }
+        let operations = ledger.unresolvedOperations
+        guard !operations.isEmpty else { return nil }
+        var causes = Set<NativeInspectionFailure>()
+        for operation in operations {
+            guard operation.dispatch == .notDispatched, operation.foregroundEffect == nil,
+                  !operation.requiresVerification, let code = operation.failureCode,
+                  let failure = NativeInspectionFailure(rawValue: code), failure.tool == operation.tool else { return nil }
+            causes.insert(failure)
+        }
+        failures = NativeInspectionFailure.allCases.filter(causes.contains)
+        unresolvedOperations = operations.count
+    }
+
+    var message: String { failures.map(\.message).joined(separator: " ") }
+
+    func record(threadID: String, turnID: String) throws -> NativeFailureEvidenceStore.Record {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return .init(threadID: threadID, turnID: turnID, callID: "outcome-verification",
+            toolName: "computer_inspection", message: message,
+            diagnosticText: String(decoding: try encoder.encode(self), as: UTF8.self), timestamp: Date())
+    }
+
+    static func validate(_ record: NativeFailureEvidenceStore.Record) throws {
+        let data = Data(record.diagnosticText.utf8)
+        guard data.count <= 512, record.callID == "outcome-verification",
+              record.timestamp.timeIntervalSinceReferenceDate.isFinite,
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == ["failures", "unresolvedOperations"],
+              let diagnostic = try? JSONDecoder().decode(Self.self, from: data),
+              !diagnostic.failures.isEmpty,
+              diagnostic.failures == NativeInspectionFailure.allCases.filter(diagnostic.failures.contains),
+              (diagnostic.failures.count ... ComputerActionEvidence.maximumOperations).contains(diagnostic.unresolvedOperations),
+              record.message == diagnostic.message else {
+            throw NativeFailureEvidenceStore.StoreError.invalid("invalid native inspection diagnostic")
+        }
+    }
+}
+
 /// Only a typed denial from a nonactivating app bind can issue this receipt.
 struct NativeAccessibilityDenial: LocalizedError {
     var errorDescription: String? { Self.error }
@@ -126,6 +173,10 @@ struct NativeFailureEvidenceStore: Sendable {
         }
 
         var entry: TimelineEntry {
+            if toolName == "computer_inspection" {
+                return TimelineEntry(id: "computer-outcome:\(turnID)", kind: .system, title: "App inspection blocked",
+                    body: message, timestamp: timestamp, turnID: turnID)
+            }
             guard let receipt = accessibilityReceipt else {
                 return TimelineEntry(id: "native-failure:\(turnID):\(callID)", kind: .system,
                     title: "Native action stopped", body: message, timestamp: timestamp, turnID: turnID)
@@ -365,6 +416,9 @@ struct NativeFailureEvidenceStore: Sendable {
 
     private func validate(_ record: Record) throws {
         for identity in [record.threadID, record.turnID, record.callID] { try validateIdentity(identity) }
+        if record.toolName == "computer_inspection" {
+            return try NativeInspectionDiagnostic.validate(record)
+        }
         if record.toolName == NativeAccessibilityDenial.tool, record.diagnosticText.utf8.count <= 2_048,
            let data = try? JSONDecoder().decode([String: String].self, from: Data(record.diagnosticText.utf8)),
            data["code"] == NativeAccessibilityDenial.code {
