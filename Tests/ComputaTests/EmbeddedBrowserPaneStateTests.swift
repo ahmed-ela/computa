@@ -1595,7 +1595,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         // Hit the centers of the three 22-point toolbar buttons (2-point gaps, 8-point leading inset).
         let lights = try trafficLightFrames(in: window)
         func historyPoint(_ index: Int) -> NSPoint {
-            let leading = max(page.convert(page.bounds, to: nil).minX, lights.green.maxX + lights.red.minX + 1)
+            let leading = lights.green.maxX + lights.red.minX
             return NSPoint(x: leading + 19 + CGFloat(index) * 24, y: light.convert(light.bounds, to: nil).midY)
         }
         for (width, collapsed) in [(1100, false), (850, true)] {
@@ -1914,7 +1914,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                     window.sidebarSamples = [];
                     const sample = () => {
                         const search = sidebar.querySelector('.sidebar-search-row svg').getBoundingClientRect();
-                        window.sidebarSamples.push([sidebar.getBoundingClientRect().width, search.left + search.width / 2]);
+                        const title = document.querySelector('.toolbar-title-block').getBoundingClientRect();
+                        window.sidebarSamples.push([sidebar.getBoundingClientRect().width, search.left + search.width / 2, title.left, title.top]);
                     };
                     sample();
                     window.sidebarObserver = new ResizeObserver(sample);
@@ -1954,6 +1955,10 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             let widths = samples.map { $0[0] }
             let searchX = try XCTUnwrap(samples.first?[1])
             XCTAssertTrue(samples.allSatisfy { abs($0[1] - searchX) <= 1 }, "Search should stay on its icon column: \(samples)")
+            if state.primaryBrowserID == nil, let first = samples.first {
+                XCTAssertTrue(samples.allSatisfy { $0[2] == first[2] && $0[3] == first[3] },
+                              "The agent title should stay at its window position throughout the transition.")
+            }
             let intermediate = widths.filter { $0 > min(start, end) + 1 && $0 < max(start, end) - 1 }
             if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 XCTAssertTrue(intermediate.isEmpty, "Reduce Motion should snap to the final width: \(widths)")

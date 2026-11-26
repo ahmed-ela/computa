@@ -199,6 +199,7 @@ export interface AppSnapshot {
   canViewConversation?: boolean;
   titlebarHeight?: number;
   sidebarRail?: { width: number; iconCenter: number };
+  trafficLightClearance?: number;
   selectedTaskID?: string;
   selectedEntryID?: string;
   newAgentDraft?: TaskSnapshot;

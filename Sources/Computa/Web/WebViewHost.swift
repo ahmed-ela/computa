@@ -125,15 +125,16 @@ struct WebWorkspaceView: View {
         }
     }
 
-    private func browserPane(rowHeight: CGFloat, topInset: CGFloat, browserPrimary: Bool, titlebarAddress: Bool, sidebarWidth: CGFloat) -> some View {
+    private func browserPane(rowHeight: CGFloat, topInset: CGFloat, browserPrimary: Bool, titlebarAddress: Bool, windowAddress: Bool, sidebarWidth: CGFloat) -> some View {
         let selectedPageID = state.displayedBrowserTab?.id
-        let edit: (() -> Void)? = titlebarAddress ? { self.openBrowserAddress() } : nil
+        let edit: (() -> Void)? = titlebarAddress && !windowAddress ? { self.openBrowserAddress() } : nil
         return EmbeddedBrowserPane(
             session: state.browserSession,
             tabRowHeight: rowHeight,
             usesSidebarTabs: browserPrimary,
             workspacePageID: browserPrimary ? selectedPageID : nil,
             openTitlebarAddress: edit,
+            reservesWindowTitlebar: windowAddress,
             showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
             titlebarLeadingInset: titlebarAddress ? max(0, trafficLightClearance - sidebarWidth) : 0,
             titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
@@ -152,19 +153,31 @@ struct WebWorkspaceView: View {
         )
     }
 
+    @ViewBuilder
+    private func workspacePanes(@ViewBuilder content: () -> some View) -> some View {
+        if state.workspaceLayout.allowsBrowserSidePane {
+            HSplitView(content: content)
+        } else {
+            // The mixed sidebar has a fixed width and draws its own edge below the title bar.
+            HStack(spacing: 0, content: content)
+        }
+    }
+
     private func workspace(topInset: CGFloat) -> some View {
         // Align the sidebar and any visible pane controls with the native title bar.
         let rowHeight = topInset > 0 ? topInset : 32
         let browserPrimary = state.primaryBrowserID != nil && state.shouldPresentBrowserPane
         let titlebarAddress = browserPrimary && state.browserAddressPlacement == .titleBar
+        let windowAddress = titlebarAddress && !state.workspaceLayout.allowsBrowserSidePane
         let compact = state.isTaskSidebarCollapsed && !sidebarPeeked
         let selectedPageID = state.displayedBrowserTab?.id
         let sidebarWidth = compact ? SidebarRailGeometry.compact.width : SidebarRail.expandedWidth
         var snapshot = WebUISnapshot(state: state, titlebarHeight: rowHeight)
+        snapshot.trafficLightClearance = trafficLightClearance
         snapshot.isTaskSidebarPeeked = sidebarPeeked
         snapshot.canViewConversation = controlActiveState == .key && launcherAllowed && !commandPanelPresented
         return ZStack(alignment: .center) {
-            HSplitView {
+            workspacePanes {
                 CodexWebView(
                     state: state, windowTabs: windowTabs,
                     snapshot: snapshot,
@@ -193,12 +206,26 @@ struct WebWorkspaceView: View {
                 // privileged Octane document or its script-message bridge.
                 // Hiding the pane preserves the session and every tab.
                 if state.shouldPresentBrowserPane {
-                    browserPane(rowHeight: rowHeight, topInset: topInset, browserPrimary: browserPrimary, titlebarAddress: titlebarAddress, sidebarWidth: sidebarWidth)
+                    browserPane(rowHeight: rowHeight, topInset: topInset, browserPrimary: browserPrimary, titlebarAddress: titlebarAddress, windowAddress: windowAddress, sidebarWidth: sidebarWidth)
                     .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea(.container, edges: .top)
                     // When this pane opens, the chat already occupies the whole split.
                     // Give the new pane room above its minimum before growing the chat.
                     .layoutPriority(1)
+                }
+            }
+            .overlay(alignment: .top) {
+                if windowAddress, let tab = state.displayedBrowserTab {
+                    VStack(spacing: 0) {
+                        BrowserTitlebarAddressControls(session: state.browserSession, tab: tab, rowHeight: rowHeight,
+                                                       edit: openBrowserAddress)
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 8)
+                            .padding(.leading, trafficLightClearance)
+                            .frame(height: rowHeight)
+                        Divider()
+                    }
+                    .background(Color(nsColor: .windowBackgroundColor))
                 }
             }
             .allowsHitTesting(!state.approvalGateBlocksInteraction && !commandPanelPresented)

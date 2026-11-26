@@ -11,6 +11,7 @@ struct EmbeddedBrowserPane: View {
     var usesSidebarTabs = false
     var workspacePageID: UUID?
     var openTitlebarAddress: (() -> Void)?
+    var reservesWindowTitlebar = false
     var showsNewTabButton = true
     var titlebarLeadingInset: CGFloat = 0
     var titlebarTrailingInset: CGFloat = 0
@@ -33,7 +34,10 @@ struct EmbeddedBrowserPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if openTitlebarAddress != nil || !usesSidebarTabs || showsNewTabButton {
+            if reservesWindowTitlebar {
+                Color.clear.frame(height: tabRowHeight)
+                Divider()
+            } else if openTitlebarAddress != nil || !usesSidebarTabs || showsNewTabButton {
                 browserHeader
                 Divider()
             }
@@ -130,18 +134,7 @@ struct EmbeddedBrowserPane: View {
         HStack(spacing: 4) {
             if !usesSidebarTabs { tabPicker }
             if let openTitlebarAddress, let tab = selectedTab {
-                BrowserHistoryButtons(session: session, selectedTab: tab)
-                Button(action: openTitlebarAddress) {
-                    BrowserAddressPill(height: max(18, min(28, tabRowHeight - 4)), editing: false) {
-                        Text(tab.url?.absoluteString ?? "Search or enter a website address")
-                            .lineLimit(1).truncationMode(.middle)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .accessibilityLabel("Website address")
-                .accessibilityValue(tab.url?.absoluteString ?? "")
-                .help("Edit website address (⌘L)")
-                .anchorPreference(key: BrowserAddressBounds.self, value: .bounds) { $0 }
+                BrowserTitlebarAddressControls(session: session, tab: tab, rowHeight: tabRowHeight, edit: openTitlebarAddress)
             }
 
             if showsNewTabButton {

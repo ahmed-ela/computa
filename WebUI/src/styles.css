@@ -183,6 +183,15 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .preview-browser-toggle { position: absolute; top: 2px; right: 6px; }
 .preview-browser-toggle[aria-pressed="true"] { color: var(--blue); }
 .app-shell[data-allows-side-pane]:not([data-browser-pane]) .task-toolbar { padding-right: 48px; }
+/* The mixed workspace's title bar belongs to the window, above either sidebar width. */
+.app-shell[data-native-host]:not([data-allows-side-pane]) .app-panels { position: relative; }
+.app-shell[data-native-host]:not([data-allows-side-pane]) .task-toolbar {
+  position: absolute; inset: 0 0 auto; z-index: 1; background: var(--bg);
+  padding-left: calc(var(--window-controls-width) + 8px);
+}
+.app-shell[data-native-host]:not([data-allows-side-pane]) .workspace::before {
+  content: ""; flex: 0 0 calc(var(--titlebar-height) + 1px);
+}
 /* The native compose button belongs to the chat pane. The globe takes the outer corner when the browser is closed. */
 .app-shell[data-allows-side-pane][data-native-sidebar-controls] .task-toolbar { padding-right: 40px; }
 .app-shell[data-allows-side-pane][data-native-sidebar-controls]:not([data-browser-pane]) .task-toolbar { padding-right: 74px; }

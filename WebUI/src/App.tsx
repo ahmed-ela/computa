@@ -1051,6 +1051,10 @@ export function App() {
   const task = selectedTask;
   return (
     <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined} data-native-sidebar-controls={snapshot.nativeSidebarControls || undefined}
+      style={nativeHost && !snapshot.allowsBrowserSidePane ? {
+        '--window-controls-width': (snapshot.trafficLightClearance ?? 0) + 'px',
+        '--titlebar-height': (snapshot.titlebarHeight ?? 32) + 'px',
+      } : undefined}
       data-browser-primary={snapshot.primaryBrowserID && !snapshot.isSettingsPresented ? (nativeHost ? "native" : "preview") : undefined}
       data-sidebar-peeked={snapshot.isTaskSidebarCollapsed && snapshot.isTaskSidebarPeeked || undefined}
       data-sidebar-collapsed={sidebarIsCompact(snapshot) ? 'true' : undefined}

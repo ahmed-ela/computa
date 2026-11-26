@@ -41,6 +41,7 @@ struct LauncherChat: Codable, Equatable, Sendable {
 struct WebUISnapshot: Codable, Equatable, Sendable {
     var revision: UInt64 = 0
     var sidebarRail = SidebarRailGeometry.compact
+    var trafficLightClearance: CGFloat = 0
     var isTaskSidebarPeeked = false
     var nativeSidebarControls = false
     var canViewConversation: Bool?
