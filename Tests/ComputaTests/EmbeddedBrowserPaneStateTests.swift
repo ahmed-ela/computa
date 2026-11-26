@@ -1074,7 +1074,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         state.selectWorkspaceTab(.browser(ref))
         try await requireDOM("!!document.querySelector('[data-browser-primary=native] .site-favicon') && innerWidth === 230")
         let lights = try trafficLightFrames(in: window)
-        let railWidth = lights.green.maxX + lights.red.minX
+        let railWidth: CGFloat = 44
         let expandedCenters = try await sidebarIconCenters(in: chat)
         let toggle = "#task-sidebar-toggle"
         try await requireDOM("!!document.querySelector('\(toggle)[aria-expanded=true] .lucide-panel-left-close')")
@@ -1124,9 +1124,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let collapsedCenters = try await sidebarIconCenters(in: chat)
         XCTAssertEqual(collapsedCenters, expandedCenters)
         for (name, point) in collapsedCenters {
-            XCTAssertEqual(point[0], lights.yellow.midX, accuracy: 0.5, name)
+            XCTAssertEqual(point[0], railWidth / 2, accuracy: 0.5, name)
         }
-        XCTAssertEqual(chat.bounds.width - lights.green.maxX, lights.red.minX, accuracy: 0.5)
+        XCTAssertLessThan(chat.bounds.width, lights.green.maxX)
         let center = try XCTUnwrap(collapsedCenters["Trip agent"])
         let crop = WKSnapshotConfiguration()
         crop.rect = NSRect(x: center[0] - 10, y: center[1] - 10, width: 20, height: 20)
@@ -1593,8 +1593,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertEqual(state.browserAddressPlacement, .titleBar)
         let light = try XCTUnwrap(window.standardWindowButton(.closeButton))
         // Hit the centers of the three 22-point toolbar buttons (2-point gaps, 8-point leading inset).
+        let lights = try trafficLightFrames(in: window)
         func historyPoint(_ index: Int) -> NSPoint {
-            let leading = page.convert(page.bounds, to: nil).minX
+            let leading = max(page.convert(page.bounds, to: nil).minX, lights.green.maxX + lights.red.minX + 1)
             return NSPoint(x: leading + 19 + CGFloat(index) * 24, y: light.convert(light.bounds, to: nil).midY)
         }
         for (width, collapsed) in [(1100, false), (850, true)] {
@@ -1710,8 +1711,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 _ = try await sidebar.evaluateJavaScript("\(toggle).click(); true")
             }
             await settleLayout(host)
-            let lights = try trafficLightFrames(in: window)
-            let expectedWidth = collapsed ? lights.green.maxX + lights.red.minX : 230
+            let expectedWidth = collapsed ? 44 : 230
             let inSidebar = await waitForScriptBool(on: sidebar, script: """
                 (() => {
                     const field = \(pill), filter = document.querySelector('.sidebar-search-row');
@@ -1732,7 +1732,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                     if (!row || button?.parentElement !== row || strip.querySelector('button')) return false;
                     const r = row.getBoundingClientRect(), t = button.getBoundingClientRect();
                     if (r.top < strip.getBoundingClientRect().bottom || r.bottom > \(pill).getBoundingClientRect().top
-                        || t.left !== r.left || Math.abs(t.left + t.width / 2 - \(lights.yellow.midX)) > 0.5) return false;
+                        || t.left !== r.left || Math.abs(t.left + t.width / 2 - 22) > 0.5) return false;
                     if (\(collapsed)) return !nav && row.querySelectorAll('button').length === 1;
                     if (innerWidth - r.right > 8) return false;
                     if (!nav) return false;
@@ -1902,7 +1902,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let shell = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
             $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
         })
-        let rail = try XCTUnwrap(SidebarRailGeometry.measured(in: window)).width
+        let rail: CGFloat = 44
 
         func toggle(from start: CGFloat, to end: CGFloat) async throws {
             let ready = await waitForScriptBool(on: shell, script:
@@ -2074,7 +2074,6 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let toggle = NSPoint(x: bounds.minX + 14, y: bounds.midY)
         try await clickInWindow(at: toggle, window: window)
         XCTAssertTrue(state.isTaskSidebarCollapsed)
-        let lights = try trafficLightFrames(in: window)
         let compactEnd = button.convert(button.bounds, to: nil).maxX
         let working = await waitForScriptBool(on: chat, script: """
             document.querySelectorAll('.agent-rail .task-row').length === 25
@@ -2082,7 +2081,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 && document.querySelectorAll('.bot-sparkle-star').length === 50
                 && getComputedStyle(document.querySelector('[data-agent-status=working] .bot-sparkle-pass')).animationName
                     === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-pass')
-                && document.querySelector('.sidebar').getBoundingClientRect().width === \(lights.green.maxX + lights.red.minX)
+                && document.querySelector('.sidebar').getBoundingClientRect().width === 44
                 && document.querySelector('.toolbar-title-block').getBoundingClientRect().left >= \(compactEnd)
                 && !document.querySelector('#task-search')
             """)
@@ -2184,7 +2183,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
-    func testTrafficLightRelayoutMovesDividerAndIconColumnInTheOpenWindow() async throws {
+    func testCompactSidebarWidthAndIconCenterStayFixedWhenTrafficLightsMove() async throws {
         let session = EmbeddedBrowserSession(persistent: false)
         defer { session.shutdown() }
         let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
@@ -2206,16 +2205,15 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                 (() => {
                   const rail = document.querySelector('.sidebar')?.getBoundingClientRect();
                   const icon = document.querySelector('.sidebar-search-icon svg')?.getBoundingClientRect();
-                  return rail && icon && Math.abs(rail.right - \(lights.green.maxX) - \(lights.red.minX)) <= 0.5
-                    && Math.abs(icon.left + icon.width / 2 - \(lights.yellow.midX)) <= 0.5;
+                  return rail && icon && rail.right === 44 && rail.right < \(lights.green.maxX)
+                    && Math.abs(icon.left + icon.width / 2 - 22) <= 0.5;
                 })()
                 """)
-            XCTAssertTrue(aligned, "Rail gaps should match and Search should align with the yellow button.")
+            XCTAssertTrue(aligned, "The collapsed sidebar should stay 44 points wide with Search centered at 22 points.")
         }
         try await check()
         let original = try trafficLightFrames(in: window)
-        // Deliberately asymmetric spacing catches implementations that assume
-        // a fixed width, or use the group's midpoint instead of the yellow button.
+        // Native title-bar relayout must leave the sidebar layout alone.
         for (kind, offset) in [(NSWindow.ButtonType.closeButton, CGFloat(2)), (.miniaturizeButton, 9), (.zoomButton, 12)] {
             let button = try XCTUnwrap(window.standardWindowButton(kind))
             button.setFrameOrigin(NSPoint(x: button.frame.minX + offset, y: button.frame.minY))

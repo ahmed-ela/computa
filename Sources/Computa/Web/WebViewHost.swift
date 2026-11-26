@@ -15,7 +15,7 @@ struct WebWorkspaceView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.controlActiveState) private var controlActiveState
 
-    @State private var sidebarRail = SidebarRailGeometry.fallback
+    @State private var trafficLightClearance: CGFloat = 0
     @State private var sidebarPeeked = false
     @State private var launcherError: String?
     @State private var launcherPresented = false
@@ -125,7 +125,7 @@ struct WebWorkspaceView: View {
         }
     }
 
-    private func browserPane(rowHeight: CGFloat, topInset: CGFloat, browserPrimary: Bool, titlebarAddress: Bool) -> some View {
+    private func browserPane(rowHeight: CGFloat, topInset: CGFloat, browserPrimary: Bool, titlebarAddress: Bool, sidebarWidth: CGFloat) -> some View {
         let selectedPageID = state.displayedBrowserTab?.id
         let edit: (() -> Void)? = titlebarAddress ? { self.openBrowserAddress() } : nil
         return EmbeddedBrowserPane(
@@ -135,6 +135,7 @@ struct WebWorkspaceView: View {
             workspacePageID: browserPrimary ? selectedPageID : nil,
             openTitlebarAddress: edit,
             showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
+            titlebarLeadingInset: titlebarAddress ? max(0, trafficLightClearance - sidebarWidth) : 0,
             titlebarTrailingInset: topInset > 0 && state.workspaceLayout.allowsBrowserSidePane ? BrowserTitlebarToggle.width : 0,
             isInteractionBlocked: state.approvalGateBlocksInteraction || commandPanelPresented,
             canLoadModels: state.canRefreshWebsiteModels,
@@ -158,9 +159,8 @@ struct WebWorkspaceView: View {
         let titlebarAddress = browserPrimary && state.browserAddressPlacement == .titleBar
         let compact = state.isTaskSidebarCollapsed && !sidebarPeeked
         let selectedPageID = state.displayedBrowserTab?.id
-        let sidebarWidth = compact ? sidebarRail.width : SidebarRail.expandedWidth
+        let sidebarWidth = compact ? SidebarRailGeometry.compact.width : SidebarRail.expandedWidth
         var snapshot = WebUISnapshot(state: state, titlebarHeight: rowHeight)
-        snapshot.sidebarRail = sidebarRail
         snapshot.isTaskSidebarPeeked = sidebarPeeked
         snapshot.canViewConversation = controlActiveState == .key && launcherAllowed && !commandPanelPresented
         return ZStack(alignment: .center) {
@@ -169,7 +169,7 @@ struct WebWorkspaceView: View {
                     state: state, windowTabs: windowTabs,
                     snapshot: snapshot,
                     sidebarControlsEnabled: launcherAllowed && !commandPanelPresented,
-                    setSidebarRail: { sidebarRail = $0 },
+                    setTrafficLightClearance: { trafficLightClearance = $0 },
                     setSidebarPeeked: { sidebarPeeked = $0 },
                     openTabLauncher: openLauncher,
                     openBrowserAddress: openBrowserAddress,
@@ -193,7 +193,7 @@ struct WebWorkspaceView: View {
                 // privileged Octane document or its script-message bridge.
                 // Hiding the pane preserves the session and every tab.
                 if state.shouldPresentBrowserPane {
-                    browserPane(rowHeight: rowHeight, topInset: topInset, browserPrimary: browserPrimary, titlebarAddress: titlebarAddress)
+                    browserPane(rowHeight: rowHeight, topInset: topInset, browserPrimary: browserPrimary, titlebarAddress: titlebarAddress, sidebarWidth: sidebarWidth)
                     .frame(minWidth: 360, idealWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea(.container, edges: .top)
                     // When this pane opens, the chat already occupies the whole split.
@@ -252,8 +252,8 @@ struct WebWorkspaceView: View {
             // WebKit reserves this part of the task sidebar. Keep its native
             // controls above the approval shield and outside the web bridge.
             if state.presentedSheet == nil {
-                NativeRuntimeStatusBar(state: state, compact: compact, iconCenter: sidebarRail.iconCenter)
-                    .frame(maxWidth: compact ? sidebarRail.width : 190, alignment: .leading)
+                NativeRuntimeStatusBar(state: state, compact: compact)
+                    .frame(maxWidth: compact ? SidebarRailGeometry.compact.width : 190, alignment: .leading)
                     .frame(height: 34)
             }
         }
@@ -312,7 +312,7 @@ private struct CodexWebView: NSViewRepresentable {
     let windowTabs: WorkspaceTabs
     let snapshot: WebUISnapshot
     let sidebarControlsEnabled: Bool
-    let setSidebarRail: (SidebarRailGeometry) -> Void
+    let setTrafficLightClearance: (CGFloat) -> Void
     let setSidebarPeeked: (Bool) -> Void
     let openTabLauncher: () -> Void
     let openBrowserAddress: () -> Void
@@ -359,7 +359,7 @@ private struct CodexWebView: NSViewRepresentable {
 #if DEBUG
         webView.isInspectable = true
 #endif
-        webView.onSidebarGeometry = setSidebarRail
+        webView.onTrafficLightClearance = setTrafficLightClearance
         webView.rail.onHover = setSidebarPeeked
         context.coordinator.attach(webView: webView)
         context.coordinator.update(snapshot: snapshot)
@@ -411,8 +411,8 @@ private final class WindowConfiguredWebView: WKWebView {
     var openTabLauncher: (() -> Void)?
     var openBrowserAddress: (() -> Void)?
     let rail = SidebarRail()
-    var onSidebarGeometry: ((SidebarRailGeometry) -> Void)?
-    private var lastGeometry: SidebarRailGeometry?
+    var onTrafficLightClearance: ((CGFloat) -> Void)?
+    private var lastTrafficLightClearance: CGFloat?
 
     // The native view can receive typing before the local document has painted its composer.
     // Keep those events in this window and deliver them once to the acknowledged focus request.
@@ -461,17 +461,23 @@ private final class WindowConfiguredWebView: WKWebView {
         }
     }
 
-    @objc private func titlebarDidChange(_ notification: Notification) { updateSidebarGeometry() }
+    @objc private func titlebarDidChange(_ notification: Notification) { updateTrafficLightClearance() }
 
-    private func updateSidebarGeometry() {
+    private func updateTrafficLightClearance() {
         guard let window else { return }
-        let geometry = SidebarRailGeometry.measured(in: window) ?? lastGeometry ?? .fallback
-        guard geometry != lastGeometry else { return }
-        lastGeometry = geometry
+        let frames = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].compactMap { kind -> CGRect? in
+            guard let button = window.standardWindowButton(kind), button.window === window,
+                  !button.isHiddenOrHasHiddenAncestor, !button.bounds.isEmpty else { return nil }
+            return button.convert(button.bounds, to: nil)
+        }
+        // Reserve the window controls and their outer margin only in the browser toolbar.
+        let clearance = (frames.map(\.maxX).max() ?? 0) + (frames.map(\.minX).min() ?? 0)
+        guard clearance != lastTrafficLightClearance else { return }
+        lastTrafficLightClearance = clearance
         // AppKit can lay out the title bar during a SwiftUI update.
         DispatchQueue.main.async { [weak self, weak window] in
-            guard let self, let window, self.window === window, self.lastGeometry == geometry else { return }
-            self.onSidebarGeometry?(geometry)
+            guard let self, let window, self.window === window, self.lastTrafficLightClearance == clearance else { return }
+            self.onTrafficLightClearance?(clearance)
         }
     }
 
@@ -525,7 +531,7 @@ private final class WindowConfiguredWebView: WKWebView {
 
     override func layout() {
         super.layout()
-        updateSidebarGeometry()
+        updateTrafficLightClearance()
         guard let window, let state, compose.superview != nil else { return }
         compose.isHidden = !window.styleMask.contains(.titled) || state.presentedSheet != nil
             || (state.primaryBrowserID != nil && state.shouldPresentBrowserPane)
@@ -574,7 +580,7 @@ private final class WindowConfiguredWebView: WKWebView {
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if let window {
-            lastGeometry = nil
+            lastTrafficLightClearance = nil
             NotificationCenter.default.removeObserver(self, name: NSWindow.didUpdateNotification, object: window)
             NotificationCenter.default.removeObserver(self, name: NSView.frameDidChangeNotification, object: nil)
             NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)

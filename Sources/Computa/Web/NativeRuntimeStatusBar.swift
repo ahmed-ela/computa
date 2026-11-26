@@ -7,7 +7,7 @@ import SwiftUI
 struct NativeRuntimeStatusBar: View {
     @Bindable var state: AppState
     var compact = false
-    var iconCenter = SidebarRailGeometry.fallback.iconCenter
+    var iconCenter = SidebarRailGeometry.compact.iconCenter
     @State private var approvalErrorPresented = false
 
     var body: some View {
