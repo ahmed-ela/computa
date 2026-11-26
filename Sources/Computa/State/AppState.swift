@@ -138,6 +138,7 @@ final class AppState {
     var chromeProfileImportStatus: String?
     var importingChromeProfile = false
     @ObservationIgnored var chromeImportSourceRoot = ChromeProfileLibrary.chromeRoot
+    let desktopSidebar: CodexSidebarSync?
     let workspaceLayout: WorkspaceLayout
     var mixesBrowserTabsInSidebar: Bool { workspaceLayout.mixesBrowserTabs }
     let workspaceWindows: WorkspaceWindows
@@ -252,6 +253,7 @@ final class AppState {
         preferences: UserDefaults = .standard,
         unreadCompletionStore: ChatUnreadCompletionStore? = nil,
         browserSession: EmbeddedBrowserSession? = nil,
+        desktopSidebar: CodexSidebarSync? = nil,
         workspaceLayout: WorkspaceLayout = .chatListWithSidePane,
         websiteModelDiscovery: (@MainActor (String) async throws -> [WebsiteModelChoice])? = nil,
         websiteModeDiscovery: (@MainActor (String) async throws -> [WebsiteModeChoice])? = nil,
@@ -265,6 +267,7 @@ final class AppState {
         self.preferences = preferences
         browserAddressPlacement = preferences.string(forKey: Self.addressPlacementKey)
             .flatMap(BrowserAddressPlacement.init(rawValue:)) ?? .titleBar
+        self.desktopSidebar = desktopSidebar
         self.workspaceLayout = workspaceLayout
         workspaceWindows = WorkspaceWindows(defaults: preferences)
         workspaceWindows.primary.isSidebarCollapsed = preferences.bool(forKey: Self.sidebarCollapsedKey)
@@ -1306,6 +1309,7 @@ final class AppState {
     }
 
     func updateSelectedConversation(_ id: AgentTask.ID?, acknowledging: Bool) {
+        workspaceTabs.showsDesktopChats = false
         workspaceTabs.showsNewAgent = false
         savedChatSelection = nil
         taskSelectionRevision &+= 1
@@ -1464,6 +1468,7 @@ final class AppState {
         ))
         workspaceTabs.newAgentDraft = draft
         workspaceTabs.launcherChat = .init(taskID: draft.task.id, unsentDraft: nil)
+        workspaceTabs.showsDesktopChats = false
         workspaceTabs.showsNewAgent = true
         savedChatSelection = nil
         taskSelectionRevision &+= 1

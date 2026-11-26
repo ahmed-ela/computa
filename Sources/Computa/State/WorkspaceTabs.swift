@@ -112,6 +112,8 @@ final class WorkspaceTabs {
     var selectedPage: UUID?
     // Transient so a new tab can receive address focus after its window attaches.
     var requestedBrowserAddress: UUID?
+    var showsDesktopChats = false
+    var desktopReader: CodexSidebarSync.Reader?
     var savedChatSelection: AppState.SavedChatSelection?
     var isSidebarCollapsed = false
     var presentedSheet: SheetDestination?

@@ -37,7 +37,7 @@ enum ComputaLaunchMode: Equatable {
             let browser = EmbeddedBrowserSession(defaults: preferences)
             return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferences,
                             unreadCompletionStore: unreadCompletionStoreFactory(),
-                            browserSession: browser)
+                            browserSession: browser, desktopSidebar: CodexSidebarSync.installed())
         case .testHost:
             // A unique suite prevents even incidental test-host state changes
             // from reading or writing the application's saved access choice.
@@ -131,7 +131,7 @@ struct WorkspaceCommands: Commands {
                 }
                 .keyboardShortcut("w", modifiers: .command)
                 .disabled(workspaceUnavailable || (!tabWorkspace.workspaceTabs.order.isEmpty
-                    && !tabWorkspace.workspaceTabs.showsNewAgent && tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil))
+                    && !tabWorkspace.workspaceTabs.showsDesktopChats && !tabWorkspace.workspaceTabs.showsNewAgent && tabWorkspace.commandTab(inBrowserPane: usesBrowserShortcuts) == nil))
             }
             Button("Reopen Closed Tab") { state.reopenClosedTab() }
                 .keyboardShortcut("t", modifiers: [.command, .shift])

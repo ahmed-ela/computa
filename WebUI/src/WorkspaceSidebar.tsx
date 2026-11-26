@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'octane';
 import { Button } from '@octanejs/shadcn/Button';
+import { DesktopChatScope, DesktopChatList } from './CodexDesktopSidebar';
 import { AgentStatusIcon } from './AgentStatusIcon';
 import { Icon } from './Icon';
 import { sidebarRowHeight, useSidebarWindow } from './sidebarWindow';
@@ -121,7 +122,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     }
   }, [selectedTab]);
   const noun = snapshot.mixesBrowserTabsInSidebar ? 'tabs' : 'agents';
-  const searchLabel = 'Search ' + noun;
+  const searchLabel = snapshot.showsDesktopChats ? 'Search Codex chats' : 'Search ' + noun;
   const select = (item: Item) => {
     if (item.ref.kind === 'agent') post({ action: 'selectTask', id: item.ref.id });
     else post({ action: 'selectWorkspaceTab', tab: item.ref });
@@ -169,6 +170,8 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       <Icon name="browser" size={15} />
       {currentPage && !collapsed && <span>{currentPage.host || 'Search or enter URL'}</span>}
     </button>}
+    {snapshot.desktopSections && <DesktopChatScope selected={!!snapshot.showsDesktopChats} collapsed={collapsed}
+      choose={enabled => { setSearch(''); post({action:'showDesktopChats', enabled}); }} />}
     <div className="sidebar-search-row">
       {collapsed && <Button variant="ghost" size="icon-xs" className="sidebar-search-icon" aria-label={searchLabel}
         onClick={() => document.dispatchEvent(new Event('kolmogor-focus-tab-search'))}><Icon name="search" size={15} /></Button>}
@@ -193,7 +196,8 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
       {snapshot.pendingApprovalCount > 0 && <div className="nav-button approval-nav" role="status"><Icon name="info" size={17} />
         <span className={collapsed ? 'sr-only' : undefined}>Native approval</span><span className="count-pill">{snapshot.pendingApprovalCount}</span></div>}
     </nav>}
-    <nav ref={tabList} style={{ '--sidebar-row-height': sidebarRowHeight + 'px' }} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Agents'}>
+    {snapshot.showsDesktopChats && <DesktopChatList snapshot={snapshot} collapsed={collapsed} search={search} post={post} />}
+    <nav hidden={snapshot.showsDesktopChats || undefined} ref={tabList} style={{ '--sidebar-row-height': sidebarRowHeight + 'px' }} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label={snapshot.mixesBrowserTabsInSidebar ? 'Tabs' : 'Agents'}>
       {start > 0 && <div aria-hidden="true" style={{ height: start * sidebarRowHeight + 'px' }} />}
       {rows.slice(start, end).map((item,index) => {
         if (typeof item === 'string') {
