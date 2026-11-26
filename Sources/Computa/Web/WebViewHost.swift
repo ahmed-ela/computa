@@ -82,6 +82,15 @@ struct WebWorkspaceView: View {
         GeometryReader { geometry in
             state.workspaceWindows.withWindow(windowTabs) { workspace(topInset: geometry.safeAreaInsets.top) }
         }
+        .onAppear { if windowTabs.showsDesktopChats { state.desktopSidebar?.attach(windowTabs) } }
+        .onChange(of: windowTabs.showsDesktopChats) { _, visible in
+            if visible { state.desktopSidebar?.attach(windowTabs) }
+            else { state.desktopSidebar?.detach(windowTabs) }
+        }
+        .onDisappear { state.desktopSidebar?.detach(windowTabs) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            state.desktopSidebar?.becameActive()
+        }
         .focusedSceneValue(\.tabWorkspace, state)
         .focusedSceneValue(\.workspaceSidebarCollapsed, launcherAllowed && !commandPanelPresented ? sidebarCollapseBinding : nil)
         .focusedSceneValue(\.browserPageCommandsAllowed, launcherAllowed && !commandPanelPresented)
@@ -176,7 +185,7 @@ struct WebWorkspaceView: View {
         var snapshot = WebUISnapshot(state: state, titlebarHeight: rowHeight)
         snapshot.trafficLightClearance = trafficLightClearance
         snapshot.isTaskSidebarPeeked = sidebarPeeked
-        snapshot.canViewConversation = controlActiveState == .key && launcherAllowed && !commandPanelPresented
+        snapshot.canViewConversation = !windowTabs.showsDesktopChats && controlActiveState == .key && launcherAllowed && !commandPanelPresented
         return ZStack(alignment: .center) {
             workspacePanes {
                 CodexWebView(
@@ -449,7 +458,7 @@ private final class WindowConfiguredWebView: WKWebView {
 
     private var composerFocusRequest: UUID? {
         guard let tabs = windowTabs, !tabs.isClosed, tabs.showsNewAgent,
-              let request = tabs.launcherChat, request.taskID == tabs.presentedTaskID,
+              !tabs.showsDesktopChats, let request = tabs.launcherChat, request.taskID == tabs.presentedTaskID,
               tabs.presentedSheet == nil, !tabs.isAPIProvidersPresented, state?.approvalGateBlocksInteraction == false
         else { return nil }
         return request.id

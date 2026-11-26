@@ -61,6 +61,10 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let priorAgentConversationIDs: [String]
     let agentNames: [String: String]
     let canStartFresh: Bool
+    let desktopSections: [CodexDesktopSidebarClient.Section]?
+    let desktopSidebarError: String?
+    let showsDesktopChats: Bool
+    let desktopReader: CodexSidebarSync.Reader?
     let savedChats: [SavedChatSummary]
     let savedChatSelection: AppState.SavedChatSelection?
     let newAgentDraft: WebTaskSnapshot?
@@ -125,6 +129,11 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         }
         priorAgentConversationIDs = prior.union(priorLocalIDs).sorted()
         agentNames = names
+        let viewingCodex = state.workspaceTabs.showsDesktopChats
+        showsDesktopChats = viewingCodex
+        desktopSections = state.desktopSidebar.map { viewingCodex ? $0.catalog?.sections ?? [] : [] }
+        desktopSidebarError = viewingCodex ? state.desktopSidebar?.error : nil
+        desktopReader = showsDesktopChats ? state.workspaceTabs.desktopReader : nil
         savedChats = state.savedChats
         savedChatSelection = state.savedChatSelection
         tasks = state.tasks.map { task in

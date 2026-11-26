@@ -14,6 +14,7 @@ enum AgentCLIError: LocalizedError, Sendable {
 /// One private stdio connection per task. Only its own process group is stopped.
 actor AgentCLIConnection {
     typealias MessageHandler = @Sendable (Data) async -> Void
+    private let codexProtocol: Bool
     private let process: OwnedChildProcess
     private let input: FileHandle
     private let output: FileHandle
@@ -24,7 +25,8 @@ actor AgentCLIConnection {
     private var requests: [Int: CheckedContinuation<Data, Error>] = [:]
 
     init(executable: URL, arguments: [String], directory: URL, environment: [String: String],
-         handler: @escaping MessageHandler) throws {
+         codexProtocol: Bool = false, handler: @escaping MessageHandler) throws {
+        self.codexProtocol = codexProtocol
         let stdin = Pipe(), stdout = Pipe()
         guard fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else { throw POSIXError(.EIO) }
         process = try OwnedChildProcess(executableURL: executable, arguments: arguments,
@@ -72,7 +74,12 @@ actor AgentCLIConnection {
 
     private func receive(_ data: Data) async throws {
         guard !stopped else { return }
-        guard let msg = try JSONSerialization.jsonObject(with: data) as? [String: Any], msg["jsonrpc"] as? String == "2.0" else {
+        guard let msg = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AgentCLIError.protocolError("Invalid CLI protocol message.")
+        }
+        let hasVersion = msg["jsonrpc"] != nil
+        let version = msg["jsonrpc"] as? String
+        guard version == "2.0" || (codexProtocol && !hasVersion) else {
             throw AgentCLIError.protocolError("Invalid CLI protocol message.")
         }
         if msg["method"] != nil { await handler(data); return }
@@ -97,8 +104,9 @@ actor AgentCLIConnection {
         startReading()
         sequence += 1
         let id = sequence
-        let message = try JSONSerialization.data(withJSONObject: ["jsonrpc": "2.0", "method": method, "id": id,
-            "params": try JSONSerialization.jsonObject(with: params)])
+        var frame: [String: Any] = ["method": method, "id": id, "params": try JSONSerialization.jsonObject(with: params)]
+        if !codexProtocol { frame["jsonrpc"] = "2.0" }
+        let message = try JSONSerialization.data(withJSONObject: frame)
         let timer = Task {
             do { try await Task.sleep(for: timeout) } catch { return }
             guard self.requests[id] != nil else { return }

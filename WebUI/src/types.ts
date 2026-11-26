@@ -179,6 +179,14 @@ export interface CodexCLIUsageBucket {
   secondary?: CodexCLIUsageWindow;
 }
 
+export interface DesktopSection {
+  id: string; name: string; chats: { id: string; title: string; updatedAt: number }[];
+}
+export interface DesktopReader {
+  id: string; title: string; loading: boolean; older?: string; error?: string;
+  messages: {id: string; role: string; text: string}[];
+}
+
 export interface AppSnapshot {
   selectedAgentProfile?: AgentProfile;
   agentNames?: Record<string, string>;
@@ -193,6 +201,10 @@ export interface AppSnapshot {
   sidebarDropTarget?: boolean;
   workspaceOrder?: WorkspaceTab[];
   workspacePinnedCount?: number;
+  desktopSections?: DesktopSection[];
+  showsDesktopChats?: boolean;
+  desktopSidebarError?: string;
+  desktopReader?: DesktopReader;
   savedChats?: { id: string; title: string; workspace: string; updatedAt: number }[];
   savedChatSelection?: { id: string; error?: string };
   workspaceBrowsers?: WorkspaceBrowser[];
@@ -239,6 +251,9 @@ export type NativeAction =
   | {action: 'saveAgentSettings'; taskID: string; name: string; instructions: string}
   | {action: 'openAgentHistory'; taskID: string; conversationID: string}
   | { action: 'ready' }
+  | { action: 'showDesktopChats'; enabled: boolean }
+  | { action: 'openDesktopChat'; id: string }
+  | { action: 'earlierDesktopMessages' }
   | { action: 'selectTask'; id: string }
   | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }

@@ -200,6 +200,14 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 state.workspaceTabs.move(tab, to: target)
             }
 
+        case "showDesktopChats", "openDesktopChat", "earlierDesktopMessages":
+            guard let source = state.desktopSidebar, !windowTabs.isClosed, !windowTabs.isAPIProvidersPresented,
+                  !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
+            if action == "showDesktopChats", let enabled = body["enabled"] as? Bool {
+                windowTabs.showsDesktopChats = enabled
+            } else if action == "openDesktopChat", let id = body["id"] as? String {
+                source.open(id, in: windowTabs)
+            } else if action == "earlierDesktopMessages" { source.older(in: windowTabs) }
         case "selectTask":
             guard let id = body["id"] as? String else { return }
             state.selectSidebarChat(id)

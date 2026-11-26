@@ -144,6 +144,11 @@ final class WorkspaceWindowHosting: NSObject {
     func closeTabOrWindow(_ window: NSWindow?, inBrowserPane: Bool) {
         guard let state, let window, let host = host(for: window), window.attachedSheet == nil,
               !state.approvalGateBlocksInteraction, host.tabs.presentedSheet == nil, !host.tabs.isAPIProvidersPresented else { return }
+        if host.tabs.showsDesktopChats && !inBrowserPane {
+            host.tabs.desktopReader = nil
+            host.tabs.showsDesktopChats = false
+            return
+        }
         state.workspaceWindows.withWindow(host.tabs) {
             if host.tabs.showsNewAgent && !inBrowserPane { host.tabs.showsNewAgent = false }
             else if let tab = state.commandTab(inBrowserPane: inBrowserPane) { state.closeWorkspaceTab(tab) }
