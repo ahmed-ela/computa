@@ -1595,7 +1595,7 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         // Hit the centers of the three 22-point toolbar buttons (2-point gaps, 8-point leading inset).
         let lights = try trafficLightFrames(in: window)
         func historyPoint(_ index: Int) -> NSPoint {
-            let leading = max(page.convert(page.bounds, to: nil).minX, lights.green.maxX + lights.red.minX + 1)
+            let leading = lights.green.maxX + lights.red.minX
             return NSPoint(x: leading + 19 + CGFloat(index) * 24, y: light.convert(light.bounds, to: nil).midY)
         }
         for (width, collapsed) in [(1100, false), (850, true)] {
@@ -1975,11 +1975,73 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testChatTitleAlignsWithWrappedReplyAtDifferentWindowWidths() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let task = AgentTask(title: String(repeating: "Long chat title ", count: 12), summary: "", status: .completed,
+            workspace: "", model: "fixture", entries: [
+                .init(kind: .assistant, title: "Kolmogor", body: String(repeating: "A wrapped line of text. ", count: 600))
+            ])
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        state.selectTask(task.id)
+        await settleLayout(host)
+        let shell = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let loaded = await waitForScriptBool(on: shell, script: "!!document.querySelector('.assistant-copy p')")
+        XCTAssertTrue(loaded)
+        for width in [1440, 1000, 700] {
+            window.setContentSize(.init(width: width, height: 700))
+            for collapsed in [false, true] {
+                // A trailing border simulates the space a classic scrollbar consumes on hosts using overlay scrollbars.
+                _ = try await shell.evaluateJavaScript("""
+                    document.querySelector('.conversation-scroll').style.borderRight = '\(collapsed ? "16px solid transparent" : "none")'; true
+                    """)
+                state.isTaskSidebarCollapsed = collapsed
+                await settleLayout(host)
+                let ready = await waitForScriptBool(on: shell, script: """
+                    innerWidth === \(width) && !!document.querySelector('[data-sidebar-collapsed]') === \(collapsed)
+                    """)
+                XCTAssertTrue(ready)
+                let measurement = try await shell.evaluateJavaScript("""
+                    (() => {
+                        const scroll = document.querySelector('.conversation-scroll');
+                        const title = document.querySelector('.toolbar-title-block strong');
+                        const text = document.createRange();
+                        text.selectNodeContents(document.querySelector('.assistant-copy p'));
+                        const lines = text.getClientRects();
+                        return { titleX: title.getBoundingClientRect().left, replyX: lines[0].left, lineCount: lines.length,
+                            scrollbar: scroll.offsetWidth - scroll.clientWidth, overflow: scroll.scrollHeight - scroll.clientHeight,
+                            titleOverflow: title.scrollWidth - title.clientWidth,
+                            actionGap: document.querySelector('.toolbar-actions').getBoundingClientRect().left - title.getBoundingClientRect().right };
+                    })()
+                    """)
+                let result = try XCTUnwrap(measurement as? [String: CGFloat])
+                let layout = "width \(width), collapsed \(collapsed): \(result)"
+                XCTAssertGreaterThan(try XCTUnwrap(result["lineCount"]), 1, layout)
+                if collapsed { XCTAssertGreaterThanOrEqual(try XCTUnwrap(result["scrollbar"]), 16, layout) }
+                XCTAssertGreaterThan(try XCTUnwrap(result["overflow"]), 0, layout)
+                XCTAssertEqual(try XCTUnwrap(result["titleX"]), try XCTUnwrap(result["replyX"]), accuracy: 0.5, layout)
+                XCTAssertGreaterThan(try XCTUnwrap(result["titleOverflow"]), 0, layout)
+                XCTAssertGreaterThanOrEqual(try XCTUnwrap(result["actionGap"]), 0, layout)
+            }
+        }
+    }
+
+    @MainActor
     func testSidebarMovesThroughIntermediateWidthsInChatAndOnAWebpage() async throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         defer { session.shutdown() }
-        let task = AgentTask(title: "Sidebar motion", summary: "", status: .draft, workspace: "", model: "fixture")
+        let task = AgentTask(title: "Sidebar motion", summary: "", status: .completed, workspace: "", model: "fixture",
+            entries: [.init(kind: .assistant, title: "Kolmogor", body: String(repeating: "A reply that wraps. ", count: 80))])
         let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1080, height: 700),
@@ -2005,7 +2067,10 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                     window.sidebarSamples = [];
                     const sample = () => {
                         const search = sidebar.querySelector('.sidebar-search-row svg').getBoundingClientRect();
-                        window.sidebarSamples.push([sidebar.getBoundingClientRect().width, search.left + search.width / 2]);
+                        const title = document.querySelector('.toolbar-title-block').getBoundingClientRect();
+                        const reply = document.querySelector('.assistant-copy p')?.getBoundingClientRect();
+                        window.sidebarSamples.push([sidebar.getBoundingClientRect().width, search.left + search.width / 2,
+                            title.left, title.top, reply?.left ?? -1]);
                     };
                     sample();
                     window.sidebarObserver = new ResizeObserver(sample);
@@ -2045,6 +2110,10 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             let widths = samples.map { $0[0] }
             let searchX = try XCTUnwrap(samples.first?[1])
             XCTAssertTrue(samples.allSatisfy { abs($0[1] - searchX) <= 1 }, "Search should stay on its icon column: \(samples)")
+            if state.primaryBrowserID == nil, let first = samples.first {
+                XCTAssertTrue(samples.allSatisfy { abs($0[2] - $0[4]) <= 0.5 && $0[3] == first[3] },
+                              "The title should follow the first line of the reply throughout the transition: \(samples)")
+            }
             let intermediate = widths.filter { $0 > min(start, end) + 1 && $0 < max(start, end) - 1 }
             if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 XCTAssertTrue(intermediate.isEmpty, "Reduce Motion should snap to the final width: \(widths)")
@@ -2133,6 +2202,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let expanded = await waitForScriptBool(on: chat, script: """
             document.querySelectorAll('.task-row').length === 25 && document.querySelectorAll('.task-row .agent-status-icon').length === 25
                 && !!document.querySelector('[aria-label="Archived 20"]') && !document.querySelector('.agent-rail')
+                && document.querySelector('[aria-label="Archived 20"] .agent-status-icon > path')?.getAttribute('d')
+                    === document.querySelector('[data-agent-status=working] .agent-status-icon mask > path')?.getAttribute('d')
+                && document.querySelectorAll('.task-row:not([data-agent-status=working]) .agent-status-icon > path').length === 23
                 && !document.querySelector('.task-row-status, .task-row-unread')
             """)
         XCTAssertTrue(expanded)
@@ -2169,7 +2241,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let working = await waitForScriptBool(on: chat, script: """
             document.querySelectorAll('.agent-rail .task-row').length === 25
                 && document.querySelectorAll('[data-agent-status="working"]').length === 2
-                && document.querySelectorAll('.bot-sparkle-star').length === 50
+                && document.querySelectorAll('[data-agent-status=working] .bot-sparkle-star').length === 4
+                && !document.querySelector('.task-row:not([data-agent-status=working]) .bot-sparkle-star')
                 && getComputedStyle(document.querySelector('[data-agent-status=working] .bot-sparkle-pass')).animationName
                     === (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'bot-sparkle-pass')
                 && document.querySelector('.sidebar').getBoundingClientRect().width === 44
@@ -2219,6 +2292,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             document.querySelectorAll('.agent-rail .task-row').length === 25
                 && document.querySelectorAll('[data-agent-status=working]').length === 1
                 && document.querySelectorAll('.agent-rail [data-agent-status=ready] .task-row-unread').length === 1
+                && !!document.querySelector('[data-agent-status=ready] .agent-status-icon > path')
+                && !document.querySelector('[data-agent-status=ready] .bot-sparkle-star')
             """)
         XCTAssertTrue(finished)
         XCTAssertTrue(state.hasUnreadCompletion(for: tasks[2].id))
@@ -2267,10 +2342,18 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         XCTAssertEqual(collapsedHistoryCenters, scrolledCenters)
         state.apply(.taskStatusChanged(taskID: tasks[1].id, status: .completed))
         let idle = await waitForScriptBool(on: chat, script: """
-            !!document.querySelector('.agent-rail') && document.querySelectorAll('.agent-rail .agent-status-icon').length === 25 && !document.querySelector('[data-agent-status=working]') && getComputedStyle(document.querySelector('.agent-rail .bot-sparkle-pass')).animationName === 'none'
+            !!document.querySelector('.agent-rail') && document.querySelectorAll('.agent-rail .agent-status-icon').length === 25 && !document.querySelector('[data-agent-status=working]')
+                && document.querySelectorAll('.agent-rail .agent-status-icon > path').length === 25 && !document.querySelector('.agent-rail .bot-sparkle-pass')
                 && !!document.querySelector('[data-native-sidebar-controls=true]') && !document.querySelector('.sidebar [aria-label="New agent"]')
             """)
         XCTAssertTrue(idle)
+
+        state.apply(.taskStatusChanged(taskID: tasks[1].id, status: .running))
+        let workingAgain = await waitForScriptBool(on: chat, script: """
+            document.querySelectorAll('[aria-label="Research — Working"] .bot-sparkle-star').length === 2
+                && document.querySelectorAll('.agent-rail .agent-status-icon > path').length === 24
+            """)
+        XCTAssertTrue(workingAgain)
     }
 
     @MainActor

@@ -228,7 +228,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
               event.preventDefault(); const neighbor = rows[start + index + (event.key === 'ArrowUp' ? -1 : 1)];
               if (typeof neighbor !== 'string' && neighbor?.open) post({ action: 'moveWorkspaceTab', tab: item.ref, target: neighbor.ref });
             }}>
-            {item.browser ? <SiteIcon tab={item.browser} /> : <AgentStatusIcon taskID={item.ref.id} />}
+            {item.browser ? <SiteIcon tab={item.browser} /> : <AgentStatusIcon taskID={item.ref.id} working={status === 'working'} />}
             {!collapsed && <span className="task-row-title">{item.title}</span>}
             {item.task && <TaskActivityIndicator task={item.task} status={status} compact={collapsed} now={now} />}
           </Button>

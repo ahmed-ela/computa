@@ -178,6 +178,9 @@ test('agent and browser rows retain order, selection, icons and activity in both
     const rows = render();
     expect(rows.match(/class="agent-status-icon"/g)).toHaveLength(2);
     expect(rows.match(/data-agent-status="working"/g)).toHaveLength(1);
+    expect(rows.match(/bot-sparkle-star/g)).toHaveLength(2);
+    expect(rows).toContain(`id="agent-sparkles-${active.id}"`);
+    expect(rows).not.toContain(`id="agent-sparkles-${idle.id}"`);
     expect(rows).not.toContain('Ready to read');
     expect(rows).not.toContain('task-row-unread');
     expect(rows.match(/aria-current="page"/g)).toHaveLength(1);

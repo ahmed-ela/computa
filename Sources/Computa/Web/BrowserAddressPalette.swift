@@ -8,6 +8,30 @@ struct BrowserAddressBounds: PreferenceKey {
     }
 }
 
+struct BrowserTitlebarAddressControls: View {
+    let session: EmbeddedBrowserSession
+    let tab: EmbeddedBrowserTab
+    let rowHeight: CGFloat
+    let edit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            BrowserHistoryButtons(session: session, selectedTab: tab)
+            Button(action: edit) {
+                BrowserAddressPill(height: max(18, min(28, rowHeight - 4)), editing: false) {
+                    Text(tab.url?.absoluteString ?? "Search or enter a website address")
+                        .lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .accessibilityLabel("Website address")
+            .accessibilityValue(tab.url?.absoluteString ?? "")
+            .help("Edit website address (⌘L)")
+            .anchorPreference(key: BrowserAddressBounds.self, value: .bounds) { $0 }
+        }
+    }
+}
+
 struct BrowserAddressPill<Content: View>: View {
     let height: CGFloat
     let editing: Bool
