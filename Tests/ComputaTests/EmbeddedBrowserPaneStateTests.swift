@@ -1837,6 +1837,97 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testChatTranscriptSupportsNativeTextSelection() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let task = AgentTask(title: "Selection check", summary: "", status: .running, workspace: "", model: "fixture",
+                             entries: [.init(kind: .user, title: "You", body: "User blue violet sample")])
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let replyID = UUID().uuidString
+        state.apply(.assistantMessageDelta(taskID: task.id, itemID: replyID, delta: "Reply blue violet sample"))
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: .init(x: 200, y: 200, width: 1040, height: 700),
+                              styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+        state.selectTask(task.id)
+        await settleLayout(host)
+        let web = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let ready = await waitForScriptBool(on: web, script: "!!document.querySelector('.assistant-copy p')")
+        XCTAssertTrue(ready)
+        func mouse(_ type: NSEvent.EventType, at point: NSPoint, count: Int = 1) throws {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: count, pressure: type == .leftMouseUp ? 0 : 1))
+            // Target this chat's WebKit responder. XCTest can run without a foreground app or a key window.
+            switch type {
+            case .leftMouseDown: web.mouseDown(with: event)
+            case .leftMouseDragged: web.mouseDragged(with: event)
+            case .leftMouseUp: web.mouseUp(with: event)
+            default: XCTFail("Unexpected mouse event")
+            }
+        }
+        for selector in [".assistant-copy p", ".user-bubble"] {
+            let positions = try await web.callAsyncJavaScript("""
+                const block = document.querySelector(selector);
+                const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+                let node; while ((node = walker.nextNode()) && !node.data.includes('blue violet')) {}
+                const start = node.data.indexOf('blue violet');
+                const rect = (from, to) => {
+                    const range = document.createRange();
+                    range.setStart(node, start + from); range.setEnd(node, start + to);
+                    return range.getBoundingClientRect();
+                };
+                const phrase = rect(0, 11), word = rect(5, 11);
+                return [phrase.left + 0.25, phrase.right - 0.25, word.x + word.width / 2, phrase.y + phrase.height / 2];
+                """, arguments: ["selector": selector], in: nil, contentWorld: .page)
+            let coords = try XCTUnwrap(positions as? [CGFloat])
+            let frame = web.convert(web.bounds, to: nil)
+            func point(_ x: CGFloat) -> NSPoint { NSPoint(x: frame.minX + x, y: frame.maxY - coords[3]) }
+            func check(_ expected: String) async {
+                let selected = await waitForScriptBool(on: web, script: """
+                    (() => {
+                        const source = document.querySelector('\(selector)'), selection = getSelection();
+                        return source.contains(selection.anchorNode) && source.contains(selection.focusNode)
+                            && String(selection) === '\(expected)';
+                    })()
+                    """)
+                XCTAssertTrue(selected, "Expected to select '\(expected)' in \(selector)")
+            }
+            try mouse(.leftMouseDown, at: point(coords[2]))
+            try mouse(.leftMouseUp, at: point(coords[2]))
+            try mouse(.leftMouseDown, at: point(coords[2]), count: 2)
+            try mouse(.leftMouseUp, at: point(coords[2]), count: 2)
+            await check("violet")
+            try mouse(.leftMouseDown, at: point(coords[1]))
+            try mouse(.leftMouseDragged, at: point(coords[1] - 7))
+            try mouse(.leftMouseDragged, at: point(coords[0]))
+            try mouse(.leftMouseUp, at: point(coords[0]))
+            await check("blue violet")
+            if selector == ".assistant-copy p" {
+                state.apply(.assistantMessageDelta(taskID: task.id, itemID: replyID, delta: " with more words."))
+                let appended = await waitForScriptBool(on: web, script: "document.querySelector('.assistant-copy p').textContent.endsWith('more words.')")
+                XCTAssertTrue(appended)
+                await check("blue violet")
+                let backward = try await web.evaluateJavaScript("getSelection().anchorOffset > getSelection().focusOffset")
+                XCTAssertEqual(backward as? Bool, true)
+                state.apply(.timelineEntryAppended(taskID: task.id, entry: .init(id: replyID, kind: .assistant, title: "Assistant",
+                    body: "A replacement with different words.")))
+                let replaced = await waitForScriptBool(on: web, script: """
+                    document.querySelector('.assistant-copy p').textContent === 'A replacement with different words.' && getSelection().isCollapsed
+                    """)
+                XCTAssertTrue(replaced, "A revised answer must not select unrelated text")
+            }
+        }
+    }
+
+    @MainActor
     func testAgentMenuStartsFreshAndOpensOriginalFromHistoryInWebKit() async throws {
         let threadID = UUID().uuidString.lowercased()
         let task = AgentTask(runtimeThreadID: threadID, title: "Earlier review", summary: "",

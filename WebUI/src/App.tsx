@@ -21,6 +21,7 @@ import { CodexCLIUsage, isCodexCLIModel } from './CodexCLIUsage';
 import { WebsiteSessionCleanupControl } from './WebsiteSessionCleanupControl';
 import { fileChangeSummary } from './reviewDiff';
 import { ResponseMarkdown } from './ResponseMarkdown';
+import { updateWithResponseSelection } from './responseSelection';
 import { ActivityDisclosure, activityLabel } from './ActivityDisclosure';
 import { activityTimeline, systemMessageText, type ActivityGroup, type ConversationEntry } from './activityTimeline';
 import { formatWorkedFor } from './duration';
@@ -187,14 +188,19 @@ function MessageActions({ timestamp, label, copy }: { timestamp: number; label: 
   </div>;
 }
 
+function selectEntryFromKeyboard(event: KeyboardEvent, id: string) {
+  if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return;
+  event.preventDefault();
+  post({ action: 'selectEntry', id });
+}
+
 function UserMessage({ entry, selected }: { entry: EntrySnapshot; selected: boolean }) {
   return (
-    <article className={`message-row user-message ${selected ? 'selected' : ''}`}>
-      <Button variant="secondary" className="user-bubble"
-        onClick={() => post({ action: 'selectEntry', id: entry.id })}
-        aria-label={`You: ${entry.body}`}>
-        {entry.body}
-      </Button>
+    <article className={`message-row user-message ${selected ? 'selected' : ''}`}
+      tabIndex={0} aria-label={`You: ${entry.body}`}
+      onClick={() => post({ action: 'selectEntry', id: entry.id })}
+      onKeyDown={event => selectEntryFromKeyboard(event, entry.id)}>
+      <p className="user-bubble">{entry.body}</p>
       <MessageActions timestamp={entry.timestamp} label="Copy message" copy={() => copyText(entry.body)} />
     </article>
   );
@@ -228,9 +234,10 @@ function TimelineEntry({
   return (
     <article
       className={`message-row assistant-message ${selected ? 'selected' : ''}`}
+      data-entry-id={entry.id}
       onClick={() => post({ action: 'selectEntry', id: entry.id })}
       tabIndex={0}
-      onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); post({ action: 'selectEntry', id: entry.id }); } }}
+      onKeyDown={event => selectEntryFromKeyboard(event, entry.id)}
       aria-label="Assistant response"
     >
       {!hideAnswerDuration && entry.workedForSeconds != null && Number.isFinite(entry.workedForSeconds) && entry.workedForSeconds >= 0
@@ -981,10 +988,13 @@ export function App() {
     selectedTask?.hasUnreadCompletion, selectedTask?.status, selectedTask?.isBusy]);
 
   useEffect(() => {
-    if (import.meta.env.DEV && !nativeHost) return installPreviewBridge(setSnapshot);
-    window.__localCodexReceiveState = (next) => {
-      setSnapshot((current) => (!current || next.revision >= current.revision ? next : current));
+    const receive = (next: AppSnapshot) => {
+      updateWithResponseSelection(currentSnapshot.current, next, () => {
+        setSnapshot(current => !current || next.revision >= current.revision ? next : current);
+      });
     };
+    if (import.meta.env.DEV && !nativeHost) return installPreviewBridge(receive);
+    window.__localCodexReceiveState = receive;
     post({ action: 'ready' });
     return () => {
       delete window.__localCodexReceiveState;
