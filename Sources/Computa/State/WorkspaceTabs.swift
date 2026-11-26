@@ -35,7 +35,6 @@ struct SavedWorkspace: Codable, Equatable {
         let selectedPage: UUID?
         let browserIsPrimary: Bool
         let frame: CGRect?
-        let screenFrame: CGRect?
         var temporaryDraftIDs: Set<String>?
     }
     var windows: [Window]? = nil
@@ -109,7 +108,6 @@ final class WorkspaceTabs {
     private static let snapshotKey = "Computa.Workspace.OpenTabs.v2"
     let id: UUID
     var frame: CGRect?
-    var screenFrame: CGRect?
     let family: UUID
     var isClosed = false
     var selectedTaskID: String? {
@@ -216,7 +214,6 @@ final class WorkspaceTabs {
         order = layout.order
         pinnedCount = order.prefix(while: pins.contains).count
         frame = layout.frame
-        screenFrame = layout.screenFrame
         temporaryDraftIDs = layout.temporaryDraftIDs ?? []
         selectedTaskID = layout.selectedAgent
         selectedPage = layout.selectedPage

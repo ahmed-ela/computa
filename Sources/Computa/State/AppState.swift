@@ -471,7 +471,7 @@ final class AppState {
             let temporaryIDs = window.temporaryDraftIDs.intersection(order.filter { $0.kind == .agent }.map(\.id))
             return SavedWorkspace.Window(id: window.id, order: order, selectedAgent: agent, selectedPage: page,
                                          browserIsPrimary: page != nil && (window.browserIsPrimary || agent == nil),
-                                         frame: window.frame, screenFrame: window.screenFrame,
+                                         frame: window.frame,
                                          temporaryDraftIDs: temporaryIDs.isEmpty ? nil : temporaryIDs)
         }
         let active = layouts.first { $0.id == workspaceWindows.focused.id } ?? layouts.first

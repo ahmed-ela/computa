@@ -376,8 +376,8 @@ final class WorkspaceWindowTests: XCTestCase {
         XCTAssertEqual(WorkspaceWindowHosting.visibleFrame(for: frame, screens: [main]),
                        CGRect(x: 0, y: 100, width: 1000, height: 700))
         let partlyOffscreen = CGRect(x: 480, y: 60, width: 1100, height: 640)
-        XCTAssertEqual(WorkspaceWindowHosting.visibleFrame(for: partlyOffscreen, previousScreen: main, screens: [main]),
-                       partlyOffscreen)
+        XCTAssertEqual(WorkspaceWindowHosting.visibleFrame(for: partlyOffscreen, screens: [main]),
+                       CGRect(x: 340, y: 60, width: 1100, height: 640))
         XCTAssertEqual(WorkspaceWindowHosting.visibleFrame(for: main.insetBy(dx: -500, dy: -500), screens: [main]), main)
     }
 

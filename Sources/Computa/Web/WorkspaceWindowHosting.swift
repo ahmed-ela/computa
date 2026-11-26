@@ -124,7 +124,7 @@ final class WorkspaceWindowHosting: NSObject {
         // frames only once the real windows are on screen, before committing geometry.
         for id in state.workspaceWindows.restoredWindowIDs {
             guard let host = hosts[id], let saved = host.tabs.frame,
-                  let frame = Self.visibleFrame(for: saved, previousScreen: host.tabs.screenFrame) else { continue }
+                  let frame = Self.visibleFrame(for: saved) else { continue }
             host.window?.setFrame(frame, display: false)
         }
         window.makeKeyAndOrderFront(nil)
@@ -133,9 +133,8 @@ final class WorkspaceWindowHosting: NSObject {
         state.focusWorkspace(host.tabs)
     }
 
-    static func visibleFrame(for saved: CGRect, previousScreen: CGRect? = nil, screens: [CGRect] = NSScreen.screens.map(\.visibleFrame)) -> CGRect? {
+    static func visibleFrame(for saved: CGRect, screens: [CGRect] = NSScreen.screens.map(\.visibleFrame)) -> CGRect? {
         guard !saved.isEmpty, !saved.isInfinite, !saved.isNull, let first = screens.first else { return nil }
-        if let previousScreen, screens.contains(previousScreen), previousScreen.intersects(saved) { return saved }
         // Retain the display with the largest overlap; recover onto the main display if it was unplugged.
         let area = screens.reduce(first) { best, next in
             let a = saved.intersection(best), b = saved.intersection(next)
@@ -148,9 +147,8 @@ final class WorkspaceWindowHosting: NSObject {
 
     private func recordFrame(_ host: Host) {
         guard restoringFocus == nil, let window = host.window, !window.inLiveResize, !window.isMiniaturized, !window.styleMask.contains(.fullScreen),
-              !window.frame.isEmpty, host.tabs.frame != window.frame || host.tabs.screenFrame != window.screen?.visibleFrame else { return }
+              !window.frame.isEmpty, host.tabs.frame != window.frame else { return }
         host.tabs.frame = window.frame
-        host.tabs.screenFrame = window.screen?.visibleFrame
         state?.saveWorkspace()
     }
 
