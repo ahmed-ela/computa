@@ -42,6 +42,9 @@ final class SidebarDividerRenderTests: XCTestCase {
             guard ContinuousClock.now < ready else { return XCTFail("The agent title bar did not appear.") }
             try await Task.sleep(for: .milliseconds(20))
         }
+        // The chat title follows the transcript (measured during the transition in EmbeddedBrowserPaneStateTests).
+        // Exclude its glyphs here so every pixel of the fixed chrome can be compared.
+        _ = try await shell.evaluateJavaScript("document.querySelector('.toolbar-title-block').style.visibility = 'hidden'; true")
         let content = try await SCShareableContent.currentProcess
         let ownWindow = try XCTUnwrap(content.windows.first { $0.windowID == CGWindowID(window.windowNumber) })
         let filter = SCContentFilter(desktopIndependentWindow: ownWindow)

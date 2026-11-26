@@ -611,8 +611,13 @@ function Conversation({ snapshot, task, draftState }: { snapshot: AppSnapshot; t
     const scroll = scrollRef.current;
     const content = contentRef.current;
     if (!scroll || !content) return;
+    const workspace = scroll.closest<HTMLElement>('.workspace');
     followingOutput.current = true;
     const follow = () => {
+      const gutter = (scroll.offsetWidth - scroll.clientWidth) + 'px';
+      if (workspace && workspace.style.getPropertyValue('--conversation-scrollbar') !== gutter) {
+        workspace.style.setProperty('--conversation-scrollbar', gutter);
+      }
       if (followingOutput.current) scroll.scrollTop = scroll.scrollHeight;
     };
     // A streaming reply grows without adding another entry. Observe its
@@ -621,7 +626,10 @@ function Conversation({ snapshot, task, draftState }: { snapshot: AppSnapshot; t
     observer.observe(content);
     observer.observe(scroll);
     follow();
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      workspace?.style.removeProperty('--conversation-scrollbar');
+    };
   }, [task.id]);
   const setDraft = (value: string) => {
     post({ action: 'setComposerDraft', taskID: task.id, text: value });
@@ -1053,7 +1061,6 @@ export function App() {
     <div className="app-shell" data-native-host={nativeHost ? 'true' : undefined} data-native-sidebar-controls={snapshot.nativeSidebarControls || undefined}
       style={nativeHost && !snapshot.allowsBrowserSidePane ? {
         '--window-controls-width': (snapshot.trafficLightClearance ?? 0) + 'px',
-        '--titlebar-height': (snapshot.titlebarHeight ?? 32) + 'px',
       } : undefined}
       data-browser-primary={snapshot.primaryBrowserID && !snapshot.isSettingsPresented ? (nativeHost ? "native" : "preview") : undefined}
       data-sidebar-peeked={snapshot.isTaskSidebarCollapsed && snapshot.isTaskSidebarPeeked || undefined}

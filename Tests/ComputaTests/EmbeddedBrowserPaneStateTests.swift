@@ -1884,11 +1884,73 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
     }
 
     @MainActor
+    func testChatTitleAlignsWithWrappedReplyAtDifferentWindowWidths() async throws {
+        let prefs = isolatedTestPreferences()
+        let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
+        defer { session.shutdown() }
+        let task = AgentTask(title: String(repeating: "Long chat title ", count: 12), summary: "", status: .completed,
+            workspace: "", model: "fixture", entries: [
+                .init(kind: .assistant, title: "Kolmogor", body: String(repeating: "A wrapped line of text. ", count: 600))
+            ])
+        let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: state))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1000, height: 700),
+                              styleMask: [.borderless, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        state.selectTask(task.id)
+        await settleLayout(host)
+        let shell = try XCTUnwrap(nativeViews(in: host).compactMap { $0 as? WKWebView }.first {
+            $0.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil
+        })
+        let loaded = await waitForScriptBool(on: shell, script: "!!document.querySelector('.assistant-copy p')")
+        XCTAssertTrue(loaded)
+        for width in [1440, 1000, 700] {
+            window.setContentSize(.init(width: width, height: 700))
+            for collapsed in [false, true] {
+                // A trailing border simulates the space a classic scrollbar consumes on hosts using overlay scrollbars.
+                _ = try await shell.evaluateJavaScript("""
+                    document.querySelector('.conversation-scroll').style.borderRight = '\(collapsed ? "16px solid transparent" : "none")'; true
+                    """)
+                state.isTaskSidebarCollapsed = collapsed
+                await settleLayout(host)
+                let ready = await waitForScriptBool(on: shell, script: """
+                    innerWidth === \(width) && !!document.querySelector('[data-sidebar-collapsed]') === \(collapsed)
+                    """)
+                XCTAssertTrue(ready)
+                let measurement = try await shell.evaluateJavaScript("""
+                    (() => {
+                        const scroll = document.querySelector('.conversation-scroll');
+                        const title = document.querySelector('.toolbar-title-block strong');
+                        const text = document.createRange();
+                        text.selectNodeContents(document.querySelector('.assistant-copy p'));
+                        const lines = text.getClientRects();
+                        return { titleX: title.getBoundingClientRect().left, replyX: lines[0].left, lineCount: lines.length,
+                            scrollbar: scroll.offsetWidth - scroll.clientWidth, overflow: scroll.scrollHeight - scroll.clientHeight,
+                            titleOverflow: title.scrollWidth - title.clientWidth,
+                            actionGap: document.querySelector('.toolbar-actions').getBoundingClientRect().left - title.getBoundingClientRect().right };
+                    })()
+                    """)
+                let result = try XCTUnwrap(measurement as? [String: CGFloat])
+                let layout = "width \(width), collapsed \(collapsed): \(result)"
+                XCTAssertGreaterThan(try XCTUnwrap(result["lineCount"]), 1, layout)
+                if collapsed { XCTAssertGreaterThanOrEqual(try XCTUnwrap(result["scrollbar"]), 16, layout) }
+                XCTAssertGreaterThan(try XCTUnwrap(result["overflow"]), 0, layout)
+                XCTAssertEqual(try XCTUnwrap(result["titleX"]), try XCTUnwrap(result["replyX"]), accuracy: 0.5, layout)
+                XCTAssertGreaterThan(try XCTUnwrap(result["titleOverflow"]), 0, layout)
+                XCTAssertGreaterThanOrEqual(try XCTUnwrap(result["actionGap"]), 0, layout)
+            }
+        }
+    }
+
+    @MainActor
     func testSidebarMovesThroughIntermediateWidthsInChatAndOnAWebpage() async throws {
         let prefs = isolatedTestPreferences()
         let session = EmbeddedBrowserSession(persistent: false, defaults: prefs)
         defer { session.shutdown() }
-        let task = AgentTask(title: "Sidebar motion", summary: "", status: .draft, workspace: "", model: "fixture")
+        let task = AgentTask(title: "Sidebar motion", summary: "", status: .completed, workspace: "", model: "fixture",
+            entries: [.init(kind: .assistant, title: "Kolmogor", body: String(repeating: "A reply that wraps. ", count: 80))])
         let state = AppState(tasks: [task], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
         let host = NSHostingView(rootView: WebWorkspaceView(state: state))
         let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1080, height: 700),
@@ -1915,7 +1977,9 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
                     const sample = () => {
                         const search = sidebar.querySelector('.sidebar-search-row svg').getBoundingClientRect();
                         const title = document.querySelector('.toolbar-title-block').getBoundingClientRect();
-                        window.sidebarSamples.push([sidebar.getBoundingClientRect().width, search.left + search.width / 2, title.left, title.top]);
+                        const reply = document.querySelector('.assistant-copy p')?.getBoundingClientRect();
+                        window.sidebarSamples.push([sidebar.getBoundingClientRect().width, search.left + search.width / 2,
+                            title.left, title.top, reply?.left ?? -1]);
                     };
                     sample();
                     window.sidebarObserver = new ResizeObserver(sample);
@@ -1956,8 +2020,8 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
             let searchX = try XCTUnwrap(samples.first?[1])
             XCTAssertTrue(samples.allSatisfy { abs($0[1] - searchX) <= 1 }, "Search should stay on its icon column: \(samples)")
             if state.primaryBrowserID == nil, let first = samples.first {
-                XCTAssertTrue(samples.allSatisfy { $0[2] == first[2] && $0[3] == first[3] },
-                              "The agent title should stay at its window position throughout the transition.")
+                XCTAssertTrue(samples.allSatisfy { abs($0[2] - $0[4]) <= 0.5 && $0[3] == first[3] },
+                              "The title should follow the first line of the reply throughout the transition: \(samples)")
             }
             let intermediate = widths.filter { $0 > min(start, end) + 1 && $0 < max(start, end) - 1 }
             if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {

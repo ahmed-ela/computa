@@ -146,7 +146,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
   --sidebar-width: var(--rail-width, 44px);
   --sidebar-end-inset: calc(var(--rail-width, 44px) - var(--rail-center, 22px) - var(--sidebar-icon-track) / 2);
 }
-.app-shell[data-native-sidebar-controls][data-sidebar-collapsed] .task-toolbar { padding-left: 92px; }
+.app-shell[data-allows-side-pane][data-native-sidebar-controls][data-sidebar-collapsed] .task-toolbar { --toolbar-min-start: 92px; }
 .agent-rail-button { color: var(--text-secondary); }
 .task-row .agent-status-icon { width: 20px; height: 20px; }
 @property --sparkle-phase {
@@ -178,19 +178,23 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 }
 
 /* Keep the work itself visually primary. */
-.workspace { display: flex; min-width: 0; flex: 1; flex-direction: column; }
-.task-toolbar { display: flex; box-sizing: content-box; height: 32px; flex: none; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+.workspace {
+  --conversation-max-width: 760px; --conversation-inline-padding: 28px;
+  display: flex; min-width: 0; flex: 1; flex-direction: column;
+}
+.task-toolbar {
+  display: flex; box-sizing: content-box; height: 32px; flex: none; align-items: center; justify-content: space-between;
+  gap: 16px; padding-right: 24px; border-bottom: 1px solid var(--border); background: var(--bg);
+  /* Match the centered transcript inside its scroll viewport, including classic scrollbars. */
+  --conversation-margin: max(0px, (100% - var(--conversation-scrollbar, 0px) - var(--conversation-max-width)) / 2);
+  padding-left: max(var(--toolbar-min-start, 0px), var(--conversation-margin) + var(--conversation-inline-padding));
+}
 .preview-browser-toggle { position: absolute; top: 2px; right: 6px; }
 .preview-browser-toggle[aria-pressed="true"] { color: var(--blue); }
 .app-shell[data-allows-side-pane]:not([data-browser-pane]) .task-toolbar { padding-right: 48px; }
-/* The mixed workspace's title bar belongs to the window, above either sidebar width. */
-.app-shell[data-native-host]:not([data-allows-side-pane]) .app-panels { position: relative; }
+/* Clear the traffic lights if a compact chat pane reaches into their part of the title bar. */
 .app-shell[data-native-host]:not([data-allows-side-pane]) .task-toolbar {
-  position: absolute; inset: 0 0 auto; z-index: 1; background: var(--bg);
-  padding-left: calc(var(--window-controls-width) + 8px);
-}
-.app-shell[data-native-host]:not([data-allows-side-pane]) .workspace::before {
-  content: ""; flex: 0 0 calc(var(--titlebar-height) + 1px);
+  --toolbar-min-start: calc(var(--window-controls-width) + 8px - (100vw - 100%));
 }
 /* The native compose button belongs to the chat pane. The globe takes the outer corner when the browser is closed. */
 .app-shell[data-allows-side-pane][data-native-sidebar-controls] .task-toolbar { padding-right: 40px; }
@@ -203,7 +207,7 @@ pre, code, .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace
 .toolbar-actions { display: flex; align-items: center; gap: 12px; }
 .conversation-column { display: flex; min-height: 0; flex: 1; flex-direction: column; }
 .conversation-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
-.conversation-content { width: 100%; max-width: 760px; min-height: 100%; margin: 0 auto; padding: 32px 28px 22px; }
+.conversation-content { width: 100%; max-width: var(--conversation-max-width); min-height: 100%; margin: 0 auto; padding: 32px var(--conversation-inline-padding) 22px; }
 .message-row { min-width: 0; margin: 0 0 24px; }
 .user-message { position: relative; display: flex; width: fit-content; max-width: 85%; margin: 0 0 28px auto; }
 .user-bubble { height: auto; min-height: 38px; max-width: 100%; padding: 11px 15px; border: 0; border-radius: 10px; background: var(--surface-subtle); color: var(--text); font-size: 14px; font-weight: 400; line-height: 1.65; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
@@ -554,17 +558,18 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 @media (max-width: 1180px) {
   .sidebar { --sidebar-width: 216px; }
-  .task-toolbar { padding: 0 20px; }
-  .conversation-content { padding: 26px 24px 20px; }
+  .workspace { --conversation-inline-padding: 24px; }
+  .task-toolbar { padding-right: 20px; }
+  .conversation-content { padding-block: 26px 20px; }
   .composer-zone { padding: 10px 24px 20px; }
   .inspector { width: 260px; flex-basis: 260px; }
   .tool-duration { display: none; }
 }
 @media (max-width: 760px) {
   .sidebar { --sidebar-width: 190px; }
-  .task-toolbar { padding: 0 16px; }
+  .workspace { --conversation-inline-padding: 18px; }
+  .task-toolbar { padding-right: 16px; }
   .toolbar-actions { gap: 8px; }
-  .conversation-content { padding-right: 18px; padding-left: 18px; }
   .composer-zone { padding-right: 16px; padding-left: 16px; }
   .inspector { position: absolute; z-index: 20; top: 0; right: 0; bottom: 0; width: 280px; box-shadow: -12px 0 32px #0002; }
   .settings-modal { width: 100%; }
