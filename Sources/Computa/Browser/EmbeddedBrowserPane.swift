@@ -12,6 +12,7 @@ struct EmbeddedBrowserPane: View {
     var workspacePageID: UUID?
     var openTitlebarAddress: (() -> Void)?
     var showsNewTabButton = true
+    var titlebarLeadingInset: CGFloat = 0
     var titlebarTrailingInset: CGFloat = 0
     var isInteractionBlocked = false
     var canLoadModels = false
@@ -160,6 +161,7 @@ struct EmbeddedBrowserPane: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 8)
+        .padding(.leading, titlebarLeadingInset)
         // The globe is a native accessory at the trailing edge of this row.
         .padding(.trailing, titlebarTrailingInset)
         .frame(height: tabRowHeight)
