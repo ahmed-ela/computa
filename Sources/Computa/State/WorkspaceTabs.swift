@@ -26,6 +26,21 @@ struct WorkspaceTabID: Codable, Hashable, Sendable {
 
 /// Relaunch metadata only. WebKit leases, runtime handles and message contents never cross launches.
 struct SavedWorkspace: Codable, Equatable {
+    /// The flat tab list below remains the shared page/draft manifest for older builds.
+    /// A window owns references into it, never another copy of a chat or a WebKit session.
+    struct Window: Codable, Equatable {
+        let id: UUID
+        let order: [WorkspaceTabID]
+        let selectedAgent: String?
+        let selectedPage: UUID?
+        let browserIsPrimary: Bool
+        let frame: CGRect?
+        let screenFrame: CGRect?
+        var temporaryDraftIDs: Set<String>?
+    }
+    var windows: [Window]? = nil
+    var focusedWindow: UUID? = nil
+
     struct ThinkingSelection: Codable, Equatable {
         let model: String
         let effort: String
@@ -92,7 +107,9 @@ struct SavedWorkspace: Codable, Equatable {
 final class WorkspaceTabs {
     private static let legacyKey = "Computa.Workspace.OpenAgents.v1"
     private static let snapshotKey = "Computa.Workspace.OpenTabs.v2"
-    let id = UUID()
+    let id: UUID
+    var frame: CGRect?
+    var screenFrame: CGRect?
     let family: UUID
     var isClosed = false
     var selectedTaskID: String? {
@@ -176,20 +193,34 @@ final class WorkspaceTabs {
         let legacy = defaults.stringArray(forKey: Self.legacyKey)
         hasSavedAgents = snapshot != nil || legacy != nil
         var seen = Set<WorkspaceTabID>()
+        id = snapshot?.windows?.first?.id ?? UUID()
         let tabs = snapshot?.order ?? (legacy ?? []).map(WorkspaceTabID.agent)
         let boundary = max(0, min(snapshot?.pinnedCount ?? 0, tabs.count))
         let pins = tabs.prefix(boundary).filter { seen.insert($0).inserted }
         pinnedCount = pins.count
         order = pins + tabs.dropFirst(boundary).filter { seen.insert($0).inserted }
+        if let layout = snapshot?.windows?.first { restore(layout, pins: Set(pins)) }
     }
 
-    init(temporaryFor primary: WorkspaceTabs) {
+    init(temporaryFor primary: WorkspaceTabs, id: UUID = UUID()) {
+        self.id = id
         family = primary.family
         defaults = nil
         profiles = primary.profiles
         onChange = primary.onChange
         order = []
         hasSavedAgents = true
+    }
+
+    func restore(_ layout: SavedWorkspace.Window, pins: Set<WorkspaceTabID>) {
+        order = layout.order
+        pinnedCount = order.prefix(while: pins.contains).count
+        frame = layout.frame
+        screenFrame = layout.screenFrame
+        temporaryDraftIDs = layout.temporaryDraftIDs ?? []
+        selectedTaskID = layout.selectedAgent
+        selectedPage = layout.selectedPage
+        browserIsPrimary = layout.browserIsPrimary
     }
 
     var selection: WorkspaceTabID? {
@@ -199,6 +230,7 @@ final class WorkspaceTabs {
 
     /// Mutate both sides of a transfer before the primary snapshot is written.
     func removeTransferred(_ tabs: Set<WorkspaceTabID>) {
+        guard !tabs.isEmpty else { return }
         pinnedCount -= pinnedTabs.filter(tabs.contains).count
         order.removeAll(where: tabs.contains)
         recentlyClosed.removeAll { tabs.contains($0.content.tab) }
@@ -271,6 +303,7 @@ final class WorkspaceTabs {
     func restoreBinding(draft: String, thread: String) {
         guard draft != thread else { return }
         if let index = order.firstIndex(of: .agent(draft)) { order[index] = .agent(thread) }
+        if selectedTaskID == draft { selectedTaskID = thread }
         if saved?.selectedAgent == draft { saved?.selectedAgent = thread }
         saved?.drafts.removeValue(forKey: draft)
         bindAgent(draft: draft, thread: thread)
@@ -333,7 +366,7 @@ final class WorkspaceTabs {
             let seed = tasks.filter { $0.id == tasks.first?.id || $0.status == .running }
             order.insert(contentsOf: seed.map { .agent($0.id) }, at: pinnedCount)
         }
-        if let selected = saved?.selectedAgent {
+        if let selected = selectedTaskID ?? (saved?.windows == nil ? saved?.selectedAgent : nil) {
             let local = localForThread[AgentTask.identityKey(selected)] ?? selected
             if order.contains(.agent(local)) { return local }
         }

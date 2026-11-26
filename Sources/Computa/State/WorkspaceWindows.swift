@@ -2,11 +2,14 @@ import Foundation
 import Observation
 
 /// Window-local presentation over a single collection of live agents and WebKit pages.
-/// Closing a detached window returns only its pins. Quitting restores all its open, eligible tabs in the primary window.
+/// Closing a detached window returns only its pins. Open windows retain their own layouts across launches.
 @MainActor @Observable
 final class WorkspaceWindows {
     let primary: WorkspaceTabs
     private(set) var temporary: [WorkspaceTabs] = []
+    let restoredWindowIDs: [UUID]
+    let restoredFocusID: UUID?
+    var primaryIsClosed = false
     private(set) var focused: WorkspaceTabs
     @TaskLocal private static var scope: WorkspaceTabs?
 
@@ -14,6 +17,16 @@ final class WorkspaceWindows {
         let primary = WorkspaceTabs(defaults: defaults)
         self.primary = primary
         focused = primary
+        restoredWindowIDs = primary.saved?.windows?.map(\.id) ?? []
+        restoredFocusID = primary.saved?.focusedWindow
+        if let saved = primary.saved, let layouts = saved.windows {
+            let pins = Set(saved.order.prefix(max(0, saved.pinnedCount ?? 0)))
+            for layout in layouts.dropFirst() {
+                let window = WorkspaceTabs(temporaryFor: primary, id: layout.id)
+                window.restore(layout, pins: pins)
+                temporary.append(window)
+            }
+        }
     }
 
     var all: [WorkspaceTabs] { [primary] + temporary }
@@ -32,12 +45,16 @@ final class WorkspaceWindows {
     func focus(_ window: WorkspaceTabs) {
         guard window !== focused, all.contains(where: { $0 === window }) else { return }
         focused = window
+        primary.onChange?()
     }
+
+    var openWindows: [WorkspaceTabs] { primaryIsClosed ? temporary : all }
 
     func createTemporary() -> WorkspaceTabs {
         let window = WorkspaceTabs(temporaryFor: primary)
         window.isSidebarCollapsed = current.isSidebarCollapsed
         temporary.append(window)
+        primary.onChange?()
         return window
     }
 
@@ -48,7 +65,7 @@ final class WorkspaceWindows {
     func remove(_ window: WorkspaceTabs) {
         guard window !== primary else { return }
         temporary.removeAll { $0 === window }
-        if focused === window { focused = primary }
+        if focused === window { focused = openWindows.first ?? primary }
         window.isClosed = true
     }
 }
@@ -145,18 +162,21 @@ extension AppState {
         }
     }
 
+    func returnWindowPins(from window: WorkspaceTabs, to target: WorkspaceTabs) {
+        let pins = Array(window.pinnedTabs)
+        guard window !== target, let first = pins.first else { return }
+        let moving = Set(pins)
+        window.removeTransferred(moving)
+        target.insertTransferred(pins, pinned: moving, before: nil)
+        window.temporaryDraftIDs.subtract(pins.filter { $0.kind == .agent }.map(\.id))
+        handOffComposerDrafts(for: pins, from: window, to: target)
+        if target.selection == nil && target.newAgentDraft == nil { selectTransferred(first, in: target) }
+    }
+
     func discardTemporaryWindow(_ window: WorkspaceTabs) {
         guard window !== workspaceWindows.primary, !window.isClosed else { return }
-        let pins = Array(window.pinnedTabs)
-        if let first = pins.first {
-            let primary = workspaceWindows.primary
-            let moving = Set(pins)
-            window.removeTransferred(moving)
-            primary.insertTransferred(pins, pinned: moving, before: nil)
-            window.temporaryDraftIDs.subtract(pins.filter { $0.kind == .agent }.map(\.id))
-            handOffComposerDrafts(for: pins, from: window, to: primary)
-            if primary.selection == nil && primary.newAgentDraft == nil { selectTransferred(first, in: primary) }
-        }
+        let recipient = workspaceWindows.openWindows.first { $0 !== window } ?? workspaceWindows.primary
+        returnWindowPins(from: window, to: recipient)
         let tabs = window.order
         if let draft = window.newAgentDraft { composerDrafts.removeValue(forKey: draft.task.id) }
         let discardable = Set(tasks.filter {

@@ -232,18 +232,22 @@ final class WorkspaceWindowTests: XCTestCase {
         let browser = WorkspaceTabID.browser(page.workspaceID)
         let expected = [original, browser, agent, .browser(selected)]
         XCTAssertEqual(main.order, [original, .browser(selected)])
-        XCTAssertEqual(WorkspaceTabs(defaults: prefs).order, expected)
+        XCTAssertEqual(WorkspaceTabs(defaults: prefs).order, main.order)
         detached.setPinned(agent, pinned: false)
-        XCTAssertFalse(WorkspaceTabs(defaults: prefs).order.contains(agent))
+        XCTAssertFalse(WorkspaceWindows(defaults: prefs).temporary.first?.pinnedTabs.contains(agent) == true)
         detached.setPinned(agent, pinned: true)
 
         let next = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
         defer { next.shutdown() }
         let restored = AppState(tasks: [], preferences: prefs, browserSession: next, workspaceLayout: .mixedTabs)
-        XCTAssertEqual(restored.workspaceTabs.order, expected)
-        XCTAssertEqual(Array(restored.workspaceTabs.pinnedTabs), Array(expected.prefix(3)))
+        XCTAssertEqual(restored.workspaceTabs.order, main.order)
+        XCTAssertEqual(Array(restored.workspaceTabs.pinnedTabs), [original])
+        let restoredDetached = try XCTUnwrap(restored.workspaceWindows.temporary.first)
+        XCTAssertEqual(restoredDetached.id, detached.id)
+        XCTAssertEqual(restoredDetached.order, detached.order)
+        XCTAssertEqual(Array(restoredDetached.pinnedTabs), [browser, agent])
         XCTAssertEqual(restored.selectedWorkspaceTab, .browser(selected))
-        XCTAssertFalse(restored.tasks.contains { $0.id == regular.id })
+        XCTAssertTrue(restored.tasks.contains { $0.id == regular.id })
         let restoredAgent = try XCTUnwrap(restored.tasks.first { $0.id == agent.id })
         XCTAssertEqual(restored.workspaceTabs.agent(for: restoredAgent)?.name, "Pinned agent")
 
@@ -259,7 +263,7 @@ final class WorkspaceWindowTests: XCTestCase {
         XCTAssertEqual(WorkspaceTabs(defaults: prefs).order, expected)
     }
 
-    func testQuitCollectsOnlyStillOpenWindowsAndPreservesFocusedTab() async throws {
+    func testQuitRestoresSeparateWindowsAndPreservesFocusedTab() async throws {
         let prefs = isolatedTestPreferences(), profile = UUID()
         let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
         let state = AppState(tasks: [], preferences: prefs, browserSession: session, workspaceLayout: .mixedTabs)
@@ -286,24 +290,27 @@ final class WorkspaceWindowTests: XCTestCase {
         }
         let openHost = showWindow(open, state: state)
         state.focusWorkspace(open)
-        let expected = [mainTab] + open.order
+        let expected = open.order
         XCTAssertEqual(Set(open.order), [.agent(agent), page])
         state.prepareWorkspaceForQuit()
         // Cocoa can close a window while the application's runtime is shutting down.
         openHost.close()
-        XCTAssertTrue(open.isClosed)
         _ = await state.shutdownRuntime()
         let nextBrowser = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
         defer { nextBrowser.shutdown() }
         let next = AppState(tasks: [], preferences: prefs, browserSession: nextBrowser, workspaceLayout: .mixedTabs)
+        XCTAssertEqual(next.workspaceWindows.all.map(\.id), [primary.id, open.id])
+        XCTAssertEqual(next.workspaceWindows.focused.id, open.id)
+        XCTAssertEqual(next.workspaceWindows.primary.order, [mainTab])
+        XCTAssertEqual(Array(next.workspaceWindows.primary.pinnedTabs), [mainTab])
         XCTAssertEqual(next.workspaceTabs.order, expected)
-        XCTAssertEqual(Array(next.workspaceTabs.pinnedTabs), [mainTab])
+        XCTAssertEqual(next.workspaceTabs.frame, open.frame)
         XCTAssertEqual(next.selectedWorkspaceTab, page)
         XCTAssertTrue(next.tasks.contains { $0.id == agent })
         XCTAssertFalse(next.tasks.contains { $0.id == removed })
     }
 
-    func testOnlyDetachedBrowserPinIsSelectedOnRestoreIntoEmptyPrimaryWindow() throws {
+    func testDetachedBrowserPinRestoresIntoItsOwnWindowWithAnEmptyPrimary() throws {
         let prefs = isolatedTestPreferences(), profile = UUID()
         let session = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
         defer { session.shutdown() }
@@ -317,8 +324,61 @@ final class WorkspaceWindowTests: XCTestCase {
         let next = try makePersistentBrowserTestSession(profileID: profile, defaults: prefs)
         defer { next.shutdown() }
         let restored = AppState(tasks: [], preferences: prefs, browserSession: next, workspaceLayout: .mixedTabs)
-        XCTAssertEqual(Array(restored.workspaceTabs.pinnedTabs), [page])
-        XCTAssertEqual(restored.selectedWorkspaceTab, page)
+        XCTAssertTrue(restored.workspaceWindows.primary.order.isEmpty)
+        let other = try XCTUnwrap(restored.workspaceWindows.temporary.first)
+        XCTAssertEqual(Array(other.pinnedTabs), [page])
+        XCTAssertEqual(other.selection, page)
+    }
+
+    func testClosingOrMergingPrimaryPromotesOnlyTheSurvivingWindowOnRestart() throws {
+        for merge in [false, true] {
+            let prefs = isolatedTestPreferences()
+            let state = AppState(tasks: [], preferences: prefs, workspaceLayout: .mixedTabs)
+            defer { state.browserSession.shutdown() }
+            let main = state.workspaceWindows.primary
+            state.createTask()
+            let original = try XCTUnwrap(main.selection)
+            let secondary = state.workspaceWindows.createTemporary()
+            state.workspaceWindows.withWindow(secondary) { state.createTask() }
+            let other = try XCTUnwrap(secondary.selection)
+            let host = showWindow(main, state: state)
+            if merge { XCTAssertTrue(state.transferTabs(main.order, from: main, to: secondary)) }
+            host.close()
+            let next = WorkspaceWindows(defaults: prefs)
+            XCTAssertEqual(next.all.map(\.id), [secondary.id])
+            XCTAssertEqual(next.primary.order, merge ? [other, original] : [other])
+            XCTAssertEqual(next.primary.selection, merge ? original : other)
+        }
+    }
+
+    func testClosingTheBackgroundPrimaryKeepsTheFrontWindowFocused() throws {
+        let prefs = isolatedTestPreferences()
+        let state = AppState(tasks: [], preferences: prefs, workspaceLayout: .mixedTabs)
+        defer { state.browserSession.shutdown() }
+        let windows = state.workspaceWindows, primary = windows.primary
+        state.createTask()
+        let pin = try XCTUnwrap(primary.selection)
+        primary.setPinned(pin, pinned: true)
+        let second = windows.createTemporary(), front = windows.createTemporary()
+        state.focusWorkspace(front)
+        showWindow(primary, state: state).close()
+        let restored = WorkspaceWindows(defaults: prefs)
+        XCTAssertEqual(restored.all.map(\.id), [second.id, front.id])
+        XCTAssertEqual(restored.restoredFocusID, front.id)
+        XCTAssertEqual(restored.temporary.first?.pinnedTabs.first, pin)
+    }
+
+    func testRestoredFramesRemainOnAvailableDisplays() {
+        let main = CGRect(x: 0, y: 20, width: 1440, height: 880)
+        let left = CGRect(x: -1440, y: 0, width: 1440, height: 900)
+        let frame = CGRect(x: -1200, y: 100, width: 1000, height: 700)
+        XCTAssertEqual(WorkspaceWindowHosting.visibleFrame(for: frame, screens: [main, left]), frame)
+        XCTAssertEqual(WorkspaceWindowHosting.visibleFrame(for: frame, screens: [main]),
+                       CGRect(x: 0, y: 100, width: 1000, height: 700))
+        let partlyOffscreen = CGRect(x: 480, y: 60, width: 1100, height: 640)
+        XCTAssertEqual(WorkspaceWindowHosting.visibleFrame(for: partlyOffscreen, previousScreen: main, screens: [main]),
+                       partlyOffscreen)
+        XCTAssertEqual(WorkspaceWindowHosting.visibleFrame(for: main.insetBy(dx: -500, dy: -500), screens: [main]), main)
     }
 
     func testCloseShortcutClosesOnlyItsLastTabAndWindow() throws {
@@ -424,7 +484,7 @@ final class WorkspaceWindowTests: XCTestCase {
         XCTAssertTrue(state.transferTabs([ref], from: main, to: other))
         XCTAssertEqual(main.selection, .agent(active))
         XCTAssertEqual(other.selection, ref)
-        XCTAssertEqual(main.saved?.pages, [])
+        XCTAssertEqual(main.saved?.pages.map(\.id), [page.workspaceID])
         XCTAssertTrue(state.transferTabs([.agent(active)], from: main, to: other, before: ref))
         XCTAssertEqual(main.order, [.agent(original)])
         XCTAssertEqual(main.saved?.selectedAgent, original)
@@ -446,7 +506,7 @@ final class WorkspaceWindowTests: XCTestCase {
             state.createTask()
         }
         let newAgent = try XCTUnwrap(other.selectedTaskID)
-        XCTAssertFalse(main.saved?.drafts.keys.contains(newAgent) ?? true)
+        XCTAssertTrue(main.saved?.drafts.keys.contains(newAgent) == true)
         XCTAssertTrue(view === session.webView(for: pageID))
         let liveValue = try await view.evaluateJavaScript("window.unsaved") as? String
         XCTAssertEqual(liveValue, "before move")
@@ -461,6 +521,7 @@ final class WorkspaceWindowTests: XCTestCase {
         XCTAssertEqual(restored.order, main.order)
         XCTAssertEqual(restored.saved?.selectedAgent, newAgent)
         XCTAssertEqual(restored.saved?.pages.map(\.id), [page.workspaceID])
+        XCTAssertTrue(WorkspaceWindows(defaults: defaults).temporary.isEmpty)
     }
 
     func testCloseTemporaryWindowDiscardsOnlyItsTabsAndCannotReplayStaleDrop() throws {

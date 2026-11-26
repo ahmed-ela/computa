@@ -261,8 +261,7 @@ struct ComputaApp: App {
     }
 }
 
-/// A nil scene value is the durable workspace. Explicit values are usable only
-/// while their in-memory layouts exist; macOS cannot restore a discarded one.
+/// The default scene hosts the first saved window. Additional scenes bind to their saved window IDs.
 private struct WorkspaceScene: View {
     let state: AppState
     let id: UUID?
