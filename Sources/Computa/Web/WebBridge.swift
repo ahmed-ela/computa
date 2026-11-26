@@ -83,13 +83,7 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     private func setPinned(_ tab: WorkspaceTabID, pinned: Bool) {
         guard let state, !windowTabs.isClosed else { return }
         state.workspaceWindows.withWindow(windowTabs) {
-            guard !state.approvalGateBlocksInteraction, state.presentedSheet == nil,
-                  state.openWorkspaceTabs.contains(tab), windowTabs.pinnedTabs.contains(tab) != pinned else { return }
-            if tab.kind == .browser {
-                guard let page = state.browserSession.workspaceBrowserTabs.first(where: { .browser($0.workspaceID) == tab }) else { return }
-                state.browserSession.setPopupPinned(page, pinned: pinned)
-            }
-            windowTabs.setPinned(tab, pinned: pinned)
+            state.setWorkspaceTabPinned(tab, pinned: pinned)
         }
     }
 

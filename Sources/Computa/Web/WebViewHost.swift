@@ -133,6 +133,7 @@ struct WebWorkspaceView: View {
             tabRowHeight: rowHeight,
             usesSidebarTabs: browserPrimary,
             workspacePageID: browserPrimary ? selectedPageID : nil,
+            workspace: (state, windowTabs),
             openTitlebarAddress: edit,
             reservesWindowTitlebar: windowAddress,
             showsNewTabButton: state.workspaceLayout.allowsBrowserSidePane,
@@ -144,11 +145,11 @@ struct WebWorkspaceView: View {
             onLoadModels: { id in Task { await state.loadSignedInModels(tabID: id) } },
             canConfigureKimiProfile: state.canConfigureKimiProfile,
             onSwitchKimiProfile: state.switchKimiSignInProfile(from:),
-            onCloseTab: state.closeWorkspaceTab,
+            onCloseTab: { tab in state.workspaceWindows.withWindow(windowTabs) { state.closeWorkspaceTab(tab) } },
             onClose: {
                 guard state.workspaceLayout.allowsBrowserSidePane else { return }
                 windowTabs.browserIsPrimary = false
-                state.isBrowserPresented = false
+                state.workspaceWindows.withWindow(windowTabs) { state.isBrowserPresented = false }
             }
         )
     }
@@ -378,7 +379,7 @@ private struct CodexWebView: NSViewRepresentable {
         context.coordinator.onComposerReady = { [weak webView] request in
             webView?.deliverComposerInput(for: request)
         }
-        webView.configureTitlebarControls(state: state)
+        webView.configureTitlebarControls(state: state, tabs: windowTabs)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
         webView.allowsMagnification = false
@@ -515,20 +516,20 @@ private final class WindowConfiguredWebView: WKWebView {
     private weak var state: AppState?
     private let compose = NSButton()
 
-    func configureTitlebarControls(state: AppState) {
+    func configureTitlebarControls(state: AppState, tabs: WorkspaceTabs) {
         self.state = state
         if !state.mixesBrowserTabsInSidebar {
-            titlebarControls = [accessory(.left, SidebarTitlebarToggle(state: state))]
+            titlebarControls = [accessory(.left, SidebarTitlebarToggle(state: state, tabs: tabs))]
         }
         guard state.workspaceLayout.allowsBrowserSidePane else { return }
-        titlebarControls.append(accessory(.right, BrowserTitlebarToggle(state: state)))
+        titlebarControls.append(accessory(.right, BrowserTitlebarToggle(state: state, tabs: tabs)))
         compose.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
         compose.imagePosition = .imageOnly
         compose.bezelStyle = .accessoryBarAction
         compose.showsBorderOnlyWhileMouseInside = true
-        compose.setAccessibilityLabel("New chat")
+        compose.setAccessibilityLabel("New agent")
         compose.identifier = .init("chat-new")
-        compose.toolTip = "New chat (⇧⌘N)"
+        compose.toolTip = "New agent (⇧⌘N)"
         compose.target = self
         compose.action = #selector(createChat)
         compose.isHidden = true
@@ -559,22 +560,21 @@ private final class WindowConfiguredWebView: WKWebView {
     override func layout() {
         super.layout()
         updateTrafficLightClearance()
-        guard let window, let state, compose.superview != nil else { return }
-        compose.isHidden = !window.styleMask.contains(.titled) || state.presentedSheet != nil
-            || (state.primaryBrowserID != nil && state.shouldPresentBrowserPane)
+        guard let window, let state, let windowTabs, compose.superview != nil else { return }
+        compose.isHidden = !window.styleMask.contains(.titled) || windowTabs.presentedSheet != nil || windowTabs.showsPrimaryBrowser
         compose.isEnabled = !state.approvalGateBlocksInteraction
         guard !compose.isHidden else { return }
         let height = window.frame.height - window.contentLayoutRect.maxY
         let top = (height > 0 ? height : 32) / 2 - 11
-        let trailing = state.shouldPresentBrowserPane ? 6 : BrowserTitlebarToggle.width + 4
+        let trailing = windowTabs.browserSidePaneOpen ? 6 : BrowserTitlebarToggle.width + 4
         compose.frame = NSRect(x: bounds.maxX - trailing - 28,
                                y: isFlipped ? bounds.minY + top : bounds.maxY - top - 22,
                                width: 28, height: 22)
     }
 
     @objc private func createChat() {
-        guard let state, !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
-        state.presentNewAgent()
+        guard let state, let windowTabs, !state.approvalGateBlocksInteraction, windowTabs.presentedSheet == nil else { return }
+        _ = state.workspaceWindows.withWindow(windowTabs) { state.presentNewAgent() }
         guard WebUIResourceLocator.contains(url) else { return }
         evaluateJavaScript("document.dispatchEvent(new Event('kolmogor-clear-chat-search'))")
     }
@@ -667,16 +667,19 @@ private struct BrowserTitlebarToggle: View {
     #else
     private static let globe = Image(decorative: "BrowserGlobe")
     #endif
-    @Bindable var state: AppState
+    let state: AppState
+    let tabs: WorkspaceTabs
 
     var body: some View {
-        Toggle(isOn: Binding(get: { state.isBrowserPresented && state.primaryBrowserID == nil },
-                             set: { _ in state.toggleWorkspaceBrowser() })) {
+        let showing = tabs.browserSidePaneOpen && !tabs.showsPrimaryBrowser
+        Toggle(isOn: Binding(get: { showing }, set: { _ in
+            state.workspaceWindows.withWindow(tabs) { state.toggleWorkspaceBrowser() }
+        })) {
             Self.globe
                 .renderingMode(.template)
                 .resizable()
                 .frame(width: 16, height: 16)
-                .foregroundStyle(state.shouldPresentBrowserPane ? Color.accentColor : .secondary)
+                .foregroundStyle(showing ? Color.accentColor : .secondary)
                 .frame(width: 28, height: 22)
                 .contentShape(Rectangle())
         }
@@ -684,8 +687,8 @@ private struct BrowserTitlebarToggle: View {
         .buttonStyle(.borderless)
         .accessibilityLabel("Browser")
         .accessibilityIdentifier("browser-toggle")
-        .help(state.primaryBrowserID != nil && state.selectedTaskID != nil ? "Show chat beside browser" : state.shouldPresentBrowserPane ? "Hide browser" : "Show browser")
-        .disabled(state.presentedSheet != nil || state.approvalGateBlocksInteraction)
+        .help(showing ? "Hide browser" : "Show browser")
+        .disabled(tabs.presentedSheet != nil || state.approvalGateBlocksInteraction)
         .frame(width: Self.width, alignment: .leading)
     }
 }

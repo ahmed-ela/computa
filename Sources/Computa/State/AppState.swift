@@ -143,12 +143,11 @@ final class AppState {
     let workspaceWindows: WorkspaceWindows
     var workspaceTabs: WorkspaceTabs { workspaceWindows.current }
     @ObservationIgnored lazy var windowHosting = WorkspaceWindowHosting(state: self)
-    private var browserSidePaneOpen = false
     var isBrowserPresented: Bool {
-        get { browserSidePaneOpen }
+        get { workspaceTabs.browserSidePaneOpen }
         set {
-            guard workspaceLayout.allowsBrowserSidePane, newValue != browserSidePaneOpen else { return }
-            browserSidePaneOpen = newValue
+            guard workspaceLayout.allowsBrowserSidePane, newValue != workspaceTabs.browserSidePaneOpen else { return }
+            workspaceTabs.browserSidePaneOpen = newValue
             workspaceTabs.onChange?()
         }
     }
@@ -450,7 +449,7 @@ final class AppState {
             pinnedCount: pins.isEmpty ? nil : pins.count, selectedAgent: selected, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
             pages: pages, selectedPage: selectedPage, browserIsPrimary: selectedPage != nil && (selectionWindow.browserIsPrimary || returningPin?.kind == .browser),
-            showsBrowserPane: isBrowserPresented))
+            showsBrowserPane: selectionWindow.browserSidePaneOpen))
     }
 
     var selectedTask: AgentTask? {

@@ -37,7 +37,7 @@ enum ComputaLaunchMode: Equatable {
             let browser = EmbeddedBrowserSession(defaults: preferences)
             return AppState(tasks: [], runtime: runtimeFactory(), preferences: preferences,
                             unreadCompletionStore: unreadCompletionStoreFactory(),
-                            browserSession: browser, workspaceLayout: .mixedTabs)
+                            browserSession: browser)
         case .testHost:
             // A unique suite prevents even incidental test-host state changes
             // from reading or writing the application's saved access choice.

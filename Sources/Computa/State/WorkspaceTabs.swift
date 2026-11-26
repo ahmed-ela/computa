@@ -163,6 +163,7 @@ final class WorkspaceTabs {
     // Session-only history of explicit user closes. Closed pages retain no WebKit or tool handles.
     private(set) var recentlyClosed: [(content: ClosedTab, sectionIndex: Int, pinned: Bool)] = []
     private var hasSavedAgents: Bool
+    var browserSidePaneOpen = false
     var browserIsPrimary = false {
         didSet { if oldValue != browserIsPrimary { onChange?() } }
     }
@@ -362,21 +363,37 @@ extension AppState {
         return primaryBrowserID.map(WorkspaceTabID.browser) ?? selectedTaskID.map(WorkspaceTabID.agent)
     }
 
+    /// Both sidebar layouts and the browser tab strip project the same saved order and pin boundary.
+    var windowBrowserTabs: [EmbeddedBrowserTab] {
+        let byID = Dictionary(uniqueKeysWithValues: browserSession.workspaceBrowserTabs.map { ($0.workspaceID.uuidString, $0) })
+        return workspaceTabs.order.compactMap { $0.kind == .browser ? byID[$0.id] : nil }
+    }
+
+    func setWorkspaceTabPinned(_ tab: WorkspaceTabID, pinned: Bool) {
+        guard !workspaceTabs.isClosed, !approvalGateBlocksInteraction, presentedSheet == nil,
+              workspaceTabs.order.contains(tab), workspaceTabs.pinnedTabs.contains(tab) != pinned else { return }
+        if tab.kind == .browser {
+            guard let page = browserSession.workspaceBrowserTabs.first(where: { .browser($0.workspaceID) == tab }) else { return }
+            browserSession.setPopupPinned(page, pinned: pinned)
+        }
+        workspaceTabs.setPinned(tab, pinned: pinned)
+    }
+
     func commandTab(inBrowserPane: Bool) -> WorkspaceTabID? {
         guard inBrowserPane else { return selectedWorkspaceTab }
-        return browserSession.workspaceBrowserTabs.first { $0.id == browserSession.selectedTabID }.map { .browser($0.workspaceID) }
+        return displayedBrowserTab.map { .browser($0.workspaceID) }
     }
 
     func reloadableBrowserTabID(inBrowserPane: Bool) -> UUID? {
         guard shouldPresentBrowserPane, !approvalGateBlocksInteraction, presentedSheet == nil,
               inBrowserPane || primaryBrowserID != nil,
-              let tab = browserSession.workspaceBrowserTabs.first(where: { $0.id == browserSession.selectedTabID }),
+              let tab = displayedBrowserTab,
               tab.url != nil, !tab.isLoading else { return nil }
         return tab.id
     }
 
     func commandTabs(inBrowserPane: Bool) -> [WorkspaceTabID] {
-        inBrowserPane ? browserSession.workspaceBrowserTabs.map { .browser($0.workspaceID) } : openWorkspaceTabs
+        inBrowserPane ? windowBrowserTabs.map { .browser($0.workspaceID) } : openWorkspaceTabs
     }
 
     func selectNumberedWorkspaceTab(_ number: Int, inBrowserPane: Bool = false) {
@@ -414,9 +431,9 @@ extension AppState {
         case .browser:
             guard workspaceTabs.order.contains(tab), let id = UUID(uuidString: tab.id),
                   let page = browserSession.workspaceBrowserTabs.first(where: { $0.workspaceID == id }) else { return }
-            workspaceTabs.showsNewAgent = false
             browserSession.selectTab(page.id)
             if mixesBrowserTabsInSidebar {
+                workspaceTabs.showsNewAgent = false
                 savedChatSelection = nil
                 workspaceTabs.browserIsPrimary = true
             } else { isBrowserPresented = true }
@@ -424,7 +441,7 @@ extension AppState {
     }
 
     func addressableBrowserPage(in window: WorkspaceTabs) -> UUID? {
-        window.showsPrimaryBrowser || (!mixesBrowserTabsInSidebar && isBrowserPresented) ? window.selectedPage : nil
+        window.showsPrimaryBrowser || (!mixesBrowserTabsInSidebar && window.browserSidePaneOpen) ? window.selectedPage : nil
     }
 
     @discardableResult

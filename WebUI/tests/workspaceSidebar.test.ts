@@ -144,7 +144,7 @@ test('chat-only navigation hides browser rows and creation in either sidebar wid
     const html = renderToStaticMarkup(h(WorkspaceSidebar, {
       snapshot, search: '', setSearch: () => {}, nativeHost: true, post: () => {},
     })).html;
-    expect(html).toContain('aria-label="Chats"');
+    expect(html).toContain('aria-label="Agents"');
     expect(html).not.toContain('Show chat history');
     expect(html).not.toContain('aria-label="New agent"');
     expect(html).toContain('data-tab-kind="agent"');
@@ -152,6 +152,30 @@ test('chat-only navigation hides browser rows and creation in either sidebar wid
     expect(html).not.toContain('data-tab-kind="browser"');
     expect(html).not.toContain('aria-label="New tab"');
     expect(workspaceItems(snapshot, 'rail.example')).toEqual([]);
+  }
+});
+
+test('agent library includes saved conversations before search and keeps empty composers and previous contexts out', () => {
+  const snapshot = { ...fixture(), mixesBrowserTabsInSidebar: false };
+  const original = snapshot.tasks[0];
+  snapshot.workspaceOrder = [{ kind: 'agent', id: original.id }];
+  snapshot.tasks = [original, {...original, id: 'closed', title: 'Finished agent', status: 'Completed'},
+    {...original, id: 'draft', title: 'Unused', status: 'Draft', hasBoundThread: false}];
+  snapshot.savedChats = [
+    {id: 'closed', title: 'Duplicate', workspace: '/', updatedAt: 6},
+    {id: 'unloaded', title: 'Older agent', workspace: '/', updatedAt: 4},
+    {id: 'before-reset', title: 'Previous context', workspace: '/', updatedAt: 2},
+  ];
+  snapshot.priorAgentConversationIDs = ['before-reset'];
+  expect(workspaceItems(snapshot, '').map(row => row.ref.id)).toEqual([original.id, 'closed', 'unloaded']);
+  expect(workspaceItems(snapshot, 'Previous').map(row => row.ref.id)).toEqual(['before-reset']);
+  for (const compact of [false, true]) {
+    const html = renderToStaticMarkup(h(WorkspaceSidebar, {
+      snapshot: {...snapshot, isTaskSidebarCollapsed: compact}, search: '', nativeHost: true, setSearch: () => {}, post: () => {},
+    })).html;
+    expect(html).toContain('Saved agents');
+    expect(html.match(/data-tab-kind="agent"/g)).toHaveLength(3);
+    expect(html).not.toContain('data-tab-kind="browser"');
   }
 });
 
@@ -206,7 +230,7 @@ test('tab filtering lives below the title bar and keeps a compact search button'
     expect(titlebar).not.toContain('id="task-search"');
     expect(html.indexOf('class="sidebar-search-row"')).toBeGreaterThan(html.indexOf('class="window-drag-strip"'));
     expect(titlebar.includes('aria-label="Collapse chat sidebar"')).toBe(!nativeControls);
-    expect(render(nativeControls, true)).toContain('aria-label="Search chats"');
+    expect(render(nativeControls, true)).toContain('aria-label="Search agents"');
     expect(html.match(/id="task-search"/g) ?? []).toHaveLength(1);
     expect(html).not.toContain('aria-label="Clear search"');
     expect(render(nativeControls, false, 'Trip')).toContain('aria-label="Clear search"');
