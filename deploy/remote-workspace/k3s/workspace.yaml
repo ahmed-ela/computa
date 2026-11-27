@@ -53,101 +53,6 @@ spec:
     requests:
       storage: 64Mi
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: jobs
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 128Mi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: cli
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: cli
-  template:
-    metadata:
-      labels:
-        app: cli
-    spec:
-      automountServiceAccountToken: false
-      securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
-        seccompProfile:
-          type: RuntimeDefault
-      volumes:
-      - name: workspace
-        persistentVolumeClaim:
-          claimName: workspace
-      - name: codex-state
-        persistentVolumeClaim:
-          claimName: codex-state
-      - name: cli-socket
-        persistentVolumeClaim:
-          claimName: cli-socket
-      - name: browser-output
-        persistentVolumeClaim:
-          claimName: browser-output
-      initContainers:
-      - name: socket-directory
-        image: localhost/kolmogor-agent:855c7e5
-        imagePullPolicy: Never
-        command: [install, -d, -m, '0700', /ipc/private]
-        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
-        volumeMounts: [{name: cli-socket, mountPath: /ipc}]
-      containers:
-      - name: cli
-        command: ["/bin/sh", "-ec"]
-        args:
-        - |
-          install -d -m 0700 /home/node/run/private
-          exec codex -c 'mcp_servers.browser.url="http://browser:8931/mcp"' app-server --listen unix:///home/node/run/private/codex.sock
-        image: localhost/kolmogor-agent:855c7e5
-        imagePullPolicy: Never
-        resources:
-          requests:
-            memory: 64Mi
-            cpu: 50m
-        volumeMounts:
-        - name: workspace
-          mountPath: /workspace
-        - name: codex-state
-          mountPath: /home/node/.codex
-        - name: cli-socket
-          mountPath: /tmp/codex-daemon-1000
-          subPath: private
-        - name: cli-socket
-          mountPath: /home/node/run
-        - name: browser-output
-          mountPath: /workspace/browser-output
-          readOnly: true
-        readinessProbe:
-          exec:
-            command:
-            - test
-            - -S
-            - /home/node/run/private/codex.sock
-          periodSeconds: 5
-        securityContext:
-          runAsNonRoot: true
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -164,6 +69,7 @@ spec:
       labels:
         app: browser
     spec:
+      hostname: workspace-browser
       automountServiceAccountToken: false
       securityContext:
         runAsUser: 1000
@@ -180,13 +86,17 @@ spec:
       - name: browser-output
         persistentVolumeClaim:
           claimName: browser-output
+      - name: viewer
+        secret:
+          secretName: browser-viewer
+          defaultMode: 0440
       - name: shm
         emptyDir:
           medium: Memory
           sizeLimit: 512Mi
       containers:
       - name: browser
-        image: localhost/kolmogor-browser:855c7e5
+        image: localhost/kolmogor-headed-browser:workspace-v2
         imagePullPolicy: Never
         resources:
           requests:
@@ -197,6 +107,9 @@ spec:
           mountPath: /home/node/profile
         - name: browser-output
           mountPath: /workspace/browser-output
+        - name: viewer
+          mountPath: /run/viewer
+          readOnly: true
         - name: shm
           mountPath: /dev/shm
         readinessProbe:
@@ -224,99 +137,6 @@ spec:
   - port: 8931
     targetPort: 8931
 ---
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: gateway
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: gateway
-  template:
-    metadata:
-      labels:
-        app: gateway
-    spec:
-      automountServiceAccountToken: false
-      securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
-        seccompProfile:
-          type: RuntimeDefault
-      volumes:
-      - name: jobs
-        persistentVolumeClaim:
-          claimName: jobs
-      - name: cli-socket
-        persistentVolumeClaim:
-          claimName: cli-socket
-      - name: code
-        configMap:
-          name: gateway-code
-      initContainers:
-      - name: socket-directory
-        image: localhost/kolmogor-agent:855c7e5
-        imagePullPolicy: Never
-        command: [install, -d, -m, '0700', /ipc/private]
-        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
-        volumeMounts: [{name: cli-socket, mountPath: /ipc}]
-      containers:
-      - name: gateway
-        image: localhost/kolmogor-agent:855c7e5
-        imagePullPolicy: Never
-        resources:
-          requests:
-            memory: 64Mi
-            cpu: 50m
-        volumeMounts:
-        - name: jobs
-          mountPath: /data
-        - name: cli-socket
-          mountPath: /tmp/codex-daemon-1000
-          subPath: private
-        - name: cli-socket
-          mountPath: /home/node/run
-        - name: code
-          mountPath: /app
-          readOnly: true
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: 8080
-          periodSeconds: 5
-        securityContext:
-          runAsNonRoot: true
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-        command:
-        - node
-        - /app/gateway.mjs
-        - serve
-        env:
-        - name: WORKER_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: worker
-              key: token
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: gateway
-spec:
-  selector:
-    app: gateway
-  ports:
-  - port: 8080
-    targetPort: 8080
----
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -331,7 +151,7 @@ spec:
   - from:
     - podSelector:
         matchLabels:
-          app: cli
+          workspace-role: provider
     ports:
     - port: 8931
 ---
@@ -342,19 +162,70 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: cli
+      workspace-role: provider
   policyTypes:
   - Ingress
   ingress: []
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claude-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workspace-router
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [workspace-access]
+  verbs: [get]
+- apiGroups: [apps]
+  resources: [deployments/scale]
+  resourceNames: [cli, claude]
+  verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-router
+subjects:
+- {kind: ServiceAccount, name: gateway, namespace: kolmogor}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: workspace-router}
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: gateway
+  name: workspace-egress
 spec:
   podSelector:
-    matchLabels:
-      app: gateway
-  policyTypes:
-  - Ingress
-  ingress: []
+    matchExpressions:
+    - {key: app, operator: In, values: [browser, cli, claude]}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4]
+    ports: [{port: 80}, {port: 443}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provider-to-browser
+spec:
+  podSelector: {matchLabels: {workspace-role: provider}}
+  policyTypes: [Egress]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: browser}}}]
+    ports: [{port: 8931}]

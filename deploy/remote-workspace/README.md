@@ -1,10 +1,10 @@
 # Remote workspace pilot
 
-Run one private workspace on a Linux x86-64 machine. The Codex CLI owns its chat history, approvals, files, and terminal. A second container owns a persistent Google Chrome for Testing profile and serves browser tools over MCP. SSH authenticates clients. The Compose stack publishes no host ports.
+The Compose pilot runs one private workspace on a Linux x86-64 machine. The Codex CLI owns its chat history, approvals, files, and terminal. A second container owns a persistent Google Chrome for Testing profile and serves browser tools over MCP. SSH authenticates clients. The Compose stack publishes no host ports.
 
 This is an experimental deployment for one trusted owner per VM. It uses the official Codex CLI. Connecting Kolmogor’s native Mac or phone UI, provider-website sign-in handoff, and a macOS Messages worker are separate work. Keep machine inventory, SSH configuration, and account data in your own deployment repository.
 
-For a K3s deployment with an outbound macOS worker, follow the [K3s setup and guest verification guide](k3s/README.md).
+The K3s deployment runs a headful Chrome window per workspace, supports private viewer access, and starts separate Codex and Claude Code workers on demand. It also routes jobs to a Tart macOS guest. Follow the [K3s setup and verification guide](k3s/README.md).
 
 ## Start and connect
 

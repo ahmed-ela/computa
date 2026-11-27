@@ -5,10 +5,12 @@ FROM base AS dependencies
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
-FROM base AS agent
+FROM base AS cli-base
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git ripgrep bubblewrap \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -m 0700 -o node -g node /workspace /workspace/browser-output /home/node/.codex /home/node/run
+
+FROM cli-base AS agent
 COPY --from=dependencies /opt/workspace-tools/node_modules/@openai ./node_modules/@openai
 RUN ln -s /opt/workspace-tools/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex \
     && codex --version
@@ -35,3 +37,26 @@ USER node
 ENV HOME=/home/node
 WORKDIR /workspace
 CMD ["node", "/opt/workspace-tools/node_modules/@playwright/mcp/cli.js", "--output-dir", "/workspace/browser-output", "--headless", "--sandbox", "--executable-path", "/opt/chrome-linux64/chrome", "--user-data-dir", "/home/node/profile", "--shared-browser-context", "--host", "0.0.0.0", "--allowed-hosts", "browser:8931", "--port", "8931"]
+
+FROM base AS claude-dependencies
+COPY k3s/claude/package.json k3s/claude/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+FROM cli-base AS claude
+COPY --from=claude-dependencies /opt/workspace-tools/node_modules/@anthropic-ai/claude-code-linux-x64 /opt/claude
+RUN ln -s /opt/claude/claude /usr/local/bin/claude && claude --version
+COPY k3s/managed-mcp.json /etc/claude-code/managed-mcp.json
+USER node
+ENV HOME=/home/node
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
+
+FROM browser AS headed-browser
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb x11-utils x11vnc tini xauth \
+    && rm -rf /var/lib/apt/lists/*
+COPY k3s/headed-browser /usr/local/bin/headed-browser
+USER node
+ENV DISPLAY=:99
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/headed-browser"]

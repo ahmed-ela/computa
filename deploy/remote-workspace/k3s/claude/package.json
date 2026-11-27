@@ -1,0 +1,7 @@
+{
+  "name": "kolmogor-claude-linux-worker",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/claude-code-linux-x64": "2.1.332"
+  }
+}

@@ -1,10 +1,12 @@
 # U01 workspace and macOS worker
 
-U01 runs a single-node K3s cluster with three deployments. The CLI serves Codex over a private Unix socket. The browser runs sandboxed Chrome with its own persistent profile. The gateway stores jobs in SQLite on a persistent volume. The Mac mini runs Tart and one macOS guest. The guest polls U01 over outbound SSH and handles one read-only operation, `system-info`. A Mac login or an Apple Account is unnecessary for the installed worker to answer after boot.
+U01 runs the gateway, provider CLIs and headful Chrome on single-node K3s. The Mac mini runs Tart and one macOS guest. The guest polls the gateway over outbound SSH and handles the read-only `system-info` operation, including at the macOS login screen.
+
+Each workspace belongs to one trusted owner and gets a Kubernetes namespace. Its browser pod runs Chrome for Testing on an Xvfb display. Chrome owns the persistent profile, so disconnecting an MCP client or stopping a CLI leaves the browser open. Codex and Claude Code have separate images and persistent account state. They share the workspace directory and browser MCP endpoint. The gateway starts a selected provider on demand. Explicitly stopping that provider frees its pod and keeps its data.
 
 ## Deploy on Linux
 
-Use an x86-64 systemd host with Podman, curl, OpenSSL, Python 3 and a filesystem with user-namespace and idmapped mount support. Run from this directory. The example uses the default K3s kubelet data path. The pilot is a single-owner private workspace.
+Use an x86-64 systemd host with Podman, curl, OpenSSL, Python 3 and a filesystem with user-namespace and idmapped mount support. Run from this directory. The example uses the default K3s kubelet data path. Run the operator commands on the node. The `kolmogor` namespace is the original workspace and also hosts the shared gateway.
 
 ```sh
 sudo ./install-k3s
@@ -14,6 +16,44 @@ sudo k3s kubectl -n kolmogor get pods,pvc
 ```
 
 Keep the node and its Kubernetes API private. The browser and gateway use ClusterIP services. Deploy creates the worker token once and retains it across rollouts. Preserve the volumes to keep the browser profile, jobs and CLI state.
+
+## Start a workspace and switch CLIs
+
+```sh
+sudo ./workspace kolmogor-ws-demo provision
+sudo ./workspace kolmogor-ws-demo run codex -- --version
+sudo ./workspace kolmogor-ws-demo run claude -- mcp get browser
+sudo ./workspace kolmogor-ws-demo run claude
+sudo ./workspace kolmogor-ws-demo stop claude
+sudo ./workspace kolmogor-ws-demo stop codex
+```
+
+Use `run codex -- login` or `run claude -- auth login` after provisioning to link an account through that provider’s own CLI. Run either CLI without arguments for its interactive interface. Finish active turns before stopping a worker. Users switching providers can keep both running. Reprovisioning preserves an existing worker’s scale. The browser stays running while the workspace exists. Its profile persists across pod replacement. Restoring tabs after a Chrome crash follows Chrome’s own session behavior.
+
+The private gateway authenticates start and stop requests with a separate token for each workspace. Its Kubernetes service account can read only that routing secret and scale only the two named provider deployments in enrolled namespaces. Network policies allow provider-to-browser MCP within the workspace, DNS and public web traffic. The provider pods receive no cluster credentials. Workspace code and shared files are trusted by both providers belonging to the same owner. Administration uses SSH and Kubernetes authorization. These commands do not provision end-user accounts or connect the shipping Kolmogor client.
+
+## View and control the real Chrome window
+
+Pause any active agent browser task before entering private information. The viewer and agent operate the same pages. In your private terminal on U01, read the viewer password and grant your Linux SSH user access for 15 minutes.
+
+```sh
+sudo ./workspace kolmogor viewer-password
+sudo ./workspace kolmogor share --user "$(id -un)" --minutes 15
+```
+
+On the Mac, run the following from this repository. Substitute the node’s SSH host alias and the absolute remote path to the workspace command.
+
+```sh
+./open-display U01 /path/to/remote-workspace/k3s/workspace kolmogor
+```
+
+This opens macOS Screen Sharing. Enter the workspace viewer password. The SSH command streams the selected browser’s display. The temporary grant opens a Unix socket usable only by the named Linux user and node administrators. It expires automatically and also ends when the operator presses Control-C. This works on U01 with SSH TCP forwarding disabled. The browser Service exposes only MCP to its workspace’s CLI workers. Chrome debugging and VNC bind to pod loopback. For a local Kubernetes operator, `./workspace NAMESPACE view --port 5901` also supports a node-local viewer.
+
+## Verify browser handoff and isolation
+
+Run `sudo ./tests/check-workspace` on U01 with Python 3 and its `cryptography` package installed. It provisions a randomly named namespace, starts the actual provider binaries through the gateway, and uses a scripted model endpoint. Codex focuses an input, an authenticated VNC client types a fresh random marker, and Claude Code’s own browser tool reads that marker. The test also checks shared files, private homes, cross-workspace access denial, provider scaling and browser profile persistence after replacing the pod. It removes only its disposable namespace. The qualification uses no paid inference or provider account credentials.
+
+On November 27, 2026 the U01 handoff passed with Codex CLI 0.172.0, Claude Code 2.1.332 and headful Chrome for Testing 158.0.8127.88. The Mac authenticated to the 1366 × 768 display over the temporary SSH grant. Direct connections from the CLI to another workspace’s MCP service and to the browser pod’s VNC and debugging ports failed as expected. The gateway also received a fresh receipt from the arm64 macOS guest after rollout. The client app’s remote UI and the previously observed Codex bubblewrap terminal restriction are outside this qualification.
 
 ## Enroll the Mac guest
 

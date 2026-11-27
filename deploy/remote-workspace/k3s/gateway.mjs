@@ -1,3 +1,4 @@
+import {routeSession} from './sessions.mjs';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -35,6 +36,7 @@ if (action === 'submit') {
     }
     try {
       if (req.url === health && req.method === 'GET') return send(200,{ready:true});
+      if (req.url?.startsWith('/workspaces/')) return await routeSession(req, send);
       if (req.url !== '/worker' || req.method !== 'POST') return send(404,{});
       let size = 0;
       const chunks = [];

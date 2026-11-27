@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Provision or operate a private, single-owner workspace on the K3s node."""
+import argparse
+import base64
+import json
+import os
+import pwd
+from pathlib import Path
+import re
+import secrets
+import subprocess
+import sys
+from urllib.request import build_opener, ProxyHandler, Request
+
+HERE = Path(__file__).resolve().parent
+KUBE = ['k3s', 'kubectl']
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('namespace', help='kolmogor (original pilot) or kolmogor-ws-NAME')
+actions = parser.add_subparsers(dest='action', required=True)
+actions.add_parser('provision', help='Administrator: provision or update this workspace')
+for name in ('start', 'stop', 'run'):
+    sub = actions.add_parser(name)
+    sub.add_argument('provider', choices=['codex', 'claude'])
+    if name == 'run':
+        sub.add_argument('args', nargs=argparse.REMAINDER)
+view = actions.add_parser('view', help='Forward the display to a loopback port on this machine')
+view.add_argument('--port', type=int, default=5901)
+share = actions.add_parser('share', help='Grant one local SSH user temporary access to this display')
+share.add_argument('--user', required=True, help='Linux user who will open the display')
+share.add_argument('--minutes', type=int, default=15, choices=range(1, 61), metavar='1-60')
+actions.add_parser('display', help='Serve only the granted RFB display over this SSH session')
+actions.add_parser('viewer-password', help='Print the workspace VNC password to a terminal')
+args = parser.parse_args()
+ns = args.namespace
+if not re.fullmatch(r'kolmogor(?:-ws-[a-z0-9](?:[a-z0-9-]{0,47}[a-z0-9])?)?', ns):
+    parser.error('Invalid workspace namespace')
+kubectl = KUBE + ['-n', ns]
+
+
+def get(command):
+    return subprocess.check_output(command, text=True).strip()
+
+
+def create(obj):
+    subprocess.run(kubectl + ['create', '-f', '-'], check=True,
+                   input=json.dumps(obj), text=True)
+
+
+def provision():
+    if not get(KUBE + ['get', 'namespace', ns, '--ignore-not-found', '-o', 'name']):
+        subprocess.run(KUBE + ['create', 'namespace', ns], check=True)
+    for secret, key, generate in [('workspace-access', 'token', lambda: secrets.token_hex(32)),
+                                  ('browser-viewer', 'password', lambda: secrets.token_urlsafe(6))]:
+        if not get(kubectl + ['get', 'secret', secret, '--ignore-not-found', '-o', 'name']):
+            create({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': secret},
+                   'stringData': {key: generate()}})
+    subprocess.run(kubectl + ['apply', '-f', str(HERE / 'workspace.yaml')], check=True)
+    for provider, name in [('codex', 'cli'), ('claude', 'claude')]:
+        manifest = str(HERE / (provider + '.yaml'))
+        # Create at zero. Keep the replica count out of the applied configuration
+        # so rolling out a new image leaves the gateway's scale decision intact.
+        if not get(kubectl + ['get', 'deployment', name, '--ignore-not-found', '-o', 'name']):
+            obj = json.loads(get(kubectl + ['create', '--dry-run=client', '-f', manifest, '-o', 'json']))
+            obj['spec']['replicas'] = 0
+            create(obj)
+        subprocess.run(kubectl + ['apply', '-f', manifest], check=True)
+    subprocess.run(kubectl + ['rollout', 'status', 'deployment/browser', '--timeout=180s'], check=True)
+
+
+def secret_value(name, key):
+    encoded = get(kubectl + ['get', 'secret', name, '-o', 'jsonpath={.data.' + key + '}'])
+    return base64.b64decode(encoded).decode()
+
+
+def route():
+    # Connect on the private node. The workspace credential never enters argv, logs or a pod exec.
+    ip = get(KUBE + ['-n', 'kolmogor', 'get', 'svc', 'gateway', '-o', 'jsonpath={.spec.clusterIP}'])
+    action = 'start' if args.action == 'run' else args.action
+    url = f'http://{ip}:8080/workspaces/{ns}/providers/{args.provider}/{action}'
+    request = Request(url, method='POST', headers={'Authorization': 'Bearer ' + secret_value('workspace-access', 'token')})
+    with build_opener(ProxyHandler({})).open(request, timeout=15) as response:
+        receipt = json.load(response)
+    deployment = 'deployment/' + receipt['deployment']
+    subprocess.run(kubectl + ['rollout', 'status', deployment, '--timeout=120s'], check=True, stdout=sys.stderr)
+    if args.action == 'run':
+        tty = ['-t'] if sys.stdin.isatty() and sys.stdout.isatty() else []
+        command = [args.provider]
+        if args.provider == 'codex':
+            command.extend(['-c', 'mcp_servers.browser.url="http://browser:8931/mcp"'])
+        extra = args.args[1:] if args.args[:1] == ['--'] else args.args
+        os.execvp('k3s', kubectl + ['exec', '-i', *tty, deployment, '-c', receipt['deployment'],
+                                   '--', *command, *extra])
+    print(json.dumps(receipt))
+
+
+if args.action == 'provision':
+    provision()
+elif args.action == 'view':
+    if not 1 <= args.port <= 65535:
+        parser.error('Invalid local port')
+    os.execvp('k3s', kubectl + ['port-forward', '--address=127.0.0.1', 'deployment/browser', f'{args.port}:5900'])
+elif args.action == 'share':
+    from viewer import share_display
+    share_display(kubectl, ns, pwd.getpwnam(args.user).pw_uid, args.minutes * 60)
+elif args.action == 'display':
+    from viewer import stream_display
+    stream_display(ns)
+elif args.action == 'viewer-password':
+    if not sys.stdout.isatty():
+        sys.exit('Run in a private terminal to view the password.')
+    print(secret_value('browser-viewer', 'password'))
+else:
+    route()
