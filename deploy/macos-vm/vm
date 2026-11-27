@@ -1,0 +1,71 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+usage() {
+  echo "Usage: vm clone IMAGE | create RESTORE_IPSW | open | start | status | ip | stop"
+}
+
+fail() { echo "vm: $*" >&2; exit 1; }
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  clone|create) [[ $# == 2 && -n $2 && $2 != -* ]] || { usage >&2; exit 2; } ;;
+  open|start|status|ip|stop) [[ $# == 1 ]] || { usage >&2; exit 2; } ;;
+  *) usage >&2; exit 2 ;;
+esac
+
+tart=${TART_BIN:-tart}
+name=${KOLMOGOR_VM_NAME:-kolmgor-mac-vm}
+[[ $name =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || fail "Expected a local VM name, got '$name'."
+command -v "$tart" >/dev/null || fail "Install Tart or set TART_BIN to its executable."
+export TART_NO_AUTO_PRUNE=1
+
+state() {
+  "$tart" get "$1" --format json | /usr/bin/plutil -extract State raw -o - -
+}
+
+case "$1" in
+  clone|create)
+    cpu=${KOLMOGOR_VM_CPUS:-2}
+    memory=${KOLMOGOR_VM_MEMORY_MIB:-4096}
+    [[ $cpu =~ ^[1-9][0-9]*$ && $memory =~ ^[1-9][0-9]*$ ]] || fail "CPU and memory must be positive integers."
+    existing=$("$tart" list --source local --quiet)
+    if /usr/bin/grep -Fxq -- "$name" <<< "$existing"; then
+      fail "VM '$name' already exists. Use status, open or start."
+    fi
+
+    # Publish the final name only once the guest is fully configured.
+    stage="kolmogor-prepare-$(/usr/bin/uuidgen)"
+    if [[ $1 == clone ]]; then
+      if [[ $2 != */* ]]; then
+        source_state=$(state "$2")
+        [[ $source_state == stopped ]] || fail "Stop the source VM before cloning it (current state: $source_state)."
+      fi
+      "$tart" clone "$2" "$stage"
+    else
+      "$tart" create "$stage" --from-ipsw "$2"
+    fi
+    trap '"$tart" delete "$stage"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    os=$("$tart" get "$stage" --format json | /usr/bin/plutil -extract OS raw -o - -)
+    [[ $os == darwin ]] || fail "Expected a macOS guest, got '$os'."
+    "$tart" set "$stage" --cpu "$cpu" --memory "$memory"
+    "$tart" rename "$stage" "$name"
+    trap - EXIT INT TERM
+    exec "$tart" get "$name" --format json
+    ;;
+  start|open)
+    args=(--no-clipboard --no-audio --no-usb-accessories)
+    if [[ $1 == start ]]; then args+=(--no-graphics); fi
+    exec "$tart" run "${args[@]}" "$name"
+    ;;
+  status) exec "$tart" get "$name" --format json ;;
+  ip)
+    current=$(state "$name")
+    [[ $current == running ]] || fail "Start '$name' before looking up its IP (current state: $current)."
+    exec "$tart" ip "$name" --wait 120
+    ;;
+  stop) exec "$tart" stop "$name" --timeout 120 ;;
+esac
