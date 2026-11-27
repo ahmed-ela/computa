@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Make a private enrollment directory. Read only the gateway's worker token on stdin."""
+import argparse
+import ipaddress
+from pathlib import Path
+import re
+import os
+import shutil
+import subprocess
+import sys
+
+a = argparse.ArgumentParser(description=__doc__)
+a.add_argument('directory', type=Path)
+for opt in ('jump-ip', 'jump-user', 'jump-known-host', 'node-ip', 'node-user',
+            'node-known-host', 'service-ip'):
+    a.add_argument('--' + opt, required=True)
+p = a.parse_args()
+for host in (p.jump_ip, p.node_ip, p.service_ip):
+    ipaddress.IPv4Address(host)
+for user in (p.jump_user, p.node_user):
+    if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9._-]*',user):
+        a.error('Invalid SSH user')
+token = sys.stdin.buffer.read(256).strip()
+if not re.fullmatch(b'[0-9a-f]{64}', token):
+    a.error('Expected the 64-character enrollment token on stdin')
+
+def host_key(alias):
+    lines = subprocess.check_output(['ssh-keygen','-F',alias], text=True).splitlines()
+    keys = {line.split()[2] for line in lines if not line.startswith('#') and len(line.split()) >= 3 and line.split()[1]=='ssh-ed25519'}
+    if len(keys)!=1:
+        a.error('Expected one previously verified ED25519 host key for '+alias)
+    return 'ssh-ed25519 '+keys.pop()
+
+known = 'jump '+host_key(p.jump_known_host)+'\ngateway '+host_key(p.node_known_host)+'\n'
+os.umask(0o077)
+d = p.directory
+d.mkdir(mode=0o700)
+for name in ('worker','Install.command'):
+    shutil.copy2(Path(__file__).resolve().with_name(name), d/name)
+subprocess.run(['ssh-keygen','-q','-t','ed25519','-N','','-C','kolmogor-macos-worker','-f',str(d/'key')],check=True)
+(d/'known_hosts').write_text(known)
+(d/'token').write_bytes(token)
+(d/'ssh_config').write_text(f'''Host *
+    IdentityFile /Library/KolmogorWorker/key
+    IdentitiesOnly yes
+    IdentityAgent none
+    BatchMode yes
+    StrictHostKeyChecking yes
+    UserKnownHostsFile /Library/KolmogorWorker/known_hosts
+    GlobalKnownHostsFile /dev/null
+    ConnectTimeout 8
+    ServerAliveInterval 10
+    ServerAliveCountMax 3
+    LogLevel ERROR
+Host jump
+    HostName {p.jump_ip}
+    HostKeyAlias jump
+    User {p.jump_user}
+Host gateway
+    HostName {p.node_ip}
+    HostKeyAlias gateway
+    User {p.node_user}
+    ProxyCommand /usr/bin/ssh -T -F /Library/KolmogorWorker/ssh_config jump
+''')
+key=(d/'key.pub').read_text().strip()
+commands={'jump':f'/usr/bin/nc {p.node_ip} 22',
+          'node':f'/usr/bin/curl -fsS --max-time 25 --data-binary @- http://{p.service_ip}:8080/worker'}
+for name,command in commands.items():
+    (d/(name+'.authorized')).write_text(f'restrict,command="{command}" {key}\n')

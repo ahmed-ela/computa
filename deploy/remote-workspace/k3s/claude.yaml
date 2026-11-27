@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude
+spec:
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: claude}
+  template:
+    metadata:
+      labels: {app: claude, workspace-role: provider}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      volumes:
+      - name: workspace
+        persistentVolumeClaim: {claimName: workspace}
+      - name: claude-state
+        persistentVolumeClaim: {claimName: claude-state}
+      - name: browser-output
+        persistentVolumeClaim: {claimName: browser-output}
+      containers:
+      - name: claude
+        image: localhost/kolmogor-claude:workspace-v2
+        imagePullPolicy: Never
+        resources:
+          requests: {memory: 64Mi, cpu: 50m}
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: workspace, mountPath: /workspace}
+        - {name: claude-state, mountPath: /home/node}
+        - {name: browser-output, mountPath: /workspace/browser-output, readOnly: true}

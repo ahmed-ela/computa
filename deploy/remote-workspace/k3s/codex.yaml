@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cli
+spec:
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cli
+  template:
+    metadata:
+      labels:
+        app: cli
+        workspace-role: provider
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: workspace
+      - name: codex-state
+        persistentVolumeClaim:
+          claimName: codex-state
+      - name: cli-socket
+        persistentVolumeClaim:
+          claimName: cli-socket
+      - name: browser-output
+        persistentVolumeClaim:
+          claimName: browser-output
+      initContainers:
+      - name: socket-directory
+        image: localhost/kolmogor-agent:workspace-v2
+        imagePullPolicy: Never
+        command: [install, -d, -m, '0700', /ipc/private]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: cli-socket, mountPath: /ipc}]
+      containers:
+      - name: cli
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |
+          install -d -m 0700 /home/node/run/private
+          exec codex -c 'mcp_servers.browser.url="http://browser:8931/mcp"' app-server --listen unix:///home/node/run/private/codex.sock
+        image: localhost/kolmogor-agent:workspace-v2
+        imagePullPolicy: Never
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: codex-state
+          mountPath: /home/node/.codex
+        - name: cli-socket
+          mountPath: /tmp/codex-daemon-1000
+          subPath: private
+        - name: cli-socket
+          mountPath: /home/node/run
+        - name: browser-output
+          mountPath: /workspace/browser-output
+          readOnly: true
+        readinessProbe:
+          exec:
+            command:
+            - test
+            - -S
+            - /home/node/run/private/codex.sock
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL

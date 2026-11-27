@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Submit a system-info job on the node and wait for its authenticated guest receipt."""
+import json
+import subprocess
+import sys
+import time
+import uuid
+
+def command(*args):
+    prefix = ['k3s', 'kubectl', '-n', 'kolmogor', 'exec', 'deployment/gateway', '-c', 'gateway',
+              '--', 'node', '/app/gateway.mjs']
+    return json.loads(subprocess.check_output(prefix + list(args), text=True, timeout=15))
+
+job = command('submit')
+print('Submitted', job['id'], flush=True)
+end = time.monotonic() + 120
+while time.monotonic() < end:
+    receipt = command('result', job['id'])
+    result = receipt['result']
+    if result:
+        if (receipt['challenge'] != job['challenge'] or receipt['id'] != job['id']
+                or result['arch'] != 'arm64' or not result['build'] or not result['os']):
+            raise SystemExit('Guest receipt does not match the submitted job')
+        uuid.UUID(result['boot'])
+        if len(sys.argv) > 1 and result['boot'].lower() != sys.argv[1].lower():
+            raise SystemExit('Receipt came from an unexpected boot session')
+        print(json.dumps(receipt))
+        break
+    time.sleep(2)
+else:
+    raise SystemExit('Timed out. Inspect the pending job '+job['id']+' before submitting another.')

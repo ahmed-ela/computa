@@ -1,0 +1,231 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: codex-state
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: browser-output
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: browser-profile
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cli-socket
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: browser
+  template:
+    metadata:
+      labels:
+        app: browser
+    spec:
+      hostname: workspace-browser
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: Localhost
+          localhostProfile: kolmogor/browser.json
+      volumes:
+      - name: browser-profile
+        persistentVolumeClaim:
+          claimName: browser-profile
+      - name: browser-output
+        persistentVolumeClaim:
+          claimName: browser-output
+      - name: viewer
+        secret:
+          secretName: browser-viewer
+          defaultMode: 0440
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 512Mi
+      containers:
+      - name: browser
+        image: localhost/kolmogor-headed-browser:workspace-v2
+        imagePullPolicy: Never
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+        volumeMounts:
+        - name: browser-profile
+          mountPath: /home/node/profile
+        - name: browser-output
+          mountPath: /workspace/browser-output
+        - name: viewer
+          mountPath: /run/viewer
+          readOnly: true
+        - name: shm
+          mountPath: /dev/shm
+        readinessProbe:
+          tcpSocket:
+            port: 8931
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - SYS_CHROOT
+      hostUsers: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: browser
+spec:
+  selector:
+    app: browser
+  ports:
+  - port: 8931
+    targetPort: 8931
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: browser
+spec:
+  podSelector:
+    matchLabels:
+      app: browser
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          workspace-role: provider
+    ports:
+    - port: 8931
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cli
+spec:
+  podSelector:
+    matchLabels:
+      workspace-role: provider
+  policyTypes:
+  - Ingress
+  ingress: []
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claude-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workspace-router
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [workspace-access]
+  verbs: [get]
+- apiGroups: [apps]
+  resources: [deployments/scale]
+  resourceNames: [cli, claude]
+  verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workspace-router
+subjects:
+- {kind: ServiceAccount, name: gateway, namespace: kolmogor}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: workspace-router}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workspace-egress
+spec:
+  podSelector:
+    matchExpressions:
+    - {key: app, operator: In, values: [browser, cli, claude]}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4]
+    ports: [{port: 80}, {port: 443}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: provider-to-browser
+spec:
+  podSelector: {matchLabels: {workspace-role: provider}}
+  policyTypes: [Egress]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: browser}}}]
+    ports: [{port: 8931}]

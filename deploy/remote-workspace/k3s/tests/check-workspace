@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Run on the node. Creates and removes one private qualification namespace."""
+import base64
+import json
+from pathlib import Path
+from queue import Queue
+import secrets
+import subprocess
+import threading
+from urllib.error import HTTPError
+from urllib.request import build_opener, ProxyHandler, Request
+
+from display import type_in_display
+
+ROOT = Path(__file__).resolve().parents[1]
+NS = 'kolmogor-ws-check-' + secrets.token_hex(4)
+K = ['k3s', 'kubectl', '-n', NS]
+W = [str(ROOT / 'workspace'), NS]
+
+
+def output(cmd, timeout=90):
+    return subprocess.check_output(cmd, text=True, timeout=timeout).strip()
+
+
+def run(*cmd, **kwargs):
+    return subprocess.run(cmd, check=True, timeout=210, **kwargs)
+
+
+def apply(obj):
+    run(*K, 'apply', '-f', '-', input=json.dumps(obj), text=True)
+
+
+def fixtures():
+    run(*K, 'create', 'configmap', 'fixture', '--from-file='+str(ROOT / 'tests/fixture.mjs'))
+    labels = {'app':'fixture'}
+    apply({'apiVersion':'v1','kind':'Pod','metadata':{'name':'fixture','labels':labels},
+           'spec':{'automountServiceAccountToken':False,'containers':[{'name':'fixture',
+           'image':'localhost/kolmogor-agent:workspace-v2','imagePullPolicy':'Never',
+           'command':['node','/fixture/fixture.mjs'],
+           'volumeMounts':[{'name':'code','mountPath':'/fixture','readOnly':True}]}],
+           'volumes':[{'name':'code','configMap':{'name':'fixture'}}]}})
+    apply({'apiVersion':'v1','kind':'Service','metadata':{'name':'fixture'},
+           'spec':{'selector':labels,'ports':[{'port':8080}]}})
+    apply({'apiVersion':'networking.k8s.io/v1','kind':'NetworkPolicy','metadata':{'name':'test-fixture'},
+           'spec':{'podSelector':{},'policyTypes':['Egress'],'egress':[
+               {'to':[{'podSelector':{'matchLabels':labels}}],'ports':[{'port':8080}]}]}})
+    run(*K, 'wait', '--for=condition=Ready', 'pod/fixture', '--timeout=60s')
+
+
+def codex_page(focus):
+    proc = subprocess.Popen(W+['run','codex','--','app-server','--stdio'],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    lines = Queue()
+    def read():
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+    threading.Thread(target=read,daemon=True).start()
+    sequence = 0
+    def send(obj):
+        proc.stdin.write(json.dumps(obj)+'\n')
+        proc.stdin.flush()
+    def call(method, params):
+        nonlocal sequence
+        sequence += 1
+        send({'id':sequence,'method':method,'params':params})
+        while True:
+            line = lines.get(timeout=40)
+            if line is None:
+                raise RuntimeError('Codex closed the app-server stream')
+            msg = json.loads(line)
+            if msg.get('id') == sequence and 'method' not in msg:
+                if 'error' in msg:
+                    raise RuntimeError(str(msg['error']))
+                return msg['result']
+    try:
+        call('initialize', {'clientInfo':{'name':'handoff_test','version':'1'},
+                            'capabilities':{'experimentalApi':True}})
+        send({'method':'initialized'})
+        thread = call('thread/start', {'cwd':'/workspace','approvalPolicy':'on-request',
+            'sandbox':'workspace-write', 'modelProvider':'fixture', 'model':'test-model',
+            'config':{'model_providers':{'fixture':{'name':'Offline fixture',
+                'base_url':'http://fixture:8080/v1','wire_api':'responses','supports_websockets':False}}}
+        })['thread']['id']
+        def browser(name, args):
+            reply = call('mcpServer/tool/call', {'threadId':thread,'server':'browser',
+                          'tool':name,'arguments':args})
+            if reply.get('isError'):
+                raise RuntimeError(str(reply))
+            return '\n'.join(v['text'] for v in reply['content'] if v['type']=='text')
+        browser('browser_navigate', {'url':'http://fixture:8080/page'})
+        if focus:
+            browser('browser_click', {'target':'#entry'})
+        return browser('browser_snapshot', {})
+    finally:
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
+def check():
+    run(*W, 'provision')
+    for name in ('cli','claude'):
+        assert output(K+['get','deploy',name,'-o','jsonpath={.spec.replicas}'])=='0'
+    window_tree = output(K + ['exec', 'deploy/browser', '--', 'env', 'XAUTHORITY=/tmp/workspace.xauth',
+                              'xwininfo', '-root', '-tree'])
+    assert 'Google Chrome for Testing' in window_tree, 'Expected a real X11 Chrome window'
+    fixtures()
+    marker = 'handoff' + secrets.token_hex(6)
+    assert 'Takeover input' in codex_page(True)
+    encoded = output(K+['get','secret','browser-viewer','-o','jsonpath={.data.password}'])
+    type_in_display(K, base64.b64decode(encoded), marker)
+    stopped = json.loads(output(W + ['stop', 'codex']))
+    assert stopped['replicas'] == 0
+    run(*W, 'start', 'claude')
+    # The same HTTP browser port is reachable locally and blocked across workspaces.
+    # The display and CDP ports remain private even to this workspace's CLI.
+    direct = '''
+        const net = require('node:net');
+        function reachable(host, port) {
+          return new Promise(resolve => {
+            const socket = net.connect(port, host);
+            const finish = ok => { socket.destroy(); resolve(ok); };
+            socket.setTimeout(3000, () => finish(false));
+            socket.once('connect', () => finish(true));
+            socket.once('error', () => finish(false));
+          });
+        }
+        Promise.all([reachable('browser',8931), reachable(process.argv[1],8931),
+                     reachable(process.argv[2],5900), reachable(process.argv[2],9222)])
+          .then(([own, other, vnc, cdp]) => { if (!own || other || vnc || cdp) process.exit(1); });
+    '''
+    def browser_ip(namespace):
+        return output(['k3s','kubectl','-n',namespace,'get','pod','-l','app=browser',
+                       '-o','jsonpath={.items[0].status.podIP}'])
+    run(*K, 'exec', 'deploy/claude', '--', 'node', '-e', direct, browser_ip('kolmogor'), browser_ip(NS))
+    auth = output(K+['exec','deploy/claude','--','claude','mcp','get','browser'])
+    assert 'http://browser:8931/mcp' in auth
+    cmd = K+['exec','deploy/claude','--','env','ANTHROPIC_API_KEY=disposable-fixture',
+             'ANTHROPIC_BASE_URL=http://fixture:8080','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
+             'ENABLE_TOOL_SEARCH=false','claude','-p','--model','claude-sonnet-4-6','--output-format','json',
+             '--no-session-persistence','--allowedTools','mcp__browser__browser_snapshot','--',
+             'Read the current browser tab.']
+    reply = json.loads(output(cmd))
+    assert reply.get('result') == 'Observed '+marker, 'Claude failed to return the viewer marker: '+str(reply.get('result'))
+    print('Verified Codex → remote keyboard → Claude on one live tab', flush=True)
+
+    run(*K,'exec','deploy/claude','--','sh','-ec',
+        'echo workspace-check > /workspace/handoff; echo private > "$HOME/claude-only"')
+    run(*W, 'start', 'codex')
+    run(*K,'exec','deploy/cli','--','sh','-ec',
+        'test "$(cat /workspace/handoff)" = workspace-check && test ! -e /home/node/claude-only && test ! -e /var/run/secrets/kubernetes.io/serviceaccount/token')
+    run(*W, 'provision')
+    assert output(K+['get','deploy','claude','-o','jsonpath={.spec.replicas}'])=='1'
+    run(*K, 'rollout', 'restart', 'deployment/browser')
+    run(*K, 'rollout', 'status', 'deployment/browser', '--timeout=120s')
+    assert 'Viewer entered '+marker in codex_page(False)
+    token = base64.b64decode(output(K+['get','secret','workspace-access','-o','jsonpath={.data.token}'])).decode()
+    ip = output(['k3s','kubectl','-n','kolmogor','get','svc','gateway','-o','jsonpath={.spec.clusterIP}'])
+    request = Request(f'http://{ip}:8080/workspaces/kolmogor/providers/claude/start', method='POST',
+                      headers={'Authorization':'Bearer '+token})
+    try:
+        build_opener(ProxyHandler({})).open(request, timeout=10)
+    except HTTPError as error:
+        assert error.code == 403
+    else:
+        raise RuntimeError('A workspace credential was accepted for a different workspace')
+    print('Verified profile after restart, private provider state, shared files, routing and demand scaling.',flush=True)
+
+
+if __name__ == '__main__':
+    # Own the new namespace before cleanup, even when a test fails.
+    run('k3s','kubectl','create','namespace',NS)
+    try:
+        check()
+    finally:
+        run('k3s','kubectl','delete','namespace',NS,'--wait=false')

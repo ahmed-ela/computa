@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Connect macOS Screen Sharing to one operator-granted workspace display."""
+import argparse
+import shlex
+import socket
+import subprocess
+import sys
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('host', help='SSH host or alias for the node')
+parser.add_argument('workspace_command', help='Absolute path to the workspace command on the node')
+parser.add_argument('namespace')
+parser.add_argument('--no-open', action='store_true', help='Print the local address only')
+args = parser.parse_args()
+if args.host.startswith('-') or not args.workspace_command.startswith('/'):
+    parser.error('Supply an SSH hostname and an absolute remote workspace command.')
+with socket.socket() as listener:
+    listener.bind(('127.0.0.1', 0))
+    listener.listen(1)
+    listener.settimeout(60)
+    url = 'vnc://127.0.0.1:' + str(listener.getsockname()[1])
+    print(url, flush=True)
+    if not args.no_open:
+        subprocess.run(['open', url], check=True)
+    connection, _ = listener.accept()
+    with connection:
+        command = shlex.join([args.workspace_command, args.namespace, 'display'])
+        sys.exit(subprocess.run(['ssh','-T',args.host,command], stdin=connection,
+                                stdout=connection).returncode)

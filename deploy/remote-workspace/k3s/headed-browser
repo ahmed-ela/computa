@@ -1,0 +1,46 @@
+#!/bin/bash
+# The display and Chrome outlive individual MCP client connections.
+set -eu
+umask 077
+export XAUTHORITY=/tmp/workspace.xauth
+touch "$XAUTHORITY"
+xauth add "$DISPLAY" . "$(mcookie)"
+pids=()
+shutdown() {
+    trap - TERM INT EXIT
+    # Give Chrome a chance to flush the profile while its display is still alive.
+    if [[ -n ${chrome:-} ]]; then
+        kill -TERM "$chrome" 2>/dev/null || :
+        wait "$chrome" || :
+    fi
+    if (( ${#pids[@]} )); then kill "${pids[@]}" 2>/dev/null || :; fi
+    wait || :
+}
+trap shutdown EXIT
+trap 'exit 0' TERM INT
+Xvfb "$DISPLAY" -screen 0 1366x768x24 -nolisten tcp -auth "$XAUTHORITY" &
+pids+=("$!")
+wait_for() {
+    for ((i=0;i<100;i++)); do
+        if "$@" >/dev/null 2>&1; then return; fi
+        sleep 0.1
+    done
+    echo "Startup failed waiting for $1" >&2
+    return 1
+}
+wait_for xdpyinfo
+/opt/chrome-linux64/chrome --user-data-dir=/home/node/profile --no-first-run \
+    --no-default-browser-check --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
+    --window-position=0,0 --window-size=1366,768 about:blank &
+chrome=$!
+wait_for curl -fsS http://127.0.0.1:9222/json/version
+# Loopback + Kubernetes port-forward. Password comes from a workspace-scoped Secret.
+x11vnc -display "$DISPLAY" -auth "$XAUTHORITY" -localhost -no6 -rfbport 5900 \
+    -passwdfile /run/viewer/password -forever -nevershared -dontdisconnect -noxdamage &
+pids+=("$!")
+node /opt/workspace-tools/node_modules/@playwright/mcp/cli.js \
+    --cdp-endpoint http://127.0.0.1:9222 --output-dir /workspace/browser-output \
+    --shared-browser-context --host 0.0.0.0 --allowed-hosts browser:8931 --port 8931 &
+pids+=("$!")
+wait -n || :
+exit 1
