@@ -12,6 +12,7 @@ actor CodexDesktopSidebarClient {
         let id: String
         let name: String
         let chats: [Chat]
+        var isCollapsed = false
     }
     struct Catalog: Equatable, Sendable {
         let account: Account
@@ -198,7 +199,8 @@ actor CodexDesktopSidebarClient {
         let owner = try await account()
         let layout = try CodexDesktopLayout.read(from: codexHome, account: owner)
         let groups = try await all(Group.self, "threadSection/list", [:])
-        let list = try await all(Row.self, "thread/list", Self.visible.merging(["sortKey": "updated_at", "sortDirection": "desc"]) { _, new in new })
+        // Recent follows chat activity. Background metadata changes can also advance updated_at.
+        let list = try await all(Row.self, "thread/list", Self.visible.merging(["sortKey": "recency_at", "sortDirection": "desc"]) { _, new in new })
         let ids = Set(list.map(\.id))
         guard ids.count == list.count, Set(groups.map(\.id)).count == groups.count else { throw Failure.inconsistent }
         var sections: [Section] = [], claimed = Set<String>()

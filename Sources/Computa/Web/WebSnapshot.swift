@@ -131,7 +131,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         agentNames = names
         let viewingCodex = state.workspaceTabs.showsDesktopChats
         showsDesktopChats = viewingCodex
-        desktopSections = state.desktopSidebar.map { viewingCodex ? $0.catalog?.sections ?? [] : [] }
+        desktopSections = state.desktopSidebar.map { viewingCodex ? $0.presentedSections : [] }
         desktopSidebarError = viewingCodex ? state.desktopSidebar?.error : nil
         desktopReader = showsDesktopChats ? state.workspaceTabs.desktopReader : nil
         savedChats = state.savedChats

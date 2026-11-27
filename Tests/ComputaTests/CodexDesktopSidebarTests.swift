@@ -30,11 +30,13 @@ final class CodexDesktopSidebarTests: XCTestCase {
               "other-workspace":{"sections":[],"sectionOrder":[]},
               "fixture-workspace":{
                 "sectionOrder":["custom:papers","pinned","chats","custom:another"],
+                "collapsedSectionIds":["another"],
                 "sections":[
                   {"id":"papers","name":"Research Papers","itemKeys":["codex:thread:local:a","chatgpt:thread:local:b","codex:thread:remote:c","codex:thread:local:archived"]},
                   {"id":"another","name":"Older name","hostSectionIds":{"local":"official-section"},"itemKeys":[]}
                 ]
               }}'),
+            ('\(scope)', 'sidebar-collapsed-sections-v1','{"pinned":true,"chats":false}'),
             ('\(scope)', 'flat-project-sidebar-preferences-v1','{"chatSortMode":"manual","manualSortVersion":1}'),
             ('\(scope)', 'codex-sidebar-chat-order-v1','{"threadIds":["c","b"]}');
             """
@@ -49,10 +51,43 @@ final class CodexDesktopSidebarTests: XCTestCase {
         let owner = Client.Account(userID: "fixture-user", workspaceID: "fixture-workspace", type: "chatgpt", email: nil, workspaceName: nil)
         let layout = try CodexDesktopLayout.read(from: folder, account: owner)
         let presented = layout.arrange(sections)
+        XCTAssertEqual(presented.map(\.isCollapsed), [false, true, false, true])
         XCTAssertEqual(presented.map(\.name), ["Research Papers", "Pinned", "Recent", "Updated group"])
         XCTAssertEqual(presented.map { $0.chats.map(\.id) }, [["a"], ["p"], ["c", "b"], ["s"]])
         let other = Client.Account(userID: "someone-else", workspaceID: "fixture-workspace", type: "chatgpt", email: nil, workspaceName: nil)
         XCTAssertEqual(try CodexDesktopLayout.read(from: folder, account: other).arrange(sections), sections)
+    }
+
+    func testDisclosureChoicesSurviveRelaunchAndFollowSourceChangesPerAccount() {
+        typealias Client = CodexDesktopSidebarClient
+        let prefs = isolatedTestPreferences()
+        func makeSync() -> CodexSidebarSync {
+            CodexSidebarSync(preferences: prefs) { preconditionFailure("State test does not attach a window") }
+        }
+        func catalog(_ user: String, renamed: Bool = false, collapsed: Bool = false) -> Client.Catalog {
+            let account = Client.Account(userID: user, workspaceID: "fixture", type: "chatgpt", email: nil, workspaceName: nil)
+            return .init(account: account, sections: [
+                .init(id: "group", name: renamed ? "New name" : "Research", chats: [], isCollapsed: collapsed),
+                .init(id: "recent", name: "Recent", chats: [], isCollapsed: true),
+            ])
+        }
+        let first = makeSync()
+        first.update(catalog("A"))
+        first.setCollapsed(true, sectionID: "group")
+        first.setCollapsed(false, sectionID: "recent")
+        first.update(catalog("A", renamed: true))
+        XCTAssertEqual(first.presentedSections.map(\.isCollapsed), [true, false])
+
+        let reopened = makeSync()
+        reopened.update(catalog("A"))
+        XCTAssertEqual(reopened.presentedSections.map(\.isCollapsed), [true, false])
+        reopened.update(catalog("B"))
+        XCTAssertEqual(reopened.presentedSections.map(\.isCollapsed), [false, true])
+        reopened.update(catalog("A", collapsed: true))
+        reopened.update(catalog("A"))
+        XCTAssertEqual(reopened.presentedSections.map(\.isCollapsed), [false, false])
+        reopened.setCollapsed(true, sectionID: "recent")
+        XCTAssertEqual(reopened.presentedSections.map(\.isCollapsed), [false, true])
     }
 
     func testMatchesIndependentOfficialDesktopList() async throws {
@@ -166,6 +201,9 @@ final class CodexDesktopSidebarTests: XCTestCase {
                     e => e.dataset.desktopChat ?? e.dataset.desktopSection)) === JSON.stringify(\(encoded))
                 """, "Expected section and chat order \(ids)")
         }
+        func header(_ section: String) -> String {
+            "document.querySelector('[data-desktop-section=\"\(section)\"] button')"
+        }
         let first = try await startChat("First synthetic chat")
         let second = try await startChat("Second synthetic chat")
         let groups = try await call("threadSection/list", [:])
@@ -175,16 +213,45 @@ final class CodexDesktopSidebarTests: XCTestCase {
         try await call("thread/section/move", ["threadId": first, "sectionId": pin])
         try await call("thread/section/move", ["threadId": second, "sectionId": pin])
         try await expectOrder([pin, first, second, group, "recent"])
+        _ = try await view.evaluateJavaScript("\(header(pin)).click()")
+        try await expectOrder([pin, group, "recent"])
+        _ = try await view.evaluateJavaScript("\(header(pin)).click()")
+        try await expectOrder([pin, first, second, group, "recent"])
         try await call("thread/section/move", ["threadId": second, "sectionId": pin, "beforeThreadId": first])
         try await expectOrder([pin, second, first, group, "recent"])
         try await call("thread/section/move", ["threadId": second, "sectionId": group])
         try await expectOrder([pin, first, group, second, "recent"])
+        let groupHeader = header(group)
+        _ = try await view.evaluateJavaScript("\(groupHeader).click()")
+        try await expectOrder([pin, first, group, "recent"])
+        try await expectDOM("\(groupHeader).getAttribute('aria-expanded') === 'false'", "Group announces its collapsed state")
         try await call("threadSection/update", ["sectionId": group, "name": "Renamed research"])
         try await expectDOM("document.querySelector('[data-desktop-section=\"\(group)\"]')?.title === 'Renamed research'", "Group rename arrives")
+        try await expectOrder([pin, first, group, "recent"])
+        func search(_ term: String) async throws {
+            let value = String(decoding: try JSONEncoder().encode(term), as: UTF8.self)
+            _ = try await view.evaluateJavaScript("""
+                (() => { const field = document.querySelector('#task-search'); field.value = \(value);
+                    field.dispatchEvent(new Event('input', {bubbles: true})); })()
+                """)
+        }
+        try await search("Second synthetic")
+        try await expectOrder([group, second])
+        try await search("")
+        try await expectOrder([pin, first, group, "recent"])
+        _ = try await view.evaluateJavaScript("\(groupHeader).dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight', bubbles:true}))")
+        try await expectOrder([pin, first, group, second, "recent"])
         _ = try await view.evaluateJavaScript("document.querySelector('[data-desktop-chat=\"\(second)\"] button').click()")
         try await expectDOM("document.querySelector('[aria-label=\"Codex conversation\"]')?.textContent.includes('Second synthetic chat user message')", "Selected conversation opens")
         try await call("thread/section/move", ["threadId": first, "sectionId": NSNull()])
         try await expectOrder([pin, group, second, "recent", first])
+        _ = try await view.evaluateJavaScript("\(header("recent")).click()")
+        try await expectOrder([pin, group, second, "recent"])
+        _ = try await view.evaluateJavaScript("\(groupHeader).click()")
+        try await expectOrder([pin, group, "recent"])
+        try await expectDOM("document.querySelector('[aria-label=\"Codex conversation\"]')?.textContent.includes('Second synthetic chat user message')", "Collapsing the active conversation’s group keeps it open")
+        _ = try await view.evaluateJavaScript("\(header("recent")).click()")
+        try await expectOrder([pin, group, "recent", first])
         try await call("thread/archive", ["threadId": second])
         try await expectOrder([pin, group, "recent", first])
         try await expectDOM("!document.querySelector('[aria-label=\"Codex conversation\"]')", "Archived conversation closes")

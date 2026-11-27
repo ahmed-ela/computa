@@ -180,6 +180,7 @@ export interface CodexCLIUsageBucket {
 }
 
 export interface DesktopSection {
+  isCollapsed?: boolean;
   id: string; name: string; chats: { id: string; title: string; updatedAt: number }[];
 }
 export interface DesktopReader {
@@ -252,6 +253,7 @@ export type NativeAction =
   | {action: 'openAgentHistory'; taskID: string; conversationID: string}
   | { action: 'ready' }
   | { action: 'showDesktopChats'; enabled: boolean }
+  | { action: 'setDesktopSectionCollapsed'; id: string; collapsed: boolean }
   | { action: 'openDesktopChat'; id: string }
   | { action: 'earlierDesktopMessages' }
   | { action: 'selectTask'; id: string }

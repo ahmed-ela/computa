@@ -610,6 +610,12 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .desktop-chat-scope button { flex: 1; min-width: 0; height: 25px; font-size: 12px; }
 .desktop-chat-scope button[aria-pressed=true] { background: var(--secondary); }
 .desktop-chat-scope.compact { flex-direction: column; align-items: center; }
+.desktop-section-toggle { grid-column: 1 / -1; display: grid; grid-template-columns: var(--sidebar-icon-track) minmax(0, 1fr); align-items: center; height: 100%; width: 100%; padding: 0; border: 0; border-radius: 6px; background: transparent; text-align: start; font: inherit; color: inherit; }
+.desktop-section-toggle:hover { background: var(--surface-hover); }
+.desktop-section-toggle:active { translate: none; }
+.desktop-section-toggle .icon { justify-self: center; }
+.desktop-section-toggle[aria-expanded="true"] .icon { transform: rotate(90deg); }
+.desktop-section-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-reader-title { height: 32px; flex: none; padding-inline: max(22px, calc((100% - 720px) / 2)); border-bottom: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 32px; }
 .desktop-reader { flex: 1; min-height: 0; overflow: auto; padding: 20px max(22px, calc((100% - 720px) / 2)); user-select: text; }
 .desktop-reader article { margin-block: 18px; overflow-wrap: anywhere; }

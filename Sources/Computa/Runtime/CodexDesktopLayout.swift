@@ -16,18 +16,24 @@ struct CodexDesktopLayout {
     struct Placement: Decodable {
         let sections: [Group]
         let sectionOrder: [String]
+        let collapsedSectionIds: [String]?
     }
 
     var placement: Placement?
+    var collapsedBuiltIns: [String: Bool] = [:]
     var manualOrder = false
     var chatOrder: [String] = []
 
+    static func ownerKey(for account: CodexDesktopSidebarClient.Account) -> String? {
+        guard let user = account.userID, let workspace = account.workspaceID,
+              let identity = try? JSONEncoder().encode([user, workspace]) else { return nil }
+        return SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
+    }
+
     static func read(from home: URL, account: CodexDesktopSidebarClient.Account) throws -> Self {
-        guard let user = account.userID, let workspace = account.workspaceID else { return Self() }
+        guard let digest = ownerKey(for: account), let workspace = account.workspaceID else { return Self() }
         let url = home.appendingPathComponent(".codex-global-state.sqlite")
         guard FileManager.default.fileExists(atPath: url.path) else { return Self() }
-        let identity = try JSONEncoder().encode([user, workspace])
-        let digest = SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
         let scope = "electron-owner-atoms:" + digest
         var database: OpaquePointer?
         let opened = sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil)
@@ -36,7 +42,7 @@ struct CodexDesktopLayout {
         let query = """
             SELECT key, value FROM settings WHERE scope = ? AND key IN
             ('sidebar-custom-sections-v3', 'codex-sidebar-sort-mode-v1', 'codex-sidebar-chat-order-v1',
-             'flat-project-sidebar-preferences-v1')
+             'flat-project-sidebar-preferences-v1', 'sidebar-collapsed-sections-v1')
             """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else { throw CocoaError(.fileReadUnknown) }
@@ -59,6 +65,8 @@ struct CodexDesktopLayout {
                     if let prefs = accounts?[workspace] {
                         layout.placement = try decode.decode(Placement.self, from: JSONSerialization.data(withJSONObject: prefs))
                     }
+                case "sidebar-collapsed-sections-v1":
+                    layout.collapsedBuiltIns = try decode.decode([String: Bool]?.self, from: data) ?? [:]
                 case "codex-sidebar-sort-mode-v1":
                     legacySortOverride = (try decode.decode(String?.self, from: data)) != nil
                 case "flat-project-sidebar-preferences-v1":
@@ -122,9 +130,21 @@ struct CodexDesktopLayout {
         }
         ordered.append(("chats", Section(id: recentID, name: recent.name, chats: remaining)))
         let order = placement?.sectionOrder ?? []
-        guard !order.isEmpty else { return ordered.map(\.section) }
-        var positions: [String: Int] = [:]
-        for (i, key) in order.enumerated() { positions[key] = i }
-        return ordered.sorted { positions[$0.key, default: .max] < positions[$1.key, default: .max] }.map(\.section)
+        if !order.isEmpty {
+            var positions: [String: Int] = [:]
+            for (i, key) in order.enumerated() { positions[key] = i }
+            ordered.sort { positions[$0.key, default: .max] < positions[$1.key, default: .max] }
+        }
+        let collapsedGroups = Set(placement?.collapsedSectionIds ?? [])
+        return ordered.map { key, section in
+            var presented = section
+            // Desktop group preferences use the presentation ID, which can differ from the server section ID.
+            if key.hasPrefix("custom:") {
+                presented.isCollapsed = collapsedGroups.contains(String(key.dropFirst("custom:".count)))
+            } else {
+                presented.isCollapsed = collapsedBuiltIns[key] ?? false
+            }
+            return presented
+        }
     }
 }

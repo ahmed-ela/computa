@@ -19,6 +19,8 @@ final class CodexSidebarSync {
     private(set) var catalog: Client.Catalog?
     private(set) var error: String?
     @ObservationIgnored private let makeClient: @MainActor () -> Client
+    private var disclosureOverrides: [String: Bool] = [:]
+    @ObservationIgnored private let preferences: UserDefaults
     @ObservationIgnored private let interval: Duration
     @ObservationIgnored private var windows: [UUID: WorkspaceTabs] = [:]
     @ObservationIgnored private var loop: Task<Void, Never>?
@@ -26,13 +28,14 @@ final class CodexSidebarSync {
     @ObservationIgnored private var client: Client?
     @ObservationIgnored private var epoch = UUID()
 
-    static func installed() -> CodexSidebarSync? {
+    static func installed(preferences: UserDefaults) -> CodexSidebarSync? {
         guard let executable = Client.installedExecutable() else { return nil }
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return .init { Client(executable: executable, home: home, codexHome: home.appendingPathComponent(".codex")) }
+        return .init(preferences: preferences) { Client(executable: executable, home: home, codexHome: home.appendingPathComponent(".codex")) }
     }
 
-    init(interval: Duration = .seconds(5), makeClient: @escaping @MainActor () -> Client) {
+    init(interval: Duration = .seconds(5), preferences: UserDefaults = .standard, makeClient: @escaping @MainActor () -> Client) {
+        self.preferences = preferences
         self.makeClient = makeClient
         self.interval = interval
     }
@@ -81,12 +84,58 @@ final class CodexSidebarSync {
         loop = nil
         client = nil
         catalog = nil
+        disclosureOverrides = [:]
         error = nil
     }
 
-    private func update(_ next: Client.Catalog?) {
+    var presentedSections: [Client.Section] {
+        let sections = catalog?.sections ?? []
+        guard !disclosureOverrides.isEmpty else { return sections }
+        return sections.map { section in
+            var presented = section
+            presented.isCollapsed = disclosureOverrides[section.id] ?? section.isCollapsed
+            return presented
+        }
+    }
+
+    private func preferenceKey(_ account: Client.Account) -> String? {
+        CodexDesktopLayout.ownerKey(for: account).map { "codexDesktopSectionDisclosures." + $0 }
+    }
+
+    private func saveOverrides(for account: Client.Account) {
+        guard let key = preferenceKey(account) else { return }
+        if disclosureOverrides.isEmpty { preferences.removeObject(forKey: key) }
+        else { preferences.set(disclosureOverrides, forKey: key) }
+    }
+
+    func setCollapsed(_ collapsed: Bool, sectionID: String) {
+        guard let catalog, let section = catalog.sections.first(where: { $0.id == sectionID }) else { return }
+        disclosureOverrides[sectionID] = collapsed == section.isCollapsed ? nil : collapsed
+        saveOverrides(for: catalog.account)
+    }
+
+    func update(_ next: Client.Catalog?) {
         let accountChanged = catalog?.account != next?.account
-        if catalog != next { catalog = next }
+        if catalog != next {
+            if accountChanged {
+                let key = next.flatMap { preferenceKey($0.account) }
+                disclosureOverrides = key.flatMap { preferences.dictionary(forKey: $0) as? [String: Bool] } ?? [:]
+            }
+            if let next, !disclosureOverrides.isEmpty {
+                // Once the desktop agrees with a local choice, follow its further changes again.
+                var remaining: [String: Bool] = [:]
+                for section in next.sections {
+                    if let choice = disclosureOverrides[section.id], choice != section.isCollapsed {
+                        remaining[section.id] = choice
+                    }
+                }
+                if remaining != disclosureOverrides {
+                    disclosureOverrides = remaining
+                    saveOverrides(for: next.account)
+                }
+            }
+            catalog = next
+        }
         for window in windows.values {
             guard let reader = window.desktopReader else { continue }
             guard !accountChanged, let row = chat(reader.id) else { window.desktopReader = nil; continue }

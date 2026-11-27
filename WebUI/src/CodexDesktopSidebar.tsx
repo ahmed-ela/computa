@@ -7,14 +7,15 @@ import { sidebarRowHeight, useSidebarWindow } from './sidebarWindow';
 import type { AppSnapshot, DesktopSection, NativeAction } from './types';
 
 type Action = (action: NativeAction) => void;
-type Row = { heading: string; label: string } | DesktopSection['chats'][number];
+type Row = { heading: string; label: string; expanded: boolean } | DesktopSection['chats'][number];
 
 export function desktopRows(sections: DesktopSection[], search: string): Row[] {
   const term = search.trim().toLocaleLowerCase();
   return sections.flatMap(section => {
     const chats = section.chats.filter(chat => chat.title.toLocaleLowerCase().includes(term));
     if (term && !chats.length) return [];
-    return [{ heading: section.id, label: section.name }, ...chats];
+    const expanded = Boolean(term) || !section.isCollapsed;
+    return [{ heading: section.id, label: section.name, expanded }, ...(expanded ? chats : [])];
   });
 }
 
@@ -23,6 +24,7 @@ export function DesktopChatList({snapshot, collapsed, search, post}: {
 }) {
   const list = useRef<HTMLElement | null>(null);
   const rows = useMemo(() => desktopRows(snapshot.desktopSections ?? [], search), [snapshot.desktopSections, search]);
+  const searching = Boolean(search.trim());
   const { start, end } = useSidebarWindow(list, rows.length);
   useLayoutEffect(() => { if (list.current) list.current.scrollTop = 0; }, [search]);
   return <nav ref={list} className={'task-list' + (collapsed ? ' agent-rail' : '')} aria-label="Codex desktop chats"
@@ -32,7 +34,21 @@ export function DesktopChatList({snapshot, collapsed, search, post}: {
     {start > 0 && <div aria-hidden="true" style={{height: start * sidebarRowHeight + 'px'}} />}
     {rows.slice(start, end).map(row => 'heading' in row
       ? <h2 key={'section:' + row.heading} className="sidebar-section-heading" data-desktop-section={row.heading} title={row.label}>
-          <span className={collapsed ? 'sr-only' : undefined}>{row.label}</span></h2>
+          {searching ? <span className={collapsed ? 'sr-only' : undefined}>{row.label}</span> : (
+            <button type="button" className="desktop-section-toggle" aria-expanded={row.expanded}
+              onClick={() => post({ action: 'setDesktopSectionCollapsed', id: row.heading, collapsed: row.expanded })}
+              onKeyDown={event => {
+                if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                event.preventDefault();
+                const collapse = event.key === 'ArrowLeft';
+                if (collapse === row.expanded) post({ action: 'setDesktopSectionCollapsed', id: row.heading, collapsed: collapse });
+              }}>
+              <Icon name="chevron" size={13} />
+              <span className={collapsed ? 'sr-only' : undefined}>{row.label}</span>
+            </button>
+          )}
+        </h2>
       : <div key={row.id} className="workspace-tab-row" data-desktop-chat={row.id}>
           <Button variant="ghost" className={'task-row' + (collapsed ? ' agent-rail-button' : '') + (snapshot.desktopReader?.id === row.id ? ' selected' : '')}
             aria-label={row.title} title={row.title} aria-current={snapshot.desktopReader?.id === row.id ? 'page' : undefined}
