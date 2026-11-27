@@ -144,7 +144,12 @@ final class CodexDesktopSidebarTests: XCTestCase {
             if (try? await view.evaluateJavaScript(predicate)) as? Bool == true { return }
             try await Task.sleep(for: .milliseconds(150))
         }
-        XCTFail("The isolated conversation did not reach: " + predicate)
+        let diagnostics = try? await view.evaluateJavaScript("""
+            ({rows:document.querySelectorAll('[data-codex-entry]').length,
+              composer:!!document.querySelector('textarea[aria-label="Message Codex"]'),
+              error:document.querySelector('.desktop-reader [role=alert]')?.textContent ?? null})
+            """)
+        XCTFail("Conversation check failed: " + predicate + " · " + String(describing: diagnostics))
         throw CocoaError(.coderInvalidValue)
     }
 
@@ -161,7 +166,7 @@ final class CodexDesktopSidebarTests: XCTestCase {
         _ = try await view.evaluateJavaScript("\(scope).click()")
         try await waitFor("!!document.querySelector('[data-desktop-section]')", in: view)
         let thread = ref.thread.uuidString.lowercased()
-        _ = try await view.evaluateJavaScript("window.webkit.messageHandlers.localCodex.postMessage({action:'openDesktopChat',id:'\(thread)'})")
+        _ = try await view.evaluateJavaScript("void window.webkit.messageHandlers.localCodex.postMessage({action:'openDesktopChat',id:'\(thread)'})")
         func visible(_ key: [String]) throws -> String {
             let pair = String(decoding: try JSONEncoder().encode(key), as: UTF8.self)
             return "Array.from(document.querySelectorAll('[data-codex-entry]')).some(e => e.dataset.codexEntry === JSON.stringify(\(pair)))"
@@ -207,16 +212,16 @@ final class CodexDesktopSidebarTests: XCTestCase {
         let row = "document.querySelector('[data-desktop-chat=\"\(id)\"] button')"
         try await waitFor("\(row)?.title === 'Kolmogor shared transcript qualification'", in: view)
         _ = try await view.evaluateJavaScript("\(row).click()")
-        try await waitFor("document.querySelector('.desktop-reader')?.innerText.includes('ACK_ROUND_ONE')", in: view)
+        try await waitFor("document.querySelector('.desktop-reader')?.textContent.includes('ACK_ROUND_ONE')", in: view)
         _ = try await view.evaluateJavaScript("""
             (() => { const field = document.querySelector('textarea[aria-label="Message Codex"]');
               field.value = 'Reply for \(outgoing).'; field.dispatchEvent(new Event('input', {bubbles:true})); })()
             """)
         try await waitFor("document.querySelector('[aria-label=\"Send to Codex\"]')?.disabled === false", in: view)
         _ = try await view.evaluateJavaScript("document.querySelector('[aria-label=\"Send to Codex\"]').click()")
-        try await waitFor("document.querySelector('.desktop-reader')?.innerText.includes('ACK_\(outgoing)')", in: view, seconds: 60)
+        try await waitFor("document.querySelector('.desktop-reader')?.textContent.includes('ACK_\(outgoing)')", in: view, seconds: 60)
         try Data().write(to: folder.appendingPathComponent("kolmogor-received"))
-        try await waitFor("document.querySelector('.desktop-reader')?.innerText.includes('ACK_\(incoming)')", in: view, seconds: 180)
+        try await waitFor("document.querySelector('.desktop-reader')?.textContent.includes('ACK_\(incoming)')", in: view, seconds: 180)
     }
 
     func testLiveChangesFromIndependentOfficialAppServerReachOpenWebKitWindow() async throws {
