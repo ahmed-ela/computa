@@ -1,0 +1,88 @@
+:root {
+  color-scheme: light dark;
+  font:
+    15px/1.5 -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 850px;
+  margin: 0 auto;
+  padding: 36px 28px;
+}
+header,
+li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+h1 {
+  font-size: 26px;
+  letter-spacing: -0.04em;
+  margin: 0;
+}
+h2 {
+  font-size: 17px;
+}
+p {
+  color: GrayText;
+  overflow-wrap: anywhere;
+}
+button,
+.primary,
+a {
+  font: inherit;
+}
+button,
+.primary {
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  background: Canvas;
+  color: CanvasText;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.primary {
+  background: CanvasText;
+  color: Canvas;
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+ul {
+  padding: 0;
+}
+li {
+  padding: 14px 0;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+}
+small {
+  display: block;
+  color: GrayText;
+}
+input {
+  display: block;
+  font: inherit;
+  margin: 4px 0 8px;
+}
+#screen {
+  height: min(52vw, 490px);
+  background: #191919;
+}
+#instructions {
+  padding: 4px 0 14px;
+}
+[hidden] {
+  display: none !important;
+}

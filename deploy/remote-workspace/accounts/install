@@ -1,0 +1,37 @@
+#!/bin/bash
+# Run as root after copying this directory and its sibling k3s/ to /opt/kolmogor-workspace.
+set -euo pipefail
+cd /opt/kolmogor-workspace/accounts
+test -r /etc/kolmogor-accounts/google-web.json
+test -r /etc/kolmogor-accounts/pilot.conf
+export PATH=/opt/node-runtime/bin:/usr/local/bin:/usr/sbin:/usr/bin:/bin
+getent passwd kolmogor-accounts >/dev/null || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin kolmogor-accounts
+chown root:kolmogor-accounts /etc/kolmogor-accounts/google-web.json
+chmod 0640 /etc/kolmogor-accounts/google-web.json
+npm ci --ignore-scripts --no-audit --no-fund
+npm run build
+npm prune --omit=dev --ignore-scripts --no-audit --no-fund
+install -m 0644 kolmogor-{accounts,broker}.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable kolmogor-broker kolmogor-accounts
+systemctl restart kolmogor-broker kolmogor-accounts
+if [[ -e /etc/kolmogor-accounts/tunnel.json ]]; then
+  python3 - <<'CONFIG'
+import json
+from pathlib import Path
+from uuid import UUID
+root = Path("/etc/kolmogor-accounts")
+identifier = UUID(json.loads((root / "tunnel.json").read_bytes())["TunnelID"])
+(root / "ingress.yml").write_text(f"""tunnel: {identifier}
+ingress:
+  - hostname: accounts.kolmogor.com
+    service: http://127.0.0.1:8786
+  - service: http_status:404
+""")
+CONFIG
+  chmod 0644 /etc/kolmogor-accounts/ingress.yml
+  install -m 0644 kolmogor-account-tunnel.service /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable kolmogor-account-tunnel
+  systemctl restart kolmogor-account-tunnel
+fi

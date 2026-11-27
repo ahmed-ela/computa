@@ -1,0 +1,19 @@
+{
+  "name": "kolmogor-workspace-accounts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "build": "node build.mjs",
+    "test:browser": "node tests/account-browser.mjs"
+  },
+  "dependencies": {
+    "@novnc/novnc": "1.7.0",
+    "google-auth-library": "11.3.4",
+    "ws": "8.23.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright-core": "1.66.0-alpha-2026-11-18"
+  }
+}

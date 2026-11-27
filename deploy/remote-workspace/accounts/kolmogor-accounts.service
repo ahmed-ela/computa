@@ -1,0 +1,23 @@
+[Unit]
+Description=Kolmogor Google workspace account service
+Requires=kolmogor-broker.service
+After=kolmogor-broker.service network-online.target
+[Service]
+User=kolmogor-accounts
+Group=kolmogor-accounts
+EnvironmentFile=/etc/kolmogor-accounts/pilot.conf
+ExecStart=/opt/node-runtime/bin/node /opt/kolmogor-workspace/accounts/main.mjs
+WorkingDirectory=/opt/kolmogor-workspace/accounts
+StateDirectory=kolmogor-accounts
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+[Install]
+WantedBy=multi-user.target

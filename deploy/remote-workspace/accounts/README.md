@@ -1,0 +1,28 @@
+# Google workspace accounts
+
+In the Mac app, open **Settings → Account → Manage account**. Google signs you in through the system browser. **Connect all accounts** walks through Codex CLI, Claude Code, and Google in your remote Chrome profile. You can also open each connection individually. Provider subscriptions, device approvals, and two-factor authentication belong to the provider.
+
+## Account and workspace boundaries
+
+The gateway verifies Google's signed ID token, audience, nonce, verified email and browser-bound, single-use state. The Google subject identifies the workspace. The email is used for display and pilot admission. The Mac exchanges a one-minute, single-use ticket with a per-attempt PKCE verifier. Its dedicated WebKit store receives an HTTP-only, Secure, SameSite session cookie. The account window has no agent bridge. Signing out revokes that session. Existing provider connections belong to the remote workspace and persist across Kolmogor sign-ins.
+
+U01 hosts the account process under its own unprivileged system user. A restricted Unix socket accepts the fixed workspace operations in [broker.py](broker.py). Only the broker operates Kubernetes. It chooses the CLI executable, arguments, pod, display endpoint and provisioning templates. Each workspace receives a separate namespace, PVCs for the two CLI accounts and browser profile, a display credential, network policies and quotas. The capacity default is four workspaces on one node. Set `MAX_WORKSPACES` on the broker when the host has sufficient backing resources. PVC storage requests track allocations. Enforce filesystem quotas on the backing storage before offering untrusted tenants a hard disk usage guarantee.
+
+Codex uses its device approval flow. Claude opens its official sign-in page and accepts its authorization code. Chrome runs with a real X display. Its viewer requires the owner's current Kolmogor session and an exact-origin WebSocket request. Viewer connections expire after 15 minutes and recheck the session after logout. Signing in to a Google website in that browser is independent of Kolmogor authentication. Chrome browser Sync is a separate product capability.
+
+## Install on the workspace node
+
+1. Deploy the [K3s workspace](../k3s/README.md), its gateway, seccomp profile and pinned worker images. Install Node 24 at `/opt/node-runtime` and install `cloudflared` from Cloudflare's signed package repository.
+2. In the standalone Google Cloud project `kolmogor`, create an external Google Auth application using the basic identity scopes `openid email`. Use a **Web application** client with redirect `https://accounts.kolmogor.com/oauth/callback`. The optional development callback is `http://127.0.0.1:8786/oauth/callback`. Download the client JSON on the administrator's machine and transfer it over an authenticated channel to `/etc/kolmogor-accounts/google-web.json` on the node. Keep credentials out of Git, app bundles, logs and command-line arguments.
+3. Create a dedicated named tunnel under the Cloudflare account that owns `kolmogor.com` and route **only** `accounts.kolmogor.com` to it. Transfer only its tunnel-specific credentials to `/etc/kolmogor-accounts/tunnel.json`, owned by root with mode 0600. The installer writes the hostname and loopback origin to its ingress configuration.
+4. In the root-owned `/etc/kolmogor-accounts/pilot.conf`, set `PILOT_EMAILS` to a comma-separated list of approved Google email addresses. Add those people to Google Auth Platform's test audience as needed. To deliberately open verified-Google signup after the pilot, configure Google's production audience, size the node, and set `WORKSPACE_SIGNUP=public`.
+5. Copy the tracked `accounts/` and `k3s/` directories into the root-owned `/opt/kolmogor-workspace/` tree. Run `/opt/kolmogor-workspace/accounts/install` as root. It provisions the service user, builds the pinned static assets, and installs the systemd units. The account service listens on node loopback. Google credentials stay on the node. The tunnel unit receives a private copy of its own credential through systemd.
+6. Confirm `systemctl is-active kolmogor-{broker,accounts,account-tunnel}` and `curl -fsS https://accounts.kolmogor.com/api/me` (signed-out result: `{"email":null}`). Use **Manage account** in the installed app for the full sign-in check. Verify the provider's own status after each approval.
+
+Back up the account database, broker allocation directory, cluster workspace Secrets and PVCs using an encrypted, access-controlled backup. Keep the Google client secret and tunnel credential in the operator's credential system. A restart preserves the account database and provider state. Pending provider handshakes may require starting sign-in again.
+
+## Checks
+
+From this directory run `npm ci`, `npm test`, `python3 -m unittest discover -s tests -p 'test_*.py'`, `npm run build`, and `npm audit`. Run `npm run test:browser` with an installed Chrome (or set `CHROME_BIN`) for a complete fixture walkthrough through the browser UI. The identity tests use a disposable database. The HTTP tests cover authorization, origin checks, native handoff, and sign-out. The broker tests cover ownership namespace validation, admission capacity, allowed operations, and the official provider authorization URLs.
+
+[Google web authorization](https://developers.google.com/identity/protocols/oauth2/web-server) · [Cloudflare named tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/)

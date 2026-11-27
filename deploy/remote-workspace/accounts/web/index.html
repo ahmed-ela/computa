@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kolmogor account</title>
+    <link rel="stylesheet" href="/account.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Workspace</h1>
+        <button id="logout" hidden>Sign out</button>
+      </header>
+      <p id="identity" role="status">Checking your session…</p>
+      <a class="primary" id="login" href="/auth/google" hidden>Sign in with Google</a>
+      <section id="workspace" hidden>
+        <button id="connect" class="primary">Connect all accounts</button>
+        <p id="status" role="status"></p>
+        <ul id="providers"></ul>
+        <section id="instructions" hidden>
+          <h2></h2>
+          <p></p>
+          <a id="authorize" target="_blank" rel="noopener noreferrer" hidden>Open sign-in page</a>
+          <form hidden>
+            <label>Authorization code<input type="password" autocomplete="off" required /></label
+            ><button>Submit code</button>
+          </form>
+          <button id="skip" hidden>Skip this account</button>
+        </section>
+        <section id="viewer" hidden>
+          <header>
+            <h2>Workspace Chrome</h2>
+            <button id="close-view">Close display</button>
+          </header>
+          <div id="screen"></div>
+        </section>
+      </section>
+    </main>
+    <script type="module" src="/account.js"></script>
+  </body>
+</html>

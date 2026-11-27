@@ -38,3 +38,5 @@ docker compose -f compose.yaml -f tests/compose.yaml down
 You can pass an SSH command and its arguments to `check.py` in place of `./connect` to verify the actual network path. Supply the same project name on the remote end. Remove the disposable project's volumes once you have finished inspecting the test.
 
 If the browser tool fails, first check whether the agent container resolves the `browser` service and whether Chrome can start its namespace and seccomp sandboxes. The default configuration runs both containers as a non-root user. A host unable to provide the browser sandbox needs a compatible container runtime or security profile. [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) · [Playwright's container guidance](https://playwright.dev/docs/docker) · [Workspace design discussion](https://github.com/ahmed-ela/kolmogor/issues/130)
+
+Signed-in Mac clients can provision a private U01 workspace through the [Google account service](accounts/README.md).
