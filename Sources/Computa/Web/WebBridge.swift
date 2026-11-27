@@ -422,6 +422,11 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerW
         case "showSettings":
             state.presentSettings()
 
+        case "openWorkspaceAccount":
+            guard Set(body.keys) == ["action"], state.presentedSheet == .settings,
+                  !state.approvalGateBlocksInteraction else { return }
+            WorkspaceAccountWindow.shared.open()
+
         case "importChromeProfile":
             guard Set(body.keys) == ["action"], state.presentedSheet == .settings, !state.approvalGateBlocksInteraction,
                   let window = webView?.window, let profile = state.browserSession.workspaceProfileID,

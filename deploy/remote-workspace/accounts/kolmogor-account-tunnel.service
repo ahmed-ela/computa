@@ -1,0 +1,14 @@
+[Unit]
+Description=Kolmogor account ingress
+After=network-online.target kolmogor-accounts.service
+[Service]
+DynamicUser=true
+LoadCredential=tunnel.json:/etc/kolmogor-accounts/tunnel.json
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --config /etc/kolmogor-accounts/ingress.yml run --credentials-file ${CREDENTIALS_DIRECTORY}/tunnel.json
+Restart=always
+RestartSec=5
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target

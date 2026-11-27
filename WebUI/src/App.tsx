@@ -833,6 +833,12 @@ function SettingsModal({ snapshot, nativeHost }: { snapshot: AppSnapshot; native
           <Button variant="ghost" size="icon" className="icon-button" aria-label="Close settings" onClick={() => post({ action: 'dismissSettings' })}><Icon name="x" /></Button>
         </header>
         <div className="settings-content">
+          {nativeHost && <section>
+            <h2>Account</h2>
+            <div className="setting-row"><span><strong>Remote workspace</strong><small>Sign in with Google to connect Codex, Claude Code, and Chrome.</small></span>
+              <Button variant="outline" onClick={() => post({ action: 'openWorkspaceAccount' })}>Manage account</Button>
+            </div>
+          </section>}
           <section>
             <h2>Appearance</h2>
             <label className="setting-row">

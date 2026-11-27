@@ -10,3 +10,4 @@ k3s/*
 k3s/claude/*
 !k3s/claude/package.json
 !k3s/claude/package-lock.json
+!k3s/antigravity-login

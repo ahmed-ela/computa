@@ -177,6 +177,16 @@ spec:
     requests:
       storage: 1Gi
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: antigravity-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -188,7 +198,7 @@ rules:
   verbs: [get]
 - apiGroups: [apps]
   resources: [deployments/scale]
-  resourceNames: [cli, claude]
+  resourceNames: [cli, claude, antigravity]
   verbs: [get, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -206,7 +216,7 @@ metadata:
 spec:
   podSelector:
     matchExpressions:
-    - {key: app, operator: In, values: [browser, cli, claude]}
+    - {key: app, operator: In, values: [browser, cli, claude, antigravity]}
   policyTypes: [Egress]
   egress:
   - to:

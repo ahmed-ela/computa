@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: antigravity
+spec:
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: antigravity}
+  template:
+    metadata:
+      labels: {app: antigravity, workspace-role: provider}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      volumes:
+      - name: workspace
+        persistentVolumeClaim: {claimName: workspace}
+      - name: antigravity-state
+        persistentVolumeClaim: {claimName: antigravity-state}
+      - name: browser-output
+        persistentVolumeClaim: {claimName: browser-output}
+      containers:
+      - name: antigravity
+        image: localhost/kolmogor-antigravity:1.5.18
+        imagePullPolicy: Never
+        command: ["/bin/sh", "-ec"]
+        args: ["agy mcp add --type http browser http://browser:8931/mcp && exec sleep infinity"]
+        resources:
+          requests: {memory: 64Mi, cpu: 50m}
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: workspace, mountPath: /workspace}
+        - {name: antigravity-state, mountPath: /home/node}
+        - {name: browser-output, mountPath: /workspace/browser-output, readOnly: true}

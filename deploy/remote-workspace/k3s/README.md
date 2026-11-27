@@ -25,12 +25,13 @@ sudo ./workspace kolmogor-ws-demo run codex -- --version
 sudo ./workspace kolmogor-ws-demo run claude -- mcp get browser
 sudo ./workspace kolmogor-ws-demo run claude
 sudo ./workspace kolmogor-ws-demo stop claude
+sudo ./workspace kolmogor-ws-demo run antigravity -- models
 sudo ./workspace kolmogor-ws-demo stop codex
 ```
 
-Use `run codex -- login` or `run claude -- auth login` after provisioning to link an account through that provider’s own CLI. Run either CLI without arguments for its interactive interface. Finish active turns before stopping a worker. Users switching providers can keep both running. Reprovisioning preserves an existing worker’s scale. The browser stays running while the workspace exists. Its profile persists across pod replacement. Restoring tabs after a Chrome crash follows Chrome’s own session behavior.
+Use `run codex -- login` or `run claude -- auth login` after provisioning to link an account through that provider’s own CLI. Use **Antigravity CLI → Connect** in the account window to authorize Google’s personal-account CLI. Its isolated worker registers this workspace’s browser MCP and persists its own home volume. Finish active turns before stopping a worker. Users switching providers can keep their CLI workers running. Reprovisioning preserves an existing worker’s scale. The browser stays running while the workspace exists. Its profile persists across pod replacement. Restoring tabs after a Chrome crash follows Chrome’s own session behavior.
 
-The private gateway authenticates start and stop requests with a separate token for each workspace. Its Kubernetes service account can read only that routing secret and scale only the two named provider deployments in enrolled namespaces. Network policies allow provider-to-browser MCP within the workspace, DNS and public web traffic. The provider pods receive no cluster credentials. Workspace code and shared files are trusted by both providers belonging to the same owner. Administration uses SSH and Kubernetes authorization. These commands do not provision end-user accounts or connect the shipping Kolmogor client.
+The private gateway authenticates start and stop requests with a separate token for each workspace. Its Kubernetes service account can read only that routing secret and scale only the named provider deployments in enrolled namespaces. Network policies allow provider-to-browser MCP within the workspace, DNS and public web traffic. The provider pods receive no cluster credentials. Workspace code and shared files are trusted by the providers belonging to the same owner. Administration uses SSH and Kubernetes authorization. These commands do not provision end-user accounts or connect the shipping Kolmogor client.
 
 ## View and control the real Chrome window
 

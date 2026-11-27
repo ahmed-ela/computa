@@ -5,7 +5,7 @@ archive=${1:?Supply the absolute directory containing the image archives}
 cd "$(dirname "$0")"
 install -d -m 0755 /var/lib/kubelet/seccomp/kolmogor
 install -m 0644 browser-seccomp.json /var/lib/kubelet/seccomp/kolmogor/browser.json
-for target in agent claude headed-browser; do k3s ctr images import "$archive/$target.oci"; done
+for target in agent claude antigravity headed-browser; do k3s ctr images import "$archive/$target.oci"; done
 k3s kubectl create namespace kolmogor --dry-run=client -o yaml | k3s kubectl apply -f -
 if [ -z "$(k3s kubectl -n kolmogor get secret worker --ignore-not-found -o name)" ]; then
     openssl rand -hex 32 | tr -d '\n' | k3s kubectl -n kolmogor create secret generic worker --from-file=token=/dev/stdin

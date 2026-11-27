@@ -4,8 +4,9 @@ set -eu
 cd "$(dirname "$0")/.."
 out=${1:?Specify an absolute directory for the OCI archives}
 mkdir -p "$out"
-for target in agent claude headed-browser; do
+for target in agent claude antigravity headed-browser; do
     image="localhost/kolmogor-$target:workspace-v2"
+    if [ "$target" = antigravity ]; then image="localhost/kolmogor-antigravity:1.5.18"; fi
     podman build --target "$target" -t "$image" .
     podman save --format oci-archive -o "$out/$target.oci" "$image"
 done
