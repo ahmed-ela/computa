@@ -1,0 +1,45 @@
+services:
+  agent:
+    build:
+      context: .
+      target: agent
+    volumes:
+      - codex-state:/home/node/.codex
+      - files:/workspace
+      - browser-output:/workspace/browser-output:ro
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      browser:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "test", "-S", "/home/node/run/codex.sock"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  browser:
+    build:
+      context: .
+      target: browser
+    volumes:
+      - browser-profile:/home/node/profile
+      - browser-output:/workspace/browser-output
+    healthcheck:
+      test: ["CMD", "node", "-e", "const s=require('node:net').connect(8931,'127.0.0.1',()=>s.end());s.on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+    shm_size: 512m
+    cap_drop: [ALL]
+    # Chrome chroots the renderer inside its own user namespace.
+    cap_add: [SYS_CHROOT]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+volumes:
+  codex-state: {}
+  files: {}
+  browser-profile: {}
+  browser-output: {}

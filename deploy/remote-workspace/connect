@@ -1,0 +1,10 @@
+#!/bin/sh
+# Keep stdout exclusively for the raw app-server WebSocket handshake and frames.
+set -eu
+cd "$(dirname "$0")"
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    set -- docker compose
+else
+    set -- podman compose
+fi
+exec "$@" exec -T agent codex app-server proxy --sock /home/node/run/codex.sock
