@@ -28,6 +28,7 @@ final class WorkspaceAccountWindow: NSObject, NSWindowDelegate, WKNavigationDele
         return panel
     }()
     private var authentication: ASWebAuthenticationSession?
+    private var activeAttempt: UUID?
 
     func open() {
         window.makeKeyAndOrderFront(nil)
@@ -40,6 +41,7 @@ final class WorkspaceAccountWindow: NSObject, NSWindowDelegate, WKNavigationDele
     }
 
     func windowWillClose(_ notification: Notification) {
+        activeAttempt = nil
         authentication?.cancel()
         authentication = nil
         web?.stopLoading()
@@ -77,15 +79,20 @@ final class WorkspaceAccountWindow: NSObject, NSWindowDelegate, WKNavigationDele
         let verifier = encode(Data(random))
         let challenge = encode(Data(SHA256.hash(data: Data(verifier.utf8))))
         let start = origin.appending(path: "auth/google").appending(queryItems: [URLQueryItem(name: "challenge", value: challenge)])
-        let session = ASWebAuthenticationSession(url: start, callbackURLScheme: "kolmogor-account") { [weak self] url, _ in
+        let attempt = UUID()
+        activeAttempt = attempt
+        // AuthenticationServices can deliver this completion on a background dispatch queue.
+        let session = ASWebAuthenticationSession(url: start, callbackURLScheme: "kolmogor-account") { @Sendable [weak self] url, _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.activeAttempt == attempt else { return }
+                self.activeAttempt = nil
                 self.authentication = nil
                 guard let url, url.scheme == "kolmogor-account", url.host == "complete",
                       let ticket = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "ticket" })?.value,
                       ticket.wholeMatch(of: /[A-Za-z0-9_-]{43}/) != nil else { return }
                 var request = URLRequest(url: self.origin.appending(path: "auth/redeem"))
                 request.httpMethod = "POST"
+                request.setValue(self.origin.absoluteString, forHTTPHeaderField: "Origin")
                 request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
                 request.httpBody = Data("ticket=\(ticket)&verifier=\(verifier)".utf8)
                 self.web?.load(request)
@@ -95,6 +102,7 @@ final class WorkspaceAccountWindow: NSObject, NSWindowDelegate, WKNavigationDele
         session.presentationContextProvider = self
         authentication = session
         if !session.start() {
+            activeAttempt = nil
             authentication = nil
             let alert = NSAlert()
             alert.messageText = "Google sign-in could not open."
