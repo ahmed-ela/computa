@@ -3,7 +3,8 @@ import Foundation
 import WebKit
 
 @MainActor
-final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+final class WebBridge: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerWithReply, WKNavigationDelegate {
+    static let conversationHandler = "codexConversation"
     static let handlerName = "localCodex"
     static var diagnosticsEnabled: Bool {
         ProcessInfo.processInfo.environment["COMPUTA_WEBUI_DIAGNOSTICS"] == "1"
@@ -111,6 +112,22 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         state.workspaceWindows.withWindow(windowTabs) { receive(message) }
     }
 
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage,
+                               replyHandler: @escaping @MainActor (Any?, String?) -> Void) {
+        guard message.name == Self.conversationHandler, message.frameInfo.isMainFrame,
+              message.webView === webView, WebUIResourceLocator.contains(webView?.url),
+              let state, let source = state.desktopSidebar, let body = message.body as? [String: Any],
+              let action = body["action"] as? String else { replyHandler(nil, "Unavailable conversation."); return }
+        if ["send", "wake"].contains(action), state.approvalGateBlocksInteraction || state.presentedSheet != nil || windowTabs.isAPIProvidersPresented {
+            replyHandler(nil, "Finish the open dialog first.")
+            return
+        }
+        Task {
+            do { replyHandler(try await source.conversation(action, body: body, in: windowTabs), nil) }
+            catch { replyHandler(nil, error.localizedDescription) }
+        }
+    }
+
     private func receive(_ message: WKScriptMessage) {
         guard message.name == Self.handlerName,
               message.frameInfo.isMainFrame,
@@ -200,14 +217,17 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 state.workspaceTabs.move(tab, to: target)
             }
 
-        case "showDesktopChats", "openDesktopChat", "earlierDesktopMessages":
+        case "showDesktopChats", "openDesktopChat", "setDesktopSectionCollapsed":
             guard let source = state.desktopSidebar, !windowTabs.isClosed, !windowTabs.isAPIProvidersPresented,
                   !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
             if action == "showDesktopChats", let enabled = body["enabled"] as? Bool {
                 windowTabs.showsDesktopChats = enabled
+            } else if action == "setDesktopSectionCollapsed", windowTabs.showsDesktopChats,
+                      let id = body["id"] as? String, let collapsed = body["collapsed"] as? Bool {
+                source.setCollapsed(collapsed, sectionID: id)
             } else if action == "openDesktopChat", let id = body["id"] as? String {
                 source.open(id, in: windowTabs)
-            } else if action == "earlierDesktopMessages" { source.older(in: windowTabs) }
+            }
         case "selectTask":
             guard let id = body["id"] as? String else { return }
             state.selectSidebarChat(id)

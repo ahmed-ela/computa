@@ -13,7 +13,7 @@ import {
 import { Icon } from './Icon';
 import { AgentMenu } from './AgentMenu';
 import { useConversationDrafts } from './conversationDrafts';
-import { DesktopConversation } from './CodexDesktopSidebar';
+import { DesktopConversation } from './CodexConversation';
 import { WorkspaceSidebar, sidebarIsCompact } from './WorkspaceSidebar';
 import { copyText } from './clipboard';
 import { ReviewPanel } from './ReviewPanel';
@@ -1090,7 +1090,7 @@ export function App() {
           onClick={() => post({ action: 'toggleBrowser' })}>
           <Icon name="browser" size={18} />
         </Button>}
-        {snapshot.showsDesktopChats ? <DesktopConversation snapshot={snapshot} post={post} /> : <>
+        {snapshot.showsDesktopChats ? <DesktopConversation reader={snapshot.desktopReader} /> : <>
         <TaskToolbar task={task} snapshot={snapshot} allowFresh={Boolean(task && !draftState.drafts[task.id] && !draftState.pendingSubmissions[task.id])} rowHeight={snapshot.titlebarHeight} onNewChat={snapshot.allowsBrowserSidePane && !snapshot.nativeSidebarControls ? createChat : undefined} />
         {snapshot.savedChatSelection ? (
           <div className="no-task-view" role={snapshot.savedChatSelection.error ? 'alert' : 'status'}>

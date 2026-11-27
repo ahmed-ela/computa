@@ -17,7 +17,17 @@ test('the sidebar preserves source order, group names and empty groups', () => {
 
 test('filtering a Codex sidebar keeps matching chats inside their original group', () => {
   expect(desktopRows(sections, '  PAPER  ')).toEqual([
-    { heading: 'papers', label: 'Research Papers' }, chat('c', 'Paper notes'),
+    { heading: 'papers', label: 'Research Papers', expanded: true }, chat('c', 'Paper notes'),
   ]);
   expect(desktopRows(sections, 'no-match')).toEqual([]);
+});
+
+test('a collapsed section keeps its heading and hides only its chats', () => {
+  const snapshot = sections.map(section => ({ ...section, isCollapsed: section.id === 'pins' }));
+  expect(desktopRows(snapshot, '').map(row => 'heading' in row ? [row.heading, row.expanded] : row.id))
+    .toEqual([['pins', false], ['papers', true], 'c', ['empty', true], ['recent', true], 'd']);
+  expect(desktopRows(snapshot, ' second ')).toEqual([
+    { heading: 'pins', label: 'Pinned', expanded: true }, chat('b', 'Second'),
+  ]);
+  expect(desktopRows(snapshot, '   ').some(row => 'id' in row && row.id === 'b')).toBe(false);
 });
