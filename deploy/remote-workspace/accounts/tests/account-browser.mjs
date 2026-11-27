@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import net from 'node:net';
 import { Duplex } from 'node:stream';
 import { chromium } from 'playwright-core';
+import { workspaceAccount } from '../browser-account.cjs';
 import { Accounts } from '../identity.mjs';
 import { accountServer } from '../server.mjs';
 
@@ -96,6 +97,31 @@ try {
   console.log(
     'Verified Google entry, the three guided connection steps, manual code, browser viewer, and sign-out with a disposable account.'
   );
+
+  const remoteChrome = await browser.newContext();
+  await remoteChrome.route('**/*', (route) => route.fulfill({ contentType: 'text/html', body: '<main>Fixture</main>' }));
+  const unrelated = await remoteChrome.newPage();
+  await unrelated.goto('https://example.invalid/user-work');
+  const landing = await remoteChrome.newPage();
+  await landing.goto('https://www.google.com/account/about/');
+  assert.equal(await workspaceAccount(remoteChrome, 'status'), false);
+  assert.equal(await workspaceAccount(remoteChrome, 'start'), false);
+  const login = new URL(landing.url());
+  assert.equal(login.origin, 'https://accounts.google.com');
+  assert.equal(login.searchParams.get('continue'), 'https://myaccount.google.com/');
+  const challenge = new URL('/challenge/fixture', login.origin);
+  challenge.search = login.search;
+  await landing.goto(challenge.href);
+  assert.equal(await workspaceAccount(remoteChrome, 'start'), false);
+  assert.equal(landing.url(), challenge.href);
+  assert.equal(remoteChrome.pages().length, 2);
+  assert.equal(unrelated.url(), 'https://example.invalid/user-work');
+  await landing.goto('https://myaccount.google.com/');
+  assert.equal(await workspaceAccount(remoteChrome, 'status'), false);
+  await landing.setContent('<button aria-label="Google Account: fixture">Account</button>');
+  assert.equal(await workspaceAccount(remoteChrome, 'status'), true);
+  await remoteChrome.close();
+  console.log('Verified that Chrome reuses the Google tab, preserves an active challenge, and checks the signed-in account menu.');
 } finally {
   await browser?.close();
   server.closeAllConnections();

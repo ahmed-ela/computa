@@ -2,6 +2,8 @@
 
 In the Mac app, open **Settings → Account → Manage account**. Google signs you in through the system browser. **Connect all accounts** walks through Codex CLI, Claude Code, and Google in your remote Chrome profile. You can also open each connection individually. Provider subscriptions, device approvals, and two-factor authentication belong to the provider.
 
+Codex CLI uses OpenAI’s device-code flow. If OpenAI reports that it is disabled, the account owner can enable device-code sign-in in ChatGPT’s Security settings, then return to **Connect**. Claude Code uses its own authorization page. Remote Chrome opens Google’s sign-in page in the workspace and preserves the current verification step when reopened. Kolmogor shows Chrome as connected after it sees the signed-in Google Account menu.
+
 ## Account and workspace boundaries
 
 The gateway verifies Google's signed ID token, audience, nonce, verified email and browser-bound, single-use state. The Google subject identifies the workspace. The email is used for display and pilot admission. The Mac exchanges a one-minute, single-use ticket with a per-attempt PKCE verifier. Its dedicated WebKit store receives an HTTP-only, Secure, SameSite session cookie. The account window has no agent bridge. Signing out revokes that session. Existing provider connections belong to the remote workspace and persist across Kolmogor sign-ins.

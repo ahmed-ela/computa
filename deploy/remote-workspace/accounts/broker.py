@@ -28,33 +28,17 @@ POOL = ThreadPoolExecutor(max_workers=4)
 preparing = {}
 logins = {}
 starting = set()
-# Keep the readiness check and the navigation fixed. Read no browser storage or credentials.
-BROWSER = """
-const pw=require(require.resolve('playwright',{paths:['/opt/workspace-tools']}));
-(async()=>{
- const browser=await pw.chromium.connectOverCDP('http://127.0.0.1:9222');
- const context=browser.contexts()[0];
- const isAccount=p=>{try{return new URL(p.url()).origin==='https://myaccount.google.com'}catch{return false}};
- const isAccountLogin=p=>{
-   try { const url=new URL(p.url()); const next=url.searchParams.get('continue');
-     return url.origin==='https://accounts.google.com' && next && new URL(next).origin==='https://myaccount.google.com';
-   } catch {return false;}
- };
- let page=context.pages().find(isAccount);
- if(process.argv[1]==='start'){
-   page=page||context.pages().find(isAccountLogin);
-   if(!page){page=context.pages().find(p=>p.url()==='about:blank')||await context.newPage();
-     await page.goto('https://myaccount.google.com/',{waitUntil:'commit',timeout:15000});}
-   await page.bringToFront();
- }
- let signed=false;
- if(page&&isAccount(page)){
-   const accountMenu=page.locator('a[href^="https://accounts.google.com/SignOutOptions"]');
-   const namedMenu=page.getByRole('button',{name:/Google Account:/i}).or(page.getByRole('link',{name:/Google Account:/i}));
-   signed=await accountMenu.first().isVisible()||await namedMenu.first().isVisible();
- }
- await browser.close();console.log(JSON.stringify(signed));
-})().catch(()=>process.exit(1));
+# The same page selection runs in the workspace and in the browser regression tests.
+BROWSER = (ROOT / "browser-account.cjs").read_text() + """
+const pw = require(require.resolve('playwright', {paths: ['/opt/workspace-tools']}));
+(async () => {
+  const browser = await pw.chromium.connectOverCDP('http://127.0.0.1:9222');
+  try {
+    console.log(JSON.stringify(await workspaceAccount(browser.contexts()[0], process.argv[1])));
+  } finally {
+    await browser.close();
+  }
+})().catch(() => process.exit(1));
 """
 RFB = """
 const s=require('node:net').connect(5900,'127.0.0.1');
