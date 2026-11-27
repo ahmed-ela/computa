@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 K3S = ["/usr/local/bin/k3s", "kubectl"]
@@ -21,7 +21,14 @@ WORKSPACE = ROOT.parent / "k3s" / "workspace"
 STATE = Path(os.environ.get("STATE_DIRECTORY", "/var/lib/kolmogor-broker"))
 SOCKET = Path("/run/kolmogor-broker/accounts.sock")
 NAMESPACE = re.compile(r"kolmogor-ws-u-[0-9a-f]{40}")
-DEPLOYMENTS = {"codex": "cli", "claude": "claude"}
+DEPLOYMENTS = {"codex": "cli", "claude": "claude", "antigravity": "antigravity"}
+LOGIN_COMMANDS = {
+    "codex": ["codex", "login", "--device-auth"],
+    "claude": ["claude", "auth", "login", "--claudeai"],
+    "antigravity": ["antigravity-login"],
+}
+READY_MARKER = "ready-antigravity-v1"
+catalog_status = {}
 MAX_WORKSPACES = int(os.environ.get("MAX_WORKSPACES", "4"))
 LOCK = threading.RLock()
 POOL = ThreadPoolExecutor(max_workers=4)
@@ -69,7 +76,7 @@ def prepare(ns):
         run(K3S + ["create", "namespace", ns])
     run(kubectl(ns, "apply", "-f", str(ROOT / "limits.yaml")))
     run([str(WORKSPACE), ns, "provision"], timeout=240)
-    (STATE / ns / "ready").touch()
+    (STATE / ns / READY_MARKER).touch()
 
 
 def allocation(ns, ensure=False):
@@ -81,7 +88,7 @@ def allocation(ns, ensure=False):
             if sum(p.is_dir() and NAMESPACE.fullmatch(p.name) is not None for p in STATE.iterdir()) >= MAX_WORKSPACES:
                 raise ValueError("This server has reached its workspace capacity.")
             directory.mkdir(mode=0o700)
-        if (directory / "ready").is_file():
+        if (directory / READY_MARKER).is_file():
             return True
         if ensure:
             future = preparing.get(ns)
@@ -94,14 +101,23 @@ def allocation(ns, ensure=False):
 
 
 def provider_state(ns, provider):
-    args = ["codex", "login", "status"] if provider == "codex" else ["claude", "auth", "status", "--json"]
     replicas = run(kubectl(ns, "get", "deployment", DEPLOYMENTS[provider], "-o", "jsonpath={.status.readyReplicas}")).stdout
     if replicas != "1":
         return False
+    if provider == "antigravity":
+        # agy models checks the live account catalog. Avoid a Google request on every UI refresh.
+        with LOCK:
+            until, signed = catalog_status.get(ns, (0, False))
+        if time.monotonic() < until:
+            return signed
+        signed = run(container(ns, provider, "antigravity-login", "status"), check=False).returncode == 0
+        with LOCK:
+            catalog_status[ns] = (time.monotonic() + (90 if signed else 5), signed)
+        return signed
     if provider == "codex":
-        proc = subprocess.run(container(ns, provider, *args), capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(container(ns, provider, "codex", "login", "status"), capture_output=True, text=True, timeout=15)
         return proc.returncode == 0 and "logged in" in (proc.stdout + proc.stderr).lower()
-    proc = run(container(ns, provider, *args), check=False, timeout=15)
+    proc = run(container(ns, provider, "claude", "auth", "status", "--json"), check=False, timeout=15)
     try:
         return proc.returncode == 0 and json.loads(proc.stdout).get("loggedIn") is True
     except (ValueError, AttributeError):
@@ -118,12 +134,20 @@ def sign_in_details(provider, output):
     endpoints = {
         "codex": {("auth.openai.com", "/codex/device"), ("chatgpt.com", "/codex/device")},
         "claude": {("claude.ai", "/oauth/authorize")},
+        "antigravity": {("accounts.google.com", "/o/oauth2/auth")},
     }
     url = None
     for candidate in re.findall(r"(https://[^\s<>\x00-\x1f]+)(?=\s)", output):
         try:
             target = urlsplit(candidate)
             allowed = (target.hostname, target.path) in endpoints[provider]
+            if provider == "antigravity" and allowed:
+                params = parse_qs(target.query)
+                allowed = (params.get("client_id") == ["1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"]
+                           and params.get("redirect_uri") == ["https://antigravity.google/oauth-callback"]
+                           and params.get("code_challenge_method") == ["S256"]
+                           and params.get("response_type") == ["code"]
+                           and len(params.get("code_challenge", [])) == len(params.get("state", [])) == 1)
             if allowed and target.username is None and target.password is None and target.port in (None, 443):
                 url = candidate
                 break
@@ -131,6 +155,8 @@ def sign_in_details(provider, output):
             continue
     if not url:
         return {"message": "Waiting for the provider’s sign-in page…"}
+    if provider == "antigravity":
+        return {"url": url, "acceptsCode": True, "message": "Sign in to Antigravity with Google and enter the code from its confirmation page."}
     if provider == "claude":
         return {"url": url, "acceptsCode": True, "message": "Open Claude, approve this connection, and enter the code Claude gives you."}
     match = re.search(r"(?<![A-Za-z0-9])([A-Z0-9]{4,6}-[A-Z0-9]{4,6})(?![A-Za-z0-9])", output)
@@ -145,7 +171,7 @@ class Login:
         self.output = b""
         self.lock = threading.Lock()
         self.written = False
-        args = ["codex", "login", "--device-auth"] if provider == "codex" else ["claude", "auth", "login", "--claudeai"]
+        args = LOGIN_COMMANDS[provider]
         self.proc = subprocess.Popen(container(ns, provider, *args, interactive=True), stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.expire = threading.Timer(600, self.stop)
@@ -175,7 +201,7 @@ class Login:
             return sign_in_details(self.provider, self.output.decode(errors="replace"))
 
     def code(self, value):
-        if self.provider != "claude" or not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._~#/+=%-]{8,2048}", value):
+        if self.provider not in ("claude", "antigravity") or not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._~#/+=%-]{8,2048}", value):
             raise ValueError("Invalid authorization code.")
         with self.lock:
             if self.written or self.proc.poll() is not None:
@@ -189,7 +215,7 @@ def dispatch(ns, action, provider=None, code=None):
     if not isinstance(ns, str) or not NAMESPACE.fullmatch(ns):
         raise ValueError("Invalid workspace.")
     if action not in ("ensure", "status", "start", "code", "display") or (
-            action in ("start", "code") and provider not in ("codex", "claude", "chrome")):
+            action in ("start", "code") and provider not in (*DEPLOYMENTS, "chrome")):
         raise ValueError("Unknown workspace operation.")
     ready = allocation(ns, ensure=action == "ensure")
     if action == "ensure" or not ready:

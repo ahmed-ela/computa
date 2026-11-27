@@ -1,0 +1,104 @@
+#!/usr/bin/python3
+"""Bridge the pinned agy terminal sign-in. Only its official PKCE URL leaves this process."""
+import fcntl
+import os
+import pty
+import re
+import select
+import signal
+import struct
+import subprocess
+import sys
+import termios
+import time
+from urllib.parse import urlsplit
+
+# agy puts the unwrapped URL in an OSC 8 link even on narrow terminals.
+LINK = re.compile(rb"\x1b\]8;[^;\x07\x1b]*;(https://[^\s\x07\x1b]{1,8192})(?:\x07|\x1b\\)")
+MODEL = re.compile(r"^[a-zA-Z0-9][\w./:-]+\t\S+", re.MULTILINE)
+
+
+def authorization_url(data):
+    for raw in LINK.findall(data):
+        url = raw.decode("ascii")
+        parsed = urlsplit(url)
+        if parsed.netloc == "accounts.google.com" and parsed.path == "/o/oauth2/auth":
+            return url
+    return None
+
+
+def connected():
+    try:
+        result = subprocess.run(["agy", "models"], cwd="/tmp", stdin=subprocess.DEVNULL, capture_output=True,
+                                text=True, timeout=12)
+        return result.returncode == 0 and MODEL.search(result.stdout) is not None
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def login():
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 180, 0, 0))
+    env = dict(os.environ, TERM="xterm-256color", SSH_TTY=os.ttyname(slave))
+    proc = subprocess.Popen(["agy"], cwd=os.environ["HOME"], env=env, stdin=slave, stdout=slave,
+                            stderr=slave, start_new_session=True)
+    os.close(slave)
+    selected = offered = submitted = False
+    pending = b""
+    screen = b""
+    deadline = time.monotonic() + 570
+    next_check = deadline
+    try:
+        while proc.poll() is None and time.monotonic() < deadline:
+            sources = [master, sys.stdin.fileno()]
+            ready, _, _ = select.select(sources, [], [], 1)
+            if master in ready:
+                try:
+                    chunk = os.read(master, 16384)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                if not submitted:
+                    screen = (screen + chunk)[-65536:]
+                    if not selected and b"Google OAuth" in screen and b"login method" in screen:
+                        os.write(master, b"\r")
+                        selected = True
+                    if selected and not offered:
+                        url = authorization_url(screen)
+                        if url:
+                            print(url, flush=True)
+                            offered = True
+                            screen = b""
+            if sys.stdin.fileno() in ready:
+                chunk = os.read(sys.stdin.fileno(), 2049)
+                if not chunk:
+                    break
+                pending += chunk
+                if not offered or submitted or len(pending) > 2049:
+                    return False
+                if b"\n" in pending:
+                    if not re.fullmatch(rb"[A-Za-z0-9._~#/+=%-]{8,2048}\n", pending):
+                        return False
+                    os.write(master, b"\x1b[200~" + pending[:-1] + b"\x1b[201~")
+                    time.sleep(.1)
+                    os.write(master, b"\r")
+                    pending = b""
+                    submitted = True
+                    next_check = time.monotonic() + 2
+            if submitted and time.monotonic() >= next_check:
+                if connected():
+                    return True
+                next_check = time.monotonic() + 5
+        return submitted and connected()
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        os.close(master)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] not in ([], ["status"]):
+        sys.exit(2)
+    sys.exit(0 if (connected() if sys.argv[1:] else login()) else 1)

@@ -20,7 +20,7 @@ actions = parser.add_subparsers(dest='action', required=True)
 actions.add_parser('provision', help='Administrator: provision or update this workspace')
 for name in ('start', 'stop', 'run'):
     sub = actions.add_parser(name)
-    sub.add_argument('provider', choices=['codex', 'claude'])
+    sub.add_argument('provider', choices=['codex', 'claude', 'antigravity'])
     if name == 'run':
         sub.add_argument('args', nargs=argparse.REMAINDER)
 view = actions.add_parser('view', help='Forward the display to a loopback port on this machine')
@@ -55,7 +55,7 @@ def provision():
             create({'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': secret},
                    'stringData': {key: generate()}})
     subprocess.run(kubectl + ['apply', '-f', str(HERE / 'workspace.yaml')], check=True)
-    for provider, name in [('codex', 'cli'), ('claude', 'claude')]:
+    for provider, name in [('codex', 'cli'), ('claude', 'claude'), ('antigravity', 'antigravity')]:
         manifest = str(HERE / (provider + '.yaml'))
         # Create at zero. Keep the replica count out of the applied configuration
         # so rolling out a new image leaves the gateway's scale decision intact.
@@ -84,7 +84,7 @@ def route():
     subprocess.run(kubectl + ['rollout', 'status', deployment, '--timeout=120s'], check=True, stdout=sys.stderr)
     if args.action == 'run':
         tty = ['-t'] if sys.stdin.isatty() and sys.stdout.isatty() else []
-        command = [args.provider]
+        command = ['agy' if args.provider == 'antigravity' else args.provider]
         if args.provider == 'codex':
             command.extend(['-c', 'mcp_servers.browser.url="http://browser:8931/mcp"'])
         extra = args.args[1:] if args.args[:1] == ['--'] else args.args

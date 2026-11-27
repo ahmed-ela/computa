@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const names = { codex: 'Codex CLI', claude: 'Claude Code', chrome: 'Chrome' };
+const names = { codex: 'Codex CLI', claude: 'Claude Code', antigravity: 'Antigravity CLI', chrome: 'Chrome' };
 let active,
   display,
   timer,
@@ -87,7 +87,7 @@ async function next(states) {
   }
   queue = null;
   $('#status').textContent = Object.keys(names).every((p) => states[p] === 'connected')
-    ? 'All three accounts are connected.'
+    ? 'All accounts are connected.'
     : 'Connection setup finished. You can connect the remaining accounts individually.';
 }
 async function refresh() {

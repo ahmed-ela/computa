@@ -1,8 +1,8 @@
 # Google workspace accounts
 
-In the Mac app, open **Settings → Account → Manage account**. Google signs you in through the system browser. **Connect all accounts** walks through Codex CLI, Claude Code, and Google in your remote Chrome profile. You can also open each connection individually. Provider subscriptions, device approvals, and two-factor authentication belong to the provider.
+In the Mac app, open **Settings → Account → Manage account**. Google signs you in through the system browser. **Connect all accounts** walks through Codex CLI, Claude Code, Antigravity CLI, and Google in your remote Chrome profile. You can also open each connection individually. Provider subscriptions, device approvals, and two-factor authentication belong to the provider.
 
-Codex CLI uses OpenAI’s device-code flow. If OpenAI reports that it is disabled, the account owner can enable device-code sign-in in ChatGPT’s Security settings, then return to **Connect**. Claude Code uses its own authorization page. Remote Chrome opens Google’s sign-in page in the workspace and preserves the current verification step when reopened. Kolmogor shows Chrome as connected after it sees the signed-in Google Account menu.
+Codex CLI uses OpenAI’s device-code flow. If OpenAI reports that it is disabled, the account owner can enable device-code sign-in in ChatGPT’s Security settings, then return to **Connect**. Claude Code uses its own authorization page. Antigravity CLI opens Google’s personal-account consent flow. Enter the code from Google’s Antigravity confirmation page in the account window. Its worker checks the authenticated model catalog and keeps its credentials in its own persistent home. Remote Chrome opens Google’s sign-in page in the workspace and preserves the current verification step when reopened. Kolmogor shows Chrome as connected after it sees the signed-in Google Account menu.
 
 ## Account and workspace boundaries
 

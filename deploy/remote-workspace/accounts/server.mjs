@@ -13,7 +13,7 @@ const staticFiles = new Map([
   ['/display.js', ['public/display.js', 'text/javascript']],
   ['/viewer-licenses.txt', ['public/viewer-licenses.txt', 'text/plain']],
 ]);
-const providers = new Set(['codex', 'claude', 'chrome']);
+const providers = new Set(['codex', 'claude', 'antigravity', 'chrome']);
 const minute = 60_000;
 function cookies(raw = '') {
   const result = new Map();
@@ -156,7 +156,7 @@ export function accountServer({ origin, accounts, google, broker, admit = () => 
       if (post && path === '/api/workspace') return json(200, await broker.call(workspace, 'ensure'));
       if (req.method === 'GET' && path === '/api/connections')
         return json(200, await broker.call(workspace, 'status'));
-      const route = /^\/api\/connections\/(codex|claude|chrome)\/(start|code)$/.exec(path);
+      const route = /^\/api\/connections\/(codex|claude|antigravity|chrome)\/(start|code)$/.exec(path);
       if (post && route && providers.has(route[1])) {
         const form = await body(req);
         return json(

@@ -15,7 +15,7 @@ const port = reservation.address().port;
 await new Promise((resolve) => reservation.close(resolve));
 const origin = 'http://127.0.0.1:' + port;
 const accounts = new Accounts(':memory:');
-const providers = { codex: 'disconnected', claude: 'disconnected', chrome: 'ready' };
+const providers = { codex: 'disconnected', claude: 'disconnected', antigravity: 'disconnected', chrome: 'ready' };
 const starts = [];
 const server = accountServer({
   origin,
@@ -34,9 +34,9 @@ const server = accountServer({
       if (action === 'ensure') return { ready: true };
       if (action === 'status') return { ready: true, providers };
       if (action === 'code') {
-        assert.equal(provider, 'claude');
-        assert.equal(code, 'fixture-approval');
-        providers.claude = 'connected';
+        assert.ok(['claude', 'antigravity'].includes(provider));
+        assert.equal(code, 'fixture-' + provider);
+        providers[provider] = 'connected';
         return { submitted: true };
       }
       starts.push(provider);
@@ -46,8 +46,8 @@ const server = accountServer({
         url:
           provider === 'codex'
             ? 'https://auth.openai.com/codex/device'
-            : 'https://claude.ai/oauth/authorize?fixture',
-        acceptsCode: provider === 'claude',
+            : provider === 'claude' ? 'https://claude.ai/oauth/authorize?fixture' : 'https://accounts.google.com/o/oauth2/auth?fixture',
+        acceptsCode: provider !== 'codex',
         message: 'Approve the synthetic connection.',
       };
     },
@@ -86,16 +86,21 @@ try {
     'https://auth.openai.com/codex/device'
   );
   await page.getByRole('button', { name: 'Skip this account' }).click();
-  await page.getByLabel('Authorization code').fill('fixture-approval');
+  await page.getByLabel('Authorization code').fill('fixture-claude');
+  await page.getByRole('button', { name: 'Submit code' }).click();
+  await page.getByRole('heading', { name: 'Antigravity CLI' }).waitFor();
+  await page.getByRole('link', { name: 'Open sign-in page' }).waitFor();
+  assert.equal(await page.getByRole('link', { name: 'Open sign-in page' }).getAttribute('href'), 'https://accounts.google.com/o/oauth2/auth?fixture');
+  await page.getByLabel('Authorization code').fill('fixture-antigravity');
   await page.getByRole('button', { name: 'Submit code' }).click();
   await page.getByRole('heading', { name: 'Workspace Chrome' }).waitFor();
   await page.locator('#screen canvas').waitFor({ state: 'attached' });
-  assert.deepEqual(starts, ['codex', 'claude', 'chrome']);
+  assert.deepEqual(starts, ['codex', 'claude', 'antigravity', 'chrome']);
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.getByRole('link', { name: 'Sign in with Google' }).waitFor();
   assert.equal(await page.getByRole('button', { name: 'Connect all accounts' }).isVisible(), false);
   console.log(
-    'Verified Google entry, the three guided connection steps, manual code, browser viewer, and sign-out with a disposable account.'
+    'Verified Google entry, all four guided connection steps, manual code, browser viewer, and sign-out with a disposable account.'
   );
 
   const remoteChrome = await browser.newContext();

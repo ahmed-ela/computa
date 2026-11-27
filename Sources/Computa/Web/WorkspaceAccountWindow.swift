@@ -121,9 +121,11 @@ final class WorkspaceAccountWindow: NSObject, NSWindowDelegate, WKNavigationDele
             }
             return .allow
         }
+        let providerHost = ["auth.openai.com", "chatgpt.com", "claude.ai", "platform.claude.com",
+                            "console.anthropic.com"].contains(url.host)
+        let googleAuthorization = url.host == "accounts.google.com" && url.path == "/o/oauth2/auth"
         if action.navigationType == .linkActivated, action.sourceFrame.isMainFrame,
-           ["auth.openai.com", "chatgpt.com", "claude.ai", "platform.claude.com",
-            "console.anthropic.com"].contains(url.host) {
+           action.sourceFrame.securityOrigin.host == origin.host, providerHost || googleAuthorization {
             NSWorkspace.shared.open(url)
         }
         return .cancel

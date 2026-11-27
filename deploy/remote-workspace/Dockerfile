@@ -51,6 +51,22 @@ ENV HOME=/home/node
 WORKDIR /workspace
 CMD ["sleep", "infinity"]
 
+FROM cli-base AS antigravity-download
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL --retry 3 https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.18-6386224290725888/linux-x64/cli_linux_x64.tar.gz -o /tmp/agy.tgz \
+    && echo "ef379ec869719112f696e8c7cfddf776618712e58fc38e53df80801d6528abb4677782c7c8778f9c09c9123fa44c2c32675d228c06f2a8f7a8f4214e75f5bb26  /tmp/agy.tgz" | sha512sum -c - \
+    && tar -xzf /tmp/agy.tgz -C /tmp antigravity && install -m 0755 /tmp/antigravity /usr/local/bin/agy
+
+FROM cli-base AS antigravity
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+COPY --from=antigravity-download /usr/local/bin/agy /usr/local/bin/agy
+COPY k3s/antigravity-login /usr/local/bin/antigravity-login
+RUN test "$(agy --version)" = "1.5.18"
+USER node
+ENV HOME=/home/node
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
+
 FROM browser AS headed-browser
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends xvfb x11-utils x11vnc tini xauth \

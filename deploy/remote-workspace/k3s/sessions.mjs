@@ -3,7 +3,7 @@ import {request} from 'node:https';
 import {timingSafeEqual} from 'node:crypto';
 
 const serviceAccount = '/var/run/secrets/kubernetes.io/serviceaccount';
-const providers = new Map([['codex', 'cli'], ['claude', 'claude']]);
+const providers = new Map([['codex', 'cli'], ['claude', 'claude'], ['antigravity', 'antigravity']]);
 
 function kube(method, path, body) {
   const data = body && JSON.stringify(body);
@@ -31,7 +31,7 @@ function kube(method, path, body) {
 // Each namespace grants this service account access to its one routing secret
 // and its provider scale subresources. Workers never receive either credential.
 export async function routeSession(req, send, api = kube) {
-  const match = /^\/workspaces\/(kolmogor(?:-ws-[a-z0-9](?:[a-z0-9-]{0,47}[a-z0-9])?)?)\/providers\/(codex|claude)\/(start|stop)$/.exec(req.url);
+  const match = /^\/workspaces\/(kolmogor(?:-ws-[a-z0-9](?:[a-z0-9-]{0,47}[a-z0-9])?)?)\/providers\/(codex|claude|antigravity)\/(start|stop)$/.exec(req.url);
   if (!match || req.method !== 'POST') return send(404, {});
   const [, namespace, provider, action] = match;
   const supplied = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization || '')?.[1];

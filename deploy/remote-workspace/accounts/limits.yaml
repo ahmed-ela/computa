@@ -13,7 +13,7 @@ metadata: {name: workspace-capacity}
 spec:
   hard:
     pods: "8"
-    persistentvolumeclaims: "6"
-    requests.storage: 8Gi
+    persistentvolumeclaims: "7"
+    requests.storage: 9Gi
     limits.memory: 10Gi
     limits.cpu: "10"
