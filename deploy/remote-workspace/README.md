@@ -4,6 +4,8 @@ Run one private workspace on a Linux x86-64 machine. The Codex CLI owns its chat
 
 This is an experimental deployment for one trusted owner per VM. It uses the official Codex CLI. Connecting Kolmogor’s native Mac or phone UI, provider-website sign-in handoff, and a macOS Messages worker are separate work. Keep machine inventory, SSH configuration, and account data in your own deployment repository.
 
+For a K3s deployment with an outbound macOS worker, follow the [K3s setup and guest verification guide](k3s/README.md).
+
 ## Start and connect
 
 Use Docker Compose v2 or Podman with a Compose provider, service-name DNS, and Chromium user-namespace sandbox support. The live check used rootless Podman and crun on Ubuntu 24.04. Use the same Compose project name and directory for each invocation. If using Podman, substitute `podman compose` for `docker compose`.

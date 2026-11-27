@@ -1,0 +1,21 @@
+#!/bin/sh
+# Install the single-node Linux workspace on an x86-64 systemd host.
+set -eu
+test "$(id -u)" = 0 && test "$(uname -m)" = x86_64 || { echo 'Run as root on Linux x86-64.' >&2; exit 1; }
+version=v1.37.2+k3s1
+binary_hash=265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda
+installer_hash=ed01f89fd977bf20ac1516bbebf8370bf3ddbaa55dac8aba610956a4c78cc00b
+if command -v k3s >/dev/null; then
+    k3s --version | grep -F "$version" >/dev/null
+    systemctl is-active --quiet k3s
+    echo 'Using the existing K3s installation.'
+    exit 0
+fi
+test ! -e /etc/rancher/k3s/config.yaml || { echo 'Existing K3s configuration needs review.' >&2; exit 1; }
+tmp=$(mktemp -d)
+trap 'rm -r "$tmp"' EXIT
+curl -fsSL --retry 3 "https://github.com/k3s-io/k3s/releases/download/$version/k3s" -o "$tmp/k3s"
+curl -fsSL --retry 3 "https://raw.githubusercontent.com/k3s-io/k3s/$version/install.sh" -o "$tmp/install.sh"
+(cd "$tmp" && printf '%s  k3s\n%s  install.sh\n' "$binary_hash" "$installer_hash" | sha256sum -c -)
+install -m 0755 "$tmp/k3s" /usr/local/bin/k3s
+INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC='server --disable traefik --disable servicelb --disable metrics-server --secrets-encryption --flannel-backend host-gw' sh "$tmp/install.sh"

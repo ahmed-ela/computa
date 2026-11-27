@@ -1,0 +1,28 @@
+#!/bin/sh
+# One bounded, read-only macOS job. No commands are accepted from the gateway.
+set -eu
+dir=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+token=$(cat "$dir/token")
+rpc() { /usr/bin/ssh -F "$dir/ssh_config" gateway; }
+field() { printf '%s' "$reply" | /usr/bin/plutil -extract "$1" raw -o - -; }
+while :; do
+    reply=$(printf '{"action":"claim","token":"%s"}' "$token" | rpc) || { sleep 5; continue; }
+    case "$(field operation)" in
+        idle) continue ;;
+        system-info) ;;
+        *) exit 1 ;;
+    esac
+    id=$(field id); lease=$(field lease); challenge=$(field challenge)
+    case "$id$lease$challenge" in *[!a-fA-F0-9-]*|'') exit 1 ;; esac
+    os=$(/usr/bin/sw_vers -productVersion)
+    build=$(/usr/bin/sw_vers -buildVersion)
+    arch=$(/usr/bin/uname -m)
+    boot=$(/usr/sbin/sysctl -n kern.bootsessionuuid)
+    payload=$(printf '{"action":"complete","token":"%s","id":"%s","lease":"%s","challenge":"%s","os":"%s","build":"%s","arch":"%s","boot":"%s"}' "$token" "$id" "$lease" "$challenge" "$os" "$build" "$arch" "$boot")
+    if printf '%s' "$payload" | rpc >/dev/null; then
+        printf 'Completed system-info job %s\n' "$id"
+    else
+        # The gateway leases read-only work again after a lost reply.
+        sleep 5
+    fi
+done

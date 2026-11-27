@@ -1,0 +1,360 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: codex-state
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: browser-output
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: browser-profile
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cli-socket
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jobs
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cli
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: cli
+  template:
+    metadata:
+      labels:
+        app: cli
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: workspace
+        persistentVolumeClaim:
+          claimName: workspace
+      - name: codex-state
+        persistentVolumeClaim:
+          claimName: codex-state
+      - name: cli-socket
+        persistentVolumeClaim:
+          claimName: cli-socket
+      - name: browser-output
+        persistentVolumeClaim:
+          claimName: browser-output
+      initContainers:
+      - name: socket-directory
+        image: localhost/kolmogor-agent:855c7e5
+        imagePullPolicy: Never
+        command: [install, -d, -m, '0700', /ipc/private]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: cli-socket, mountPath: /ipc}]
+      containers:
+      - name: cli
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |
+          install -d -m 0700 /home/node/run/private
+          exec codex -c 'mcp_servers.browser.url="http://browser:8931/mcp"' app-server --listen unix:///home/node/run/private/codex.sock
+        image: localhost/kolmogor-agent:855c7e5
+        imagePullPolicy: Never
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: codex-state
+          mountPath: /home/node/.codex
+        - name: cli-socket
+          mountPath: /tmp/codex-daemon-1000
+          subPath: private
+        - name: cli-socket
+          mountPath: /home/node/run
+        - name: browser-output
+          mountPath: /workspace/browser-output
+          readOnly: true
+        readinessProbe:
+          exec:
+            command:
+            - test
+            - -S
+            - /home/node/run/private/codex.sock
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: browser
+  template:
+    metadata:
+      labels:
+        app: browser
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: Localhost
+          localhostProfile: kolmogor/browser.json
+      volumes:
+      - name: browser-profile
+        persistentVolumeClaim:
+          claimName: browser-profile
+      - name: browser-output
+        persistentVolumeClaim:
+          claimName: browser-output
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 512Mi
+      containers:
+      - name: browser
+        image: localhost/kolmogor-browser:855c7e5
+        imagePullPolicy: Never
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+        volumeMounts:
+        - name: browser-profile
+          mountPath: /home/node/profile
+        - name: browser-output
+          mountPath: /workspace/browser-output
+        - name: shm
+          mountPath: /dev/shm
+        readinessProbe:
+          tcpSocket:
+            port: 8931
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - SYS_CHROOT
+      hostUsers: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: browser
+spec:
+  selector:
+    app: browser
+  ports:
+  - port: 8931
+    targetPort: 8931
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: jobs
+        persistentVolumeClaim:
+          claimName: jobs
+      - name: cli-socket
+        persistentVolumeClaim:
+          claimName: cli-socket
+      - name: code
+        configMap:
+          name: gateway-code
+      initContainers:
+      - name: socket-directory
+        image: localhost/kolmogor-agent:855c7e5
+        imagePullPolicy: Never
+        command: [install, -d, -m, '0700', /ipc/private]
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: cli-socket, mountPath: /ipc}]
+      containers:
+      - name: gateway
+        image: localhost/kolmogor-agent:855c7e5
+        imagePullPolicy: Never
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+        volumeMounts:
+        - name: jobs
+          mountPath: /data
+        - name: cli-socket
+          mountPath: /tmp/codex-daemon-1000
+          subPath: private
+        - name: cli-socket
+          mountPath: /home/node/run
+        - name: code
+          mountPath: /app
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        command:
+        - node
+        - /app/gateway.mjs
+        - serve
+        env:
+        - name: WORKER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: worker
+              key: token
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+spec:
+  selector:
+    app: gateway
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: browser
+spec:
+  podSelector:
+    matchLabels:
+      app: browser
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: cli
+    ports:
+    - port: 8931
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cli
+spec:
+  podSelector:
+    matchLabels:
+      app: cli
+  policyTypes:
+  - Ingress
+  ingress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway
+  policyTypes:
+  - Ingress
+  ingress: []

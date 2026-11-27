@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run on the Linux worker host as its normal Podman user.
+set -eu
+cd "$(dirname "$0")/.."
+out=${1:?Specify a directory for the OCI archives}
+mkdir -p "$out"
+for target in agent browser; do
+    image="localhost/kolmogor-$target:855c7e5"
+    podman build --target "$target" -t "$image" .
+    podman save --format oci-archive -o "$out/$target.oci" "$image"
+done
