@@ -114,6 +114,111 @@ final class CodexDesktopSidebarTests: XCTestCase {
         XCTAssertEqual(Array(recent.chats.prefix(ref.recent.count)).map(\.id), ref.recent)
     }
 
+    private func chatWindow(_ sync: CodexSidebarSync) async throws -> WKWebView {
+        let browser = EmbeddedBrowserSession(persistent: false)
+        addTeardownBlock { @MainActor in browser.shutdown() }
+        let app = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: browser, desktopSidebar: sync)
+        let host = NSHostingView(rootView: WebWorkspaceView(state: app))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
+                              styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        addTeardownBlock { @MainActor in window.close() }
+        var web: WKWebView?
+        for _ in 0..<80 where web == nil {
+            host.layoutSubtreeIfNeeded()
+            func find(_ view: NSView) -> WKWebView? {
+                if let wk = view as? WKWebView, wk.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil { return wk }
+                return view.subviews.lazy.compactMap(find).first
+            }
+            web = find(host)
+            if web == nil { try await Task.sleep(for: .milliseconds(50)) }
+        }
+        return try XCTUnwrap(web)
+    }
+
+    private func waitFor(_ predicate: String, in view: WKWebView, seconds: Int = 30) async throws {
+        let until = ContinuousClock.now + .seconds(seconds)
+        while ContinuousClock.now < until {
+            if (try? await view.evaluateJavaScript(predicate)) as? Bool == true { return }
+            try await Task.sleep(for: .milliseconds(150))
+        }
+        XCTFail("The isolated conversation did not reach: " + predicate)
+        throw CocoaError(.coderInvalidValue)
+    }
+
+    func testOpenBothEndsOfExistingLongDesktopChat() async throws {
+        guard let path = ProcessInfo.processInfo.environment["KOLMOGOR_DESKTOP_HISTORY_ENDS"] else {
+            throw XCTSkip("Set KOLMOGOR_DESKTOP_HISTORY_ENDS to an independent read-only history reference.")
+        }
+        struct Reference: Decodable { let thread: UUID; let first: [String]; let last: [String] }
+        let ref = try JSONDecoder().decode(Reference.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        let source = try XCTUnwrap(CodexSidebarSync.installed(preferences: isolatedTestPreferences()))
+        let view = try await chatWindow(source)
+        let scope = "document.querySelector('[aria-label=\"Codex desktop chats\"][aria-pressed]')"
+        try await waitFor("!!\(scope)", in: view)
+        _ = try await view.evaluateJavaScript("\(scope).click()")
+        try await waitFor("!!document.querySelector('[data-desktop-section]')", in: view)
+        let thread = ref.thread.uuidString.lowercased()
+        _ = try await view.evaluateJavaScript("window.webkit.messageHandlers.localCodex.postMessage({action:'openDesktopChat',id:'\(thread)'})")
+        func visible(_ key: [String]) throws -> String {
+            let pair = String(decoding: try JSONEncoder().encode(key), as: UTF8.self)
+            return "Array.from(document.querySelectorAll('[data-codex-entry]')).some(e => e.dataset.codexEntry === JSON.stringify(\(pair)))"
+        }
+        try await waitFor(try visible(ref.last), in: view)
+        _ = try await view.evaluateJavaScript("Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Beginning').click()")
+        try await waitFor(try visible(ref.first), in: view)
+        _ = try await view.evaluateJavaScript("Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Latest').click()")
+        try await waitFor(try visible(ref.last), in: view)
+        let mounted = try await view.evaluateJavaScript("document.querySelectorAll('[data-codex-entry]').length") as? Int
+        XCTAssertLessThanOrEqual(try XCTUnwrap(mounted), 192)
+    }
+
+    // The external fixture provides an isolated Codex desktop and the loopback model.
+    // Wake only that instance. The production path targets the installed app by bundle ID.
+    func testRoundTripWithRunningOfficialDesktop() async throws {
+        guard let root = ProcessInfo.processInfo.environment["KOLMOGOR_ISOLATED_DESKTOP_FIXTURE"] else {
+            throw XCTSkip("Set KOLMOGOR_ISOLATED_DESKTOP_FIXTURE for the real desktop round trip.")
+        }
+        let folder = URL(fileURLWithPath: root, isDirectory: true)
+        let profile = folder.appendingPathComponent("profile")
+        let electron = folder.appendingPathComponent("electron").path
+        let id = try String(contentsOf: folder.appendingPathComponent("thread"), encoding: .utf8)
+        let outgoing = "ROUND_" + UUID().uuidString.filter(\.isLetter).prefix(9).uppercased()
+        let incoming = "ROUND_" + UUID().uuidString.filter(\.isLetter).prefix(9).uppercased()
+        try Data(incoming.utf8).write(to: folder.appendingPathComponent("reply-from-codex"))
+        try Data(outgoing.utf8).write(to: folder.appendingPathComponent("reply-from-kolmogor"))
+        let executable = try officialExecutable()
+        let sync = CodexSidebarSync(interval: .seconds(1), preferences: isolatedTestPreferences(), wake: { thread in
+            XCTAssertEqual(thread.uuidString.lowercased(), id)
+            let launch = Process()
+            launch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            let app = try XCTUnwrap(NSWorkspace.shared.urlForApplication(withBundleIdentifier: CodexDesktopSidebarClient.bundleID))
+            launch.arguments = ["-gn", "--env", "CODEX_HOME=" + profile.path, "--env", "CODEX_ELECTRON_USER_DATA_PATH=" + electron,
+                                app.path, "--args", "--user-data-dir=" + electron, CodexSidebarSync.wakeURL(thread).absoluteString]
+            try launch.run()
+            launch.waitUntilExit()
+            XCTAssertEqual(launch.terminationStatus, 0)
+        }) { CodexDesktopSidebarClient(executable: executable, home: folder, codexHome: profile) }
+        let view = try await chatWindow(sync)
+        try await waitFor("!!document.querySelector('[aria-label=\"Codex desktop chats\"][aria-pressed]')", in: view)
+        _ = try await view.evaluateJavaScript("document.querySelector('[aria-label=\"Codex desktop chats\"][aria-pressed]').click()")
+        let row = "document.querySelector('[data-desktop-chat=\"\(id)\"] button')"
+        try await waitFor("\(row)?.title === 'Kolmogor shared transcript qualification'", in: view)
+        _ = try await view.evaluateJavaScript("\(row).click()")
+        try await waitFor("document.querySelector('.desktop-reader')?.innerText.includes('ACK_ROUND_ONE')", in: view)
+        _ = try await view.evaluateJavaScript("""
+            (() => { const field = document.querySelector('textarea[aria-label="Message Codex"]');
+              field.value = 'Reply for \(outgoing).'; field.dispatchEvent(new Event('input', {bubbles:true})); })()
+            """)
+        try await waitFor("document.querySelector('[aria-label=\"Send to Codex\"]')?.disabled === false", in: view)
+        _ = try await view.evaluateJavaScript("document.querySelector('[aria-label=\"Send to Codex\"]').click()")
+        try await waitFor("document.querySelector('.desktop-reader')?.innerText.includes('ACK_\(outgoing)')", in: view, seconds: 60)
+        try Data().write(to: folder.appendingPathComponent("kolmogor-received"))
+        try await waitFor("document.querySelector('.desktop-reader')?.innerText.includes('ACK_\(incoming)')", in: view, seconds: 180)
+    }
+
     func testLiveChangesFromIndependentOfficialAppServerReachOpenWebKitWindow() async throws {
         let executable = try officialExecutable()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -139,30 +244,11 @@ final class CodexDesktopSidebarTests: XCTestCase {
         try await call("initialize", ["clientInfo": ["name": "sidebar_fixture", "version": "1"], "capabilities": ["experimentalApi": true]])
         try await writer.send(Data(#"{"method":"initialized"}"#.utf8))
 
-        let sync = CodexSidebarSync() {
+        var wakes: [String] = []
+        let sync = CodexSidebarSync(wake: { wakes.append($0.uuidString.lowercased()) }) {
             CodexDesktopSidebarClient(executable: executable, home: directory, codexHome: directory)
         }
-        let browser = EmbeddedBrowserSession(persistent: false)
-        defer { browser.shutdown() }
-        let app = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: browser, desktopSidebar: sync)
-        let host = NSHostingView(rootView: WebWorkspaceView(state: app))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
-                              styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.contentView = host
-        window.orderBack(nil)
-        defer { window.close() }
-        var web: WKWebView?
-        for _ in 0..<80 where web == nil {
-            host.layoutSubtreeIfNeeded()
-            func find(_ view: NSView) -> WKWebView? {
-                if let wk = view as? WKWebView, wk.configuration.urlSchemeHandler(forURLScheme: WebUIResourceLocator.scheme) != nil { return wk }
-                return view.subviews.lazy.compactMap(find).first
-            }
-            web = find(host)
-            if web == nil { try await Task.sleep(for: .milliseconds(50)) }
-        }
-        let view = try XCTUnwrap(web)
+        let view = try await chatWindow(sync)
         func expectDOM(_ script: String, _ reason: String, line: UInt = #line) async throws {
             let deadline = ContinuousClock.now + .seconds(16)
             while ContinuousClock.now < deadline {
@@ -243,6 +329,23 @@ final class CodexDesktopSidebarTests: XCTestCase {
         try await expectOrder([pin, first, group, second, "recent"])
         _ = try await view.evaluateJavaScript("document.querySelector('[data-desktop-chat=\"\(second)\"] button').click()")
         try await expectDOM("document.querySelector('[aria-label=\"Codex conversation\"]')?.textContent.includes('Second synthetic chat user message')", "Selected conversation opens")
+        _ = try await view.evaluateJavaScript("""
+            (() => {
+                const f = document.querySelector('textarea[aria-label="Message Codex"]');
+                f.value = 'Follow up from Kolmogor';
+                f.dispatchEvent(new Event('input', {bubbles: true}));
+            })()
+            """)
+        try await expectDOM("!document.querySelector('[aria-label=\"Send to Codex\"]').disabled", "Composer is ready")
+        _ = try await view.evaluateJavaScript("document.querySelector('[aria-label=\"Send to Codex\"]').click()")
+        try await expectDOM("document.querySelector('.desktop-queue')?.textContent.includes('1 message queued')", "Codex acknowledged the queued reply")
+        XCTAssertEqual(wakes, [second])
+        let queued = try await call("thread/queue/list", ["threadId": second])
+        let rows = try XCTUnwrap(queued["data"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual((rows.first?["input"] as? [[String: Any]])?.first?["text"] as? String, "Follow up from Kolmogor")
+        _ = try await call("thread/queue/start", ["threadId": second, "queuedSubmissionId": try XCTUnwrap(rows.first?["id"] as? String)])
+        try await expectDOM("document.querySelector('.desktop-reader')?.textContent.includes('Follow up from Kolmogor')", "The official writer consumed the submission in the same thread")
         try await call("thread/section/move", ["threadId": first, "sectionId": NSNull()])
         try await expectOrder([pin, group, second, "recent", first])
         _ = try await view.evaluateJavaScript("\(header("recent")).click()")

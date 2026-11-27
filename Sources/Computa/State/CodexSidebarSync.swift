@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Observation
 
 /// One live source per app, with independent conversation selection per window.
@@ -9,11 +9,6 @@ final class CodexSidebarSync {
         let request: UUID
         let id: String
         var title: String
-        var updatedAt: Double
-        var messages: [Client.Message] = []
-        var older: String?
-        var loading = true
-        var error: String?
     }
 
     private(set) var catalog: Client.Catalog?
@@ -21,6 +16,8 @@ final class CodexSidebarSync {
     @ObservationIgnored private let makeClient: @MainActor () -> Client
     private var disclosureOverrides: [String: Bool] = [:]
     @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private let wake: @MainActor (UUID) async throws -> Void
+    @ObservationIgnored private var submissions = Set<UUID>()
     @ObservationIgnored private let interval: Duration
     @ObservationIgnored private var windows: [UUID: WorkspaceTabs] = [:]
     @ObservationIgnored private var loop: Task<Void, Never>?
@@ -34,8 +31,11 @@ final class CodexSidebarSync {
         return .init(preferences: preferences) { Client(executable: executable, home: home, codexHome: home.appendingPathComponent(".codex")) }
     }
 
-    init(interval: Duration = .seconds(5), preferences: UserDefaults = .standard, makeClient: @escaping @MainActor () -> Client) {
+    init(interval: Duration = .seconds(5), preferences: UserDefaults = .standard,
+         wake: @escaping @MainActor (UUID) async throws -> Void = CodexSidebarSync.wakeDesktop,
+         makeClient: @escaping @MainActor () -> Client) {
         self.preferences = preferences
+        self.wake = wake
         self.makeClient = makeClient
         self.interval = interval
     }
@@ -139,8 +139,7 @@ final class CodexSidebarSync {
         for window in windows.values {
             guard let reader = window.desktopReader else { continue }
             guard !accountChanged, let row = chat(reader.id) else { window.desktopReader = nil; continue }
-            if row.updatedAt != reader.updatedAt && window.showsDesktopChats { open(row.id, in: window) }
-            else if row.title != reader.title { window.desktopReader?.title = row.title }
+            if row.title != reader.title { window.desktopReader?.title = row.title }
         }
     }
 
@@ -153,33 +152,53 @@ final class CodexSidebarSync {
 
     func open(_ id: String, in window: WorkspaceTabs) {
         guard !window.isClosed, window.showsDesktopChats, let row = chat(id) else { return }
-        window.desktopReader = .init(request: UUID(), id: row.id, title: row.title, updatedAt: row.updatedAt)
-        load(in: window)
-    }
-
-    func older(in window: WorkspaceTabs) {
-        guard window.showsDesktopChats, let reader = window.desktopReader, !reader.loading,
-              reader.older != nil || reader.error != nil else { return }
-        window.desktopReader?.loading = true
-        window.desktopReader?.error = nil
-        load(in: window)
-    }
-
-    private func load(in window: WorkspaceTabs) {
-        guard let client, let account = catalog?.account, let reader = window.desktopReader else { return }
-        let token = epoch
-        Task {
-            do {
-                let page = try await client.messages(for: reader.id, account: account, before: reader.older)
-                guard token == epoch, !window.isClosed, window.desktopReader?.request == reader.request else { return }
-                var seen = Set(reader.messages.map(\.id))
-                window.desktopReader?.messages.insert(contentsOf: page.list.filter { seen.insert($0.id).inserted }, at: 0)
-                window.desktopReader?.older = page.older
-            } catch {
-                guard token == epoch, !window.isClosed, window.desktopReader?.request == reader.request else { return }
-                window.desktopReader?.error = error.localizedDescription
-            }
-            window.desktopReader?.loading = false
+        if window.desktopReader?.id != id {
+            window.desktopReader = .init(request: UUID(), id: row.id, title: row.title)
         }
+    }
+
+    static func wakeURL(_ id: UUID) -> URL {
+        URL(string: "codex://threads/wake/" + id.uuidString.lowercased())!
+    }
+
+    private static func wakeDesktop(_ id: UUID) async throws {
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Client.bundleID) else { throw Client.Failure.noChat }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = false
+        _ = try await NSWorkspace.shared.open([wakeURL(id)], withApplicationAt: app, configuration: config)
+    }
+
+    func conversation(_ action: String, body: [String: Any], in window: WorkspaceTabs) async throws -> Any {
+        guard !window.isClosed, window.showsDesktopChats, let client, let owner = catalog?.account,
+              let reader = window.desktopReader, body["thread"] as? String == reader.id,
+              let token = body["selection"] as? String, UUID(uuidString: token) == reader.request,
+              chat(reader.id) != nil, let thread = UUID(uuidString: reader.id) else { throw Client.Failure.noChat }
+        let response: Any
+        switch action {
+        case "page":
+            let bytes = try await client.conversationPage(reader.id, owner: owner, cursor: body["cursor"] as? String, ascending: body["direction"] as? String == "asc")
+            response = try JSONSerialization.jsonObject(with: bytes)
+        case "item":
+            guard let turn = body["turn"] as? String, let item = body["item"] as? String else { throw Client.Failure.noChat }
+            let bytes = try await client.itemDetails(reader.id, owner: owner, turn: turn, item: item)
+            response = try JSONSerialization.jsonObject(with: bytes)
+        case "queue":
+            response = try await client.queuedMessages(reader.id, owner: owner)
+        case "wake":
+            if !(try await client.queuedMessages(reader.id, owner: owner)).isEmpty { try await wake(thread) }
+            response = true
+        case "send":
+            guard let text = body["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  text.utf16.count <= 200_000, let raw = body["submission"] as? String, let submission = UUID(uuidString: raw),
+                  submissions.insert(submission).inserted else { throw Client.Failure.inconsistent }
+            do { try await client.enqueue(text, submission: submission, in: reader.id, owner: owner) }
+            catch Client.Failure.deliveryUnconfirmed { return "unconfirmed" }
+            do { try await wake(thread); response = "queued" }
+            catch { response = "queuedWakeFailed" }
+        default: throw Client.Failure.inconsistent
+        }
+        guard !window.isClosed, window.showsDesktopChats, catalog?.account == owner,
+              window.desktopReader?.request == reader.request else { throw Client.Failure.noChat }
+        return response
     }
 }

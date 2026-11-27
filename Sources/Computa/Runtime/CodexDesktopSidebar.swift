@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// A read-only client of the app-server shipped inside the official desktop application.
+/// A client of the app-server shipped inside the official desktop application.
 actor CodexDesktopSidebarClient {
     struct Chat: Codable, Equatable, Sendable, Identifiable {
         let id: String
@@ -25,21 +25,13 @@ actor CodexDesktopSidebarClient {
         let email: String?
         let workspaceName: String?
     }
-    struct Message: Codable, Equatable, Sendable {
-        let id: String
-        let role: String
-        let text: String
-    }
-    struct Messages: Sendable {
-        let list: [Message]
-        let older: String?
-    }
     enum Failure: LocalizedError {
-        case signedOut, inconsistent, noChat
+        case signedOut, inconsistent, noChat, deliveryUnconfirmed
         var errorDescription: String? {
             switch self {
             case .signedOut: "Sign in to the Codex desktop app to see your chats."
             case .inconsistent: "The Codex sidebar changed while it was loading."
+            case .deliveryUnconfirmed: "Message delivery is unconfirmed. Check the conversation in Codex."
             case .noChat: "This chat is no longer in the current Codex account."
             }
         }
@@ -219,36 +211,58 @@ actor CodexDesktopSidebarClient {
         return Catalog(account: owner, sections: layout.arrange(sections))
     }
 
-    func messages(for id: String, account owner: Account, before cursor: String?) async throws -> Messages {
-        if currentAuthFile() != authFile { await refreshAccountSession() }
-        guard UUID(uuidString: id) != nil, try await account() == owner else { throw Failure.noChat }
-        let allowed = try await all(Row.self, "thread/list", Self.visible.merging(["includedThreadIds": [id]]) { _, new in new })
-        guard allowed.contains(where: { $0.id == id }) else { throw Failure.noChat }
-        struct Item: Decodable {
-            struct Content: Decodable { let type: String; let text: String? }
-            let type: String; let id: String; let text: String?; let content: [Content]?
-            enum CodingKeys: CodingKey { case type, id, text, content }
-            init(from decoder: Decoder) throws {
-                let c = try decoder.container(keyedBy: CodingKeys.self)
-                type = try c.decode(String.self, forKey: .type)
-                id = try c.decode(String.self, forKey: .id)
-                text = type == "agentMessage" ? try c.decode(String.self, forKey: .text) : nil
-                content = type == "userMessage" ? try c.decode([Content].self, forKey: .content) : nil
-            }
-        }
-        struct Entry: Decodable { let item: Item }
-        var params: [String: any Sendable] = ["threadId": id, "limit": 30, "sortDirection": "desc",
+    private func verifyVisible(_ id: String, owner: Account) async throws {
+        guard UUID(uuidString: id) != nil, currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
+        let rows = try await all(Row.self, "thread/list", Self.visible.merging(["includedThreadIds": [id]]) { _, new in new })
+        guard rows.contains(where: { $0.id == id }), currentAuthFile() == authFile else { throw Failure.noChat }
+    }
+
+    func conversationPage(_ id: String, owner: Account, cursor: String?, ascending: Bool) async throws -> Data {
+        try await verifyVisible(id, owner: owner)
+        var params: [String: any Sendable] = ["threadId": id, "sortDirection": ascending ? "asc" : "desc", "limit": 32,
             "deferOutput": ["commandExecution": true, "mcpToolCall": true]]
         if let cursor { params["cursor"] = cursor }
-        let page = try await read(Page<Entry>.self, "thread/items/list", params)
-        guard page.nextCursor == nil || (page.nextCursor != cursor && page.nextCursor != "") else { throw Failure.inconsistent }
-        let messages: [Message] = page.data.reversed().compactMap { entry in
-            let item = entry.item
-            if let text = item.text { return .init(id: item.id, role: "assistant", text: text) }
-            if let parts = item.content { return .init(id: item.id, role: "user", text: parts.map { $0.text ?? "[\($0.type)]" }.joined(separator: "\n")) }
-            return nil
+        let data = try await session().request("thread/items/list", params: JSONSerialization.data(withJSONObject: params), timeout: .seconds(30))
+        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
+        return data
+    }
+
+    func itemDetails(_ id: String, owner: Account, turn: String, item: String) async throws -> Data {
+        try await verifyVisible(id, owner: owner)
+        let params: [String: Any] = ["threadId": id, "turnId": turn, "itemIds": [item]]
+        let data = try await session().request("thread/items/read", params: JSONSerialization.data(withJSONObject: params), timeout: .seconds(30))
+        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
+        return data
+    }
+
+    func queuedMessages(_ id: String, owner: Account) async throws -> [String] {
+        struct Entry: Decodable { let clientUserMessageId: String }
+        try await verifyVisible(id, owner: owner)
+        let entries = try await all(Entry.self, "thread/queue/list", ["threadId": id])
+        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
+        return entries.map(\.clientUserMessageId)
+    }
+
+    // Queueing is durable. Only the official desktop app wakes and runs the thread,
+    // using its existing writer, model, tools and approval policy.
+    func enqueue(_ text: String, submission: UUID, in id: String, owner: Account) async throws {
+        try await verifyVisible(id, owner: owner)
+        let params: [String: Any] = ["threadId": id, "clientUserMessageId": submission.uuidString.lowercased(),
+            "input": [["type": "text", "text": text]]]
+        let bytes = try JSONSerialization.data(withJSONObject: params)
+        let conn = try await session()
+        guard currentAuthFile() == authFile else { throw Failure.noChat }
+        struct Acknowledgment: Decodable {
+            struct Submission: Decodable { let clientUserMessageId: String }
+            let queuedSubmission: Submission
         }
-        guard try await account() == owner, currentAuthFile() == authFile else { throw Failure.noChat }
-        return Messages(list: messages, older: page.nextCursor)
+        do {
+            let data = try await conn.request("thread/queue/add", params: bytes, timeout: .seconds(15))
+            let ack = try JSONDecoder().decode(Acknowledgment.self, from: data)
+            guard UUID(uuidString: ack.queuedSubmission.clientUserMessageId) == submission else { throw Failure.inconsistent }
+        } catch {
+            // Never replay an ambiguous write, including after a response timeout.
+            throw Failure.deliveryUnconfirmed
+        }
     }
 }

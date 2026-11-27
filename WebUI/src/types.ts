@@ -184,8 +184,7 @@ export interface DesktopSection {
   id: string; name: string; chats: { id: string; title: string; updatedAt: number }[];
 }
 export interface DesktopReader {
-  id: string; title: string; loading: boolean; older?: string; error?: string;
-  messages: {id: string; role: string; text: string}[];
+  id: string; title: string; request: string;
 }
 
 export interface AppSnapshot {
@@ -255,7 +254,6 @@ export type NativeAction =
   | { action: 'showDesktopChats'; enabled: boolean }
   | { action: 'setDesktopSectionCollapsed'; id: string; collapsed: boolean }
   | { action: 'openDesktopChat'; id: string }
-  | { action: 'earlierDesktopMessages' }
   | { action: 'selectTask'; id: string }
   | { action: 'acknowledgeTaskCompletion'; taskID: string; completionID: string }
   | { action: 'selectEntry'; id: string }
@@ -315,6 +313,7 @@ declare global {
   interface Window {
     webkit?: {
       messageHandlers?: {
+        codexConversation?: { postMessage(message: Record<string, string>): Promise<unknown> };
         localCodex?: {
           postMessage(message: NativeAction): void;
         };

@@ -363,6 +363,7 @@ private struct CodexWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
         controller.add(context.coordinator, name: WebBridge.handlerName)
+        controller.addScriptMessageHandler(context.coordinator, contentWorld: .page, name: WebBridge.conversationHandler)
         if WebBridge.diagnosticsEnabled {
             controller.addUserScript(WKUserScript(
                 source: WebBridge.diagnosticBootstrapScript,
@@ -425,6 +426,7 @@ private struct CodexWebView: NSViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(
             forName: WebBridge.handlerName
         )
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: WebBridge.conversationHandler, contentWorld: .page)
         webView.navigationDelegate = nil
     }
 

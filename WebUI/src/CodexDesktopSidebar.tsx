@@ -2,7 +2,6 @@ import { useLayoutEffect, useMemo, useRef } from 'octane';
 import { Button } from '@octanejs/shadcn/Button';
 import { Icon } from './Icon';
 import { AgentStatusIcon } from './AgentStatusIcon';
-import { ResponseMarkdown } from './ResponseMarkdown';
 import { sidebarRowHeight, useSidebarWindow } from './sidebarWindow';
 import type { AppSnapshot, DesktopSection, NativeAction } from './types';
 
@@ -66,20 +65,4 @@ export function DesktopChatScope({selected, collapsed, choose}: {selected: boole
       aria-label={desktop ? 'Codex desktop chats' : 'Kolmogor agents'} title={desktop ? 'Codex desktop chats' : 'Kolmogor agents'}
       onClick={() => choose(desktop)}>{collapsed ? <Icon name={desktop ? 'terminal' : 'computer'} size={15} /> : desktop ? 'Codex' : 'Agents'}</Button>)}
   </div>;
-}
-
-export function DesktopConversation({snapshot, post}: {snapshot: AppSnapshot; post: Action}) {
-  const reader = snapshot.desktopReader;
-  return <>
-    <header className="desktop-reader-title"><strong>{reader?.title ?? 'Codex chats'}</strong></header>
-    {reader ? <section className="desktop-reader" aria-label="Codex conversation">
-      {(reader.older || reader.error) && <Button variant="outline" disabled={reader.loading}
-        onClick={() => post({action:'earlierDesktopMessages'})}>{reader.error ? 'Retry' : 'Earlier messages'}</Button>}
-      {reader.loading && <p role="status">Loading messages…</p>}
-      {reader.error && <p role="alert">{reader.error}</p>}
-      {reader.messages.map(message => <article key={message.id}><strong>{message.role === 'user' ? 'You' : 'Codex'}</strong>
-        {message.role === 'assistant' ? <ResponseMarkdown text={message.text} /> : <p className="desktop-reader-user">{message.text}</p>}</article>)}
-      {!reader.loading && !reader.error && !reader.messages.length && <p>{reader.older ? 'No chat messages on this page.' : 'No chat messages yet.'}</p>}
-    </section> : <div className="no-task-view"><p>Select a Codex chat.</p></div>}
-  </>;
 }
