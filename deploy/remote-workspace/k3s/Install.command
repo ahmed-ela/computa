@@ -23,3 +23,4 @@ PLIST
 chown root:wheel "$plist"; chmod 0644 "$plist"; plutil -lint "$plist"
 launchctl bootstrap system "$plist"
 launchctl print "system/$label" | head -12
+printf 'Guest boot UUID: %s\n' "$(/usr/sbin/sysctl -n kern.bootsessionuuid)"

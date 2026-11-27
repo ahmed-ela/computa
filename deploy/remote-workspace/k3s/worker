@@ -3,7 +3,8 @@
 set -eu
 dir=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 token=$(cat "$dir/token")
-rpc() { /usr/bin/ssh -F "$dir/ssh_config" gateway; }
+# OpenSSH runs the fixed ProxyCommand through SHELL. The service account has a non-login shell.
+rpc() { SHELL=/bin/sh /usr/bin/ssh -T -F "$dir/ssh_config" gateway; }
 field() { printf '%s' "$reply" | /usr/bin/plutil -extract "$1" raw -o - -; }
 while :; do
     reply=$(printf '{"action":"claim","token":"%s"}' "$token" | rpc) || { sleep 5; continue; }

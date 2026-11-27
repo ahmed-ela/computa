@@ -44,7 +44,11 @@ In the guest, run `/bin/sh "/Volumes/My Shared Files/Enrollment/Install.command"
 
 ## Test the complete route
 
-Run `sudo ./check-job` on U01. It submits a new job, waits for the guest's response, and verifies the job ID, challenge, architecture, and boot UUID. To bind the check to this particular boot, pass the output of `sysctl -n kern.bootsessionuuid` from the guest as the sole argument. Run it again after restarting the guest without its enrollment share to verify unattended startup.
+Run `sudo ./check-job` on U01. It submits a new job, waits for the guest's response, and verifies the job ID, challenge, architecture, and boot UUID. To bind the check to this particular boot, pass the output of `sysctl -n kern.bootsessionuuid` from the guest as the sole argument. The installer also prints this UUID when it registers the launch daemon. Run it again after restarting the guest without its enrollment share to verify unattended startup.
+
+On macOS, OpenSSH starts its configured proxy through the process’s `SHELL`. The `nobody` service account uses `/usr/bin/false`, which can leave a healthy-looking daemon retrying while jobs stay unclaimed. The worker sets `SHELL=/bin/sh` only for SSH to run the fixed proxy command. The account retains its non-login shell and both SSH key restrictions remain in force.
+
+On November 27, 2026, U01 received three verified results from an arm64 macOS 26.3.1 guest (build 25D2128). The initial result matched the boot UUID printed by the guest installer. A job queued while the guest was shut down completed on a new boot with the enrollment share removed. A third job submitted by the node’s `check-job` then matched that new UUID while the guest remained at its login screen.
 
 ## First-boot keyboard check
 
