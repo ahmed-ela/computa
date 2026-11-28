@@ -20,8 +20,9 @@ class Responses(BaseHTTPRequestHandler):
             return
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         messages = request.get("input", [])
+        # Codex's rich-text composer may append a newline to a single-line message.
         user_text = [
-            part.get("text", "")
+            part.get("text", "").removesuffix("\n")
             for item in messages if item.get("role") == "user"
             for part in item.get("content", []) if isinstance(part, dict)
         ]
