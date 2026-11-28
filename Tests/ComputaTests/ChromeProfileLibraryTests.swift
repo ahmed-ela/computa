@@ -38,6 +38,37 @@ final class ChromeProfileLibraryTests: XCTestCase {
         XCTAssertEqual(try store.matches("Profile import test visit").first?.url, url)
     }
 
+    func testLastUsedProfileIsPreferredOnlyIfDiscovered() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for name in ["Default", "Profile 1"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(name), withIntermediateDirectories: true)
+        }
+        let state = root.appendingPathComponent("Local State")
+        for (lastUsed, expected) in [("Profile 1", "Profile 1"), ("Profile 9", "Default"), ("../Default", "Default")] {
+            try JSONSerialization.data(withJSONObject: ["profile": ["last_used": lastUsed]]).write(to: state)
+            XCTAssertEqual(try ChromeProfileLibrary.profiles(in: root).map { $0.folder.lastPathComponent }.first, expected)
+        }
+        try Data("invalid".utf8).write(to: state)
+        XCTAssertEqual(try ChromeProfileLibrary.profiles(in: root).first?.name, "Default")
+    }
+
+    func testLockedDestinationIsAnImportErrorRatherThanPendingChromeHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let source = root.appendingPathComponent("Default")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let library = ChromeProfileLibrary(database: root.appendingPathComponent("places.sqlite"))
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(library.database.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "BEGIN EXCLUSIVE", nil, nil, nil), SQLITE_OK)
+        let profile = try XCTUnwrap(ChromeProfileLibrary.profiles(in: root).first)
+        XCTAssertThrowsError(try library.importPlaces(from: profile, categories: .init())) {
+            XCTAssertEqual($0 as? ChromeProfileLibrary.Failure, .database)
+        }
+    }
+
     func testSelectedProfileImportsHistorySearchTermsAndNestedBookmarksAcrossReopen() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -77,6 +108,15 @@ final class ChromeProfileLibraryTests: XCTestCase {
         for _ in 0..<2 {
             XCTAssertEqual(try store.importPlaces(from: selected, categories: .init()), .init(history: 1, bookmarks: 2))
         }
+        let accountMarks = folder.appendingPathComponent("AccountBookmarks")
+        // The same placement can exist in both stores. Distinct folder placements must survive.
+        try FileManager.default.copyItem(at: bookmarks, to: accountMarks)
+        XCTAssertEqual(try store.importPlaces(from: selected, categories: .init()), .init(history: 1, bookmarks: 2))
+        let accountJSON = try String(contentsOf: bookmarks, encoding: .utf8)
+            .replacingOccurrences(of: "Saved research", with: "Account folder")
+        try accountJSON.write(to: accountMarks, atomically: true, encoding: .utf8)
+        XCTAssertEqual(try store.importPlaces(from: selected, categories: .init()), .init(history: 1, bookmarks: 4))
+        XCTAssertEqual(try store.matches("Account folder").count, 2)
         let reopened = ChromeProfileLibrary(database: store.database)
         XCTAssertEqual(try reopened.matches("Favorite").map(\.title),["Favorite Article","Second Favorite"])
         XCTAssertEqual(try reopened.matches("test search").first?.bookmark, true)
@@ -87,7 +127,9 @@ final class ChromeProfileLibraryTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: historyFile), sourceBytes)
         try "malformed".write(to: bookmarks, atomically: true, encoding: .utf8)
         let other = ChromeProfileLibrary(database: root.appendingPathComponent("other/places.sqlite"))
+        XCTAssertEqual(try other.importPlaces(from: profiles[0], categories: .init()), .init())
         XCTAssertThrowsError(try other.importPlaces(from: selected, categories: .init()))
         XCTAssertEqual(try reopened.matches("Favorite").count, 2)
+        XCTAssertTrue(try other.matches("Visited Page").isEmpty, "A malformed bookmark file must roll back the import")
     }
 }

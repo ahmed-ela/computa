@@ -1,5 +1,6 @@
 import AppKit
 import Security
+import SQLite3
 import WebKit
 import XCTest
 @testable import Computa
@@ -57,6 +58,42 @@ final class BrowserSavedLoginTests: XCTestCase {
             XCTAssertEqual($0.localizedDescription, BrowserSavedLogins.Failure.file.localizedDescription)
         }
         XCTAssertEqual(try store.accounts(for: site), [])
+    }
+
+    @MainActor
+    func testFinishingWithHistoryPendingKeepsSelectedBookmarkAndExportedLogin() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let folder = root.appendingPathComponent("Default")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var locked: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(folder.appendingPathComponent("History").path, &locked), SQLITE_OK)
+        defer { sqlite3_close(locked) }
+        XCTAssertEqual(sqlite3_exec(locked, "BEGIN EXCLUSIVE", nil, nil, nil), SQLITE_OK)
+        let bookmark = #"{"roots":{"bar":{"type":"url","name":"Imported bookmark","url":"https://bookmark.example.invalid/"}}}"#
+        try Data(bookmark.utf8).write(to: folder.appendingPathComponent("AccountBookmarks"))
+        let store = vault()
+        let csv = try export("url,username,password\n\(site)/login,demo,fixture-only")
+        let library = ChromeProfileLibrary(database: root.appendingPathComponent("destination/places.sqlite"))
+        let session = EmbeddedBrowserSession(persistent: false)
+        defer { session.shutdown() }
+        let state = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: session)
+        state.presentedSheet = .settings
+        var offered = 0
+        await ChromeProfileImport.run(in: NSWindow(), state: state, root: root, library: library, vault: store,
+                                      chooseProfile: { _, profiles in .init(profile: profiles[0], categories: .init(passwords: true)) },
+                                      chooseCSV: { _ in csv }, retryHistory: { _, summary in
+            offered += 1
+            XCTAssertTrue(summary.contains("Imported or updated 1 bookmark."))
+            XCTAssertTrue(summary.contains("History is still pending."))
+            XCTAssertTrue(summary.contains("Imported 1 saved login."))
+            return false
+        })
+        XCTAssertEqual(offered, 1)
+        XCTAssertFalse(state.importingChromeProfile)
+        XCTAssertEqual(try library.matches("Imported bookmark").count, 1)
+        XCTAssertEqual(try store.accounts(for: site), ["demo"])
+        XCTAssertTrue(state.chromeProfileImportStatus?.contains("History is still pending.") == true)
     }
 
     @MainActor

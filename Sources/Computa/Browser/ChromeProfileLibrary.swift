@@ -24,19 +24,23 @@ struct ChromeProfileLibrary: Sendable {
     struct Counts: Equatable {
         var history = 0
         var bookmarks = 0
+        var historyBusy = false
         func summary(for categories: Categories) -> String {
             var parts: [String] = []
-            if categories.history { parts.append("\(history) history " + (history == 1 ? "entry" : "entries")) }
+            if categories.history && !historyBusy { parts.append("\(history) history " + (history == 1 ? "entry" : "entries")) }
             if categories.bookmarks { parts.append("\(bookmarks) " + (bookmarks == 1 ? "bookmark" : "bookmarks")) }
-            return "Imported or updated " + parts.joined(separator: " and ") + "."
+            var summary = parts.isEmpty ? [] : ["Imported or updated " + parts.joined(separator: " and ") + "."]
+            if categories.history && historyBusy { summary.append(Failure.historyBusy.localizedDescription) }
+            return summary.joined(separator: " ")
         }
     }
     enum Failure: LocalizedError {
-        case read, database, profile
+        case read, database, profile, historyBusy
         var errorDescription: String? {
             switch self {
             case .read: "Couldn’t read the selected Chrome data. Check file access and try again."
-            case .database: "Couldn’t finish importing browsing data. Close Chrome if it is busy and retry."
+            case .database: "Couldn’t read or save the browsing data. Check available disk space and file access."
+            case .historyBusy: "History is still pending. Switch to Google Chrome, quit it with ⌘Q, then retry history in Kolmogor."
             case .profile: "Choose an available Chrome profile."
             }
         }
@@ -55,7 +59,7 @@ struct ChromeProfileLibrary: Sendable {
         let fm = FileManager.default
         if !fm.fileExists(atPath: root.path) { return [] }
         let folders = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles])
-        return folders.compactMap { folder in
+        let profiles: [Profile] = folders.compactMap { folder in
             let id = folder.lastPathComponent
             guard id == "Default" || (id.hasPrefix("Profile ") && Int(id.dropFirst(8)) != nil),
                   let attrs = try? folder.resourceValues(forKeys: [.isDirectoryKey,.isSymbolicLinkKey]),
@@ -68,6 +72,14 @@ struct ChromeProfileLibrary: Sendable {
             }
             return Profile(folder: folder, name: label)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        // Treat Chrome's preference as a hint among verified directories, never as a path.
+        guard let file = try? source("Local State", in: root),
+              let data = try? Data(contentsOf: file),
+              let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let preferences = state["profile"] as? [String: Any],
+              let lastUsed = preferences["last_used"] as? String,
+              let preferred = profiles.first(where: { $0.folder.lastPathComponent == lastUsed }) else { return profiles }
+        return [preferred] + profiles.filter { $0 != preferred }
     }
 
     private static func source(_ name: String, in folder: URL) throws -> URL? {
@@ -102,54 +114,84 @@ struct ChromeProfileLibrary: Sendable {
             )
             """)
         if categories.history, let file = try Self.source("History", in: profile.folder) {
-            let source = try Connection(file, readOnly: true)
-            let hasTerms = try source.statement("SELECT 1 FROM sqlite_master WHERE type='table' AND name='keyword_search_terms'")
-            let term = try hasTerms.next() ? "COALESCE((SELECT term FROM keyword_search_terms WHERE url_id=urls.id LIMIT 1),'')" : "''"
-            let rows = try source.statement("SELECT url,title,last_visit_time," + term + " FROM urls WHERE hidden=0")
-            let save = try target.statement("""
-                INSERT INTO places(url,title,visited,term) VALUES(?,?,?,?)
-                ON CONFLICT(url) DO UPDATE SET title=excluded.title,visited=excluded.visited,term=excluded.term
-                WHERE excluded.visited >= places.visited
-                """)
-            while try rows.next() {
-                guard let url = Self.safeURL(rows.text(0)) else { continue }
-                try save.bind(url.absoluteString, 1)
-                try save.bind(String(rows.text(1).prefix(2048)), 2)
-                guard sqlite3_bind_int64(save.handle, 3, sqlite3_column_int64(rows.handle, 2)) == SQLITE_OK else { throw Failure.database }
-                try save.bind(String(rows.text(3).prefix(2048)), 4)
-                try save.write()
-                counts.history += 1
+            try target.execute("SAVEPOINT chrome_history")
+            do {
+                counts.history = try importHistory(file, into: target)
+            } catch Failure.historyBusy {
+                try target.execute("ROLLBACK TO chrome_history")
+                counts.historyBusy = true
             }
+            try target.execute("RELEASE chrome_history")
         }
-        if categories.bookmarks, let file = try Self.source("Bookmarks", in: profile.folder) {
-            let json = try JSONSerialization.jsonObject(with: Data(contentsOf: file))
-            guard let object = json as? [String: Any], let roots = object["roots"] as? [String: Any] else { throw Failure.read }
-            let save = try target.statement("""
-                INSERT INTO places(url,title,bookmark) VALUES(?,'',?)
-                ON CONFLICT(url) DO UPDATE SET bookmark=excluded.bookmark
-                """)
-            let saveLocation = try target.statement("INSERT OR IGNORE INTO bookmark_locations(url,folder,title) VALUES(?,?,?)")
-            var nodes = roots.values.compactMap { ($0 as? [String: Any]).map { (node: $0, path: [String]()) } }
-            while let (node, path) = nodes.popLast() {
-                if node["type"] as? String == "folder" {
-                    let name = node["name"] as? String ?? ""
-                    let next = name.isEmpty ? path : path + [name]
-                    nodes.append(contentsOf: (node["children"] as? [[String: Any]] ?? []).map { (node: $0, path: next) })
-                } else if node["type"] as? String == "url", let raw = node["url"] as? String, let url = Self.safeURL(raw) {
-                    try save.bind(url.absoluteString, 1)
-                    let title = String((node["name"] as? String ?? "").prefix(2048))
-                    try save.bind(title, 2)
-                    try save.write()
-                    try saveLocation.bind(url.absoluteString, 1)
-                    try saveLocation.bind(path.joined(separator: " / "), 2)
-                    try saveLocation.bind(title, 3)
-                    try saveLocation.write()
-                    counts.bookmarks += 1
+        if categories.bookmarks {
+            var seen = Set<BookmarkLocation>()
+            for name in ["Bookmarks", "AccountBookmarks"] {
+                if let file = try Self.source(name, in: profile.folder) {
+                    try importBookmarks(file, into: target, seen: &seen)
                 }
             }
+            counts.bookmarks = seen.count
         }
         try target.execute("COMMIT")
         return counts
+    }
+
+    private func importHistory(_ file: URL, into target: Connection) throws -> Int {
+        let source = try Connection(file, readOnly: true, busyFailure: .historyBusy)
+        let hasTerms = try source.statement("SELECT 1 FROM sqlite_master WHERE type='table' AND name='keyword_search_terms'")
+        let term = try hasTerms.next() ? "COALESCE((SELECT term FROM keyword_search_terms WHERE url_id=urls.id LIMIT 1),'')" : "''"
+        let rows = try source.statement("SELECT url,title,last_visit_time," + term + " FROM urls WHERE hidden=0")
+        let save = try target.statement("""
+            INSERT INTO places(url,title,visited,term) VALUES(?,?,?,?)
+            ON CONFLICT(url) DO UPDATE SET title=excluded.title,visited=excluded.visited,term=excluded.term
+            WHERE excluded.visited >= places.visited
+            """)
+        var count = 0
+        while try rows.next() {
+            guard let url = Self.safeURL(rows.text(0)) else { continue }
+            try save.bind(url.absoluteString, 1)
+            try save.bind(String(rows.text(1).prefix(2048)), 2)
+            guard sqlite3_bind_int64(save.handle, 3, sqlite3_column_int64(rows.handle, 2)) == SQLITE_OK else { throw Failure.database }
+            try save.bind(String(rows.text(3).prefix(2048)), 4)
+            try save.write()
+            count += 1
+        }
+        return count
+    }
+
+    private struct BookmarkLocation: Hashable {
+        let url: String
+        let folder: String
+        let title: String
+    }
+
+    private func importBookmarks(_ file: URL, into target: Connection, seen: inout Set<BookmarkLocation>) throws {
+        let json = try JSONSerialization.jsonObject(with: Data(contentsOf: file))
+        guard let object = json as? [String: Any], let roots = object["roots"] as? [String: Any] else { throw Failure.read }
+        let save = try target.statement("""
+            INSERT INTO places(url,title,bookmark) VALUES(?,'',?)
+            ON CONFLICT(url) DO UPDATE SET bookmark=excluded.bookmark
+            """)
+        let saveLocation = try target.statement("INSERT OR IGNORE INTO bookmark_locations(url,folder,title) VALUES(?,?,?)")
+        var nodes = roots.values.compactMap { ($0 as? [String: Any]).map { (node: $0, path: [String]()) } }
+        while let (node, path) = nodes.popLast() {
+            if node["type"] as? String == "folder" {
+                let name = node["name"] as? String ?? ""
+                let next = name.isEmpty ? path : path + [name]
+                nodes.append(contentsOf: (node["children"] as? [[String: Any]] ?? []).map { (node: $0, path: next) })
+            } else if node["type"] as? String == "url", let raw = node["url"] as? String, let url = Self.safeURL(raw) {
+                let title = String((node["name"] as? String ?? "").prefix(2048))
+                let folder = path.joined(separator: " / ")
+                guard seen.insert(BookmarkLocation(url: url.absoluteString, folder: folder, title: title)).inserted else { continue }
+                try save.bind(url.absoluteString, 1)
+                try save.bind(title, 2)
+                try save.write()
+                try saveLocation.bind(url.absoluteString, 1)
+                try saveLocation.bind(folder, 2)
+                try saveLocation.bind(title, 3)
+                try saveLocation.write()
+            }
+        }
     }
 
     func matches(_ query: String) throws -> [Suggestion] {
@@ -186,23 +228,34 @@ struct ChromeProfileLibrary: Sendable {
 
     private final class Connection {
         let handle: OpaquePointer
-        init(_ url: URL, readOnly: Bool) throws {
+        let busyFailure: Failure
+        init(_ url: URL, readOnly: Bool, busyFailure: Failure = .database) throws {
+            self.busyFailure = busyFailure
             var raw: OpaquePointer?
             let mode = readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE
             // macOS hands out temporary roots under /var, a symlink to /private/var.
             guard let parent = realpath(url.deletingLastPathComponent().path, nil) else { throw Failure.database }
             defer { free(parent) }
             let path = String(cString: parent) + "/" + url.lastPathComponent
-            guard sqlite3_open_v2(path, &raw, mode | SQLITE_OPEN_NOFOLLOW, nil) == SQLITE_OK, let raw else {
-                sqlite3_close(raw); throw Failure.database
+            let result = sqlite3_open_v2(path, &raw, mode | SQLITE_OPEN_NOFOLLOW, nil)
+            guard result == SQLITE_OK, let raw else {
+                sqlite3_close(raw)
+                throw Self.failure(result, busy: busyFailure)
             }
             handle = raw
             sqlite3_busy_timeout(raw, 1500)
             try execute("PRAGMA trusted_schema=OFF")
         }
         deinit { sqlite3_close_v2(handle) }
+        static func failure(_ result: Int32, busy: Failure) -> Failure {
+            switch result & 0xff {
+            case SQLITE_BUSY, SQLITE_LOCKED: busy
+            default: .database
+            }
+        }
         func execute(_ sql: String) throws {
-            guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else { throw Failure.database }
+            let result = sqlite3_exec(handle, sql, nil, nil, nil)
+            guard result == SQLITE_OK else { throw Self.failure(result, busy: busyFailure) }
         }
         func statement(_ sql: String) throws -> Statement { try Statement(self, sql) }
     }
@@ -213,7 +266,8 @@ struct ChromeProfileLibrary: Sendable {
         init(_ db: Connection, _ sql: String) throws {
             connection = db
             var raw: OpaquePointer?
-            guard sqlite3_prepare_v2(db.handle, sql, -1, &raw, nil) == SQLITE_OK, let raw else { throw Failure.database }
+            let result = sqlite3_prepare_v2(db.handle, sql, -1, &raw, nil)
+            guard result == SQLITE_OK, let raw else { throw Connection.failure(result, busy: db.busyFailure) }
             handle = raw
         }
         deinit { sqlite3_finalize(handle) }
@@ -222,10 +276,11 @@ struct ChromeProfileLibrary: Sendable {
             guard sqlite3_bind_text(handle, index, value, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) == SQLITE_OK else { throw Failure.database }
         }
         func next() throws -> Bool {
-            switch sqlite3_step(handle) {
-            case SQLITE_ROW: true
-            case SQLITE_DONE: false
-            default: throw Failure.database
+            let result = sqlite3_step(handle)
+            switch result {
+            case SQLITE_ROW: return true
+            case SQLITE_DONE: return false
+            default: throw Connection.failure(result, busy: connection.busyFailure)
             }
         }
         func write() throws {
