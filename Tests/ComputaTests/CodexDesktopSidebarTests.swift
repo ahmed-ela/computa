@@ -147,7 +147,8 @@ final class CodexDesktopSidebarTests: XCTestCase {
         let diagnostics = try? await view.evaluateJavaScript("""
             ({rows:document.querySelectorAll('[data-codex-entry]').length,
               composer:!!document.querySelector('textarea[aria-label="Message Codex"]'),
-              error:document.querySelector('.desktop-reader [role=alert]')?.textContent ?? null})
+              model:document.querySelector('select[aria-label=\"Codex model\"]')?.value ?? null,
+              error:document.querySelector('.composer-zone [role=alert], .desktop-model-notice, .desktop-reader [role=alert]')?.textContent ?? null})
             """)
         XCTFail("Conversation check failed: " + predicate + " · " + String(describing: diagnostics))
         throw CocoaError(.coderInvalidValue)
@@ -178,6 +179,65 @@ final class CodexDesktopSidebarTests: XCTestCase {
         try await waitFor(try visible(ref.last), in: view)
         let mounted = try await view.evaluateJavaScript("document.querySelectorAll('[data-codex-entry]').length") as? Int
         XCTAssertLessThanOrEqual(try XCTUnwrap(mounted), 192)
+    }
+
+    func testSwitchModelOnOfficialDesktopAndReopenSameConversation() async throws {
+        guard let root = ProcessInfo.processInfo.environment["KOLMOGOR_MODEL_PICKER_FIXTURE"] else {
+            throw XCTSkip("Requires an isolated running Codex desktop and recording model endpoint.")
+        }
+        let folder = URL(fileURLWithPath: root, isDirectory: true)
+        let profile = folder.appendingPathComponent("profile")
+        let id = try String(contentsOf: folder.appendingPathComponent("thread"), encoding: .utf8)
+        let executable = try officialExecutable()
+        let name = "gpt-6.1-sol"
+        let picker = "document.querySelector('select[aria-label=\"Codex model\"]')"
+        func openChat() async throws -> WKWebView {
+            let sync = CodexSidebarSync(interval: .seconds(1), preferences: isolatedTestPreferences()) {
+                CodexDesktopSidebarClient(executable: executable, home: folder, codexHome: profile)
+            }
+            let view = try await chatWindow(sync)
+            let source = "document.querySelector('[aria-label=\"Codex desktop chats\"]')"
+            try await waitFor("!!" + source, in: view)
+            _ = try await view.evaluateJavaScript(source + ".click()")
+            let row = "document.querySelector('[data-desktop-chat=\"\(id)\"] button')"
+            try await waitFor("!!" + row, in: view)
+            _ = try await view.evaluateJavaScript(row + ".click()")
+            try await waitFor("!!" + picker, in: view)
+            return view
+        }
+        let view = try await openChat()
+        let transcript = "document.querySelector('.desktop-reader')?.textContent"
+        try await waitFor("\(transcript)?.includes('PROBE-REPLY-1')", in: view)
+        try await waitFor("\(picker).value === 'gpt-6.2-sol'", in: view)
+        _ = try await view.evaluateJavaScript("""
+          (() => { let field = \(picker); field.value = '\(name)'; field.dispatchEvent(new Event('change', {bubbles:true})); })()
+          """)
+        try await waitFor("\(picker).value === '\(name)' && !\(picker).disabled", in: view)
+        // Let the background observer read the live owner after a switch but before
+        // sending. Another app-server still sees the old model on disk here.
+        try await Task.sleep(for: .milliseconds(5300))
+        try await waitFor("\(picker).value === '\(name)' && \(picker).title === 'Current model in Codex'", in: view)
+        let marker = "SWITCH_" + UUID().uuidString
+        _ = try await view.evaluateJavaScript("""
+          (() => { let f = document.querySelector('textarea[aria-label="Message Codex"]'); f.value = '\(marker)';
+            f.dispatchEvent(new Event('input', {bubbles:true})); })()
+          """)
+        let send = "document.querySelector('[aria-label=\"Send to Codex\"]')"
+        try await waitFor("!\(send).disabled", in: view)
+        _ = try await view.evaluateJavaScript(send + ".click()")
+        try await waitFor("\(transcript)?.includes('\(marker)') && \(transcript)?.includes('PROBE-REPLY-AFTER-SWITCH')", in: view, seconds: 60)
+        // The recorder checks the model field on the wire and the prior reply in the request.
+        let receipt = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: folder.appendingPathComponent("switch-receipt")))
+        XCTAssertEqual(receipt["model"], name)
+        XCTAssertEqual(receipt["prompt"], marker)
+        XCTAssertEqual(receipt["hasOriginalReply"], "true")
+        view.window?.close()
+        try Data().write(to: folder.appendingPathComponent("reopen-desktop"))
+        let ready = folder.appendingPathComponent("desktop-reopened")
+        for _ in 0..<240 where !FileManager.default.fileExists(atPath: ready.path) { try await Task.sleep(for: .milliseconds(250)) }
+        XCTAssertEqual(try String(contentsOf: ready, encoding: .utf8), id)
+        let reopened = try await openChat()
+        try await waitFor("\(picker).value === '\(name)' && \(transcript)?.includes('\(marker)') && \(transcript)?.includes('PROBE-REPLY-1') && \(transcript)?.includes('PROBE-REPLY-AFTER-SWITCH')", in: reopened)
     }
 
     // The external fixture provides an isolated Codex desktop and the loopback model.
@@ -341,6 +401,18 @@ final class CodexDesktopSidebarTests: XCTestCase {
                 f.dispatchEvent(new Event('input', {bubbles: true}));
             })()
             """)
+        let picker = "document.querySelector('select[aria-label=\"Codex model\"]')"
+        try await expectDOM("\(picker)?.value === 'gpt-6.2-sol'", "The picker reads the official thread model")
+        _ = try await view.evaluateJavaScript("""
+            (() => { const select = \(picker); select.value = 'gpt-6.1-sol';
+                select.dispatchEvent(new Event('change', {bubbles:true})); })()
+            """)
+        try await expectDOM("document.querySelector('.desktop-model-notice')?.textContent.includes('Open in Codex')",
+                            "A private writer requires a handoff")
+        try await expectDOM("\(picker).value === 'gpt-6.2-sol' && document.querySelector('[aria-label=\"Send to Codex\"]').disabled && document.querySelector('textarea').value === 'Follow up from Kolmogor'",
+                            "An unconfirmed switch keeps the previous model and the unsent draft")
+        XCTAssertTrue(wakes.isEmpty)
+        _ = try await view.evaluateJavaScript("Array.from(document.querySelectorAll('.desktop-model-notice button')).find(b => b.textContent === 'Cancel').click()")
         try await expectDOM("!document.querySelector('[aria-label=\"Send to Codex\"]').disabled", "Composer is ready")
         _ = try await view.evaluateJavaScript("document.querySelector('[aria-label=\"Send to Codex\"]').click()")
         try await expectDOM("document.querySelector('.desktop-queue')?.textContent.includes('1 message queued')", "Codex acknowledged the queued reply")

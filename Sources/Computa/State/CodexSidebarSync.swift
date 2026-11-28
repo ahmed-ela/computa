@@ -17,6 +17,7 @@ final class CodexSidebarSync {
     private var disclosureOverrides: [String: Bool] = [:]
     @ObservationIgnored private let preferences: UserDefaults
     @ObservationIgnored private let wake: @MainActor (UUID) async throws -> Void
+    @ObservationIgnored private var modelWrites = Set<String>()
     @ObservationIgnored private var submissions = Set<UUID>()
     @ObservationIgnored private let interval: Duration
     @ObservationIgnored private var windows: [UUID: WorkspaceTabs] = [:]
@@ -182,6 +183,24 @@ final class CodexSidebarSync {
             guard let turn = body["turn"] as? String, let item = body["item"] as? String else { throw Client.Failure.noChat }
             let bytes = try await client.itemDetails(reader.id, owner: owner, turn: turn, item: item)
             response = try JSONSerialization.jsonObject(with: bytes)
+        case "models":
+            response = try JSONSerialization.jsonObject(with: JSONEncoder().encode(try await client.modelSelection(reader.id, owner: owner)))
+        case "currentModel":
+            response = try JSONSerialization.jsonObject(with: JSONEncoder().encode(try await client.currentModel(reader.id, owner: owner)))
+        case "changeModel":
+            guard let model = body["model"] as? String, !model.isEmpty, modelWrites.insert(reader.id).inserted else { throw Client.Failure.inconsistent }
+            defer { modelWrites.remove(reader.id) }
+            do {
+                try await client.selectModel(model, replacing: body["expected"] as? String, in: reader.id, owner: owner)
+                response = "changed"
+            } catch Client.Failure.ownerUnavailable { response = "openInCodex" }
+        case "openModelInCodex":
+            _ = try await client.currentModel(reader.id, owner: owner)
+            guard !window.isClosed, window.desktopReader?.request == reader.request,
+                  let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Client.bundleID) else { throw Client.Failure.noChat }
+            let url = URL(string: "codex://threads/" + thread.uuidString.lowercased())!
+            _ = try await NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+            response = true
         case "queue":
             response = try await client.queuedMessages(reader.id, owner: owner)
         case "wake":
@@ -191,7 +210,16 @@ final class CodexSidebarSync {
             guard let text = body["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   text.utf16.count <= 200_000, let raw = body["submission"] as? String, let submission = UUID(uuidString: raw),
                   submissions.insert(submission).inserted else { throw Client.Failure.inconsistent }
-            do { try await client.enqueue(text, submission: submission, in: reader.id, owner: owner) }
+            guard modelWrites.insert(reader.id).inserted else { throw Client.Failure.inconsistent }
+            defer { modelWrites.remove(reader.id) }
+            if let model = body["model"] as? String {
+                guard !model.isEmpty else { throw Client.Failure.unavailableModel }
+                do { try await client.sendWithModel(model, text: text, submission: submission, in: reader.id, owner: owner) }
+                catch Client.Failure.deliveryUnconfirmed { return "unconfirmed" }
+                response = "started"
+                break
+            }
+            do { try await client.enqueue(text, submission: submission, in: reader.id, owner: owner, expectedModel: body["expected"] as? String) }
             catch Client.Failure.deliveryUnconfirmed { return "unconfirmed" }
             do { try await wake(thread); response = "queued" }
             catch { response = "queuedWakeFailed" }
