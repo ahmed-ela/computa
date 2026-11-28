@@ -26,6 +26,7 @@ private struct ActiveTurnTiming {
 @MainActor
 @Observable
 final class AppState {
+    var conversationRuntime: (any AgentRuntimeClient)? { runtime }
     @ObservationIgnored private let runtime: (any AgentRuntimeClient)?
     @ObservationIgnored private var runtimeShutdown: Task<RuntimeShutdownReport, Never>?
     @ObservationIgnored private var runtimeEventConsumer: Task<Void, Never>?

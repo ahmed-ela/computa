@@ -1,7 +1,6 @@
-import AppKit
 import Foundation
 
-/// A client of the app-server shipped inside the official desktop application.
+/// Reads official Codex conversations through the installed CLI app-server.
 actor CodexDesktopSidebarClient {
     struct Chat: Codable, Equatable, Sendable, Identifiable {
         let id: String
@@ -31,10 +30,10 @@ actor CodexDesktopSidebarClient {
             switch self {
             case .modelChanged: "The model changed in Codex. Check the current selection before sending."
             case .unavailableModel: "This model is no longer available for this Codex chat."
-            case .ownerUnavailable: "Open this chat in Codex to change its model."
+            case .ownerUnavailable: "Another Codex client owns this conversation. Release it there and retry."
             case .busyThread: "Wait for the current Codex turn to finish before sending with a selected model."
             case .pendingQueue: "Wait for Codex to process the queued messages before switching models."
-            case .signedOut: "Sign in to the Codex desktop app to see your chats."
+            case .signedOut: "Sign in to Codex CLI to see your chats."
             case .inconsistent: "The Codex sidebar changed while it was loading."
             case .deliveryUnconfirmed: "Message delivery is unconfirmed. Check the conversation in Codex."
             case .noChat: "This chat is no longer in the current Codex account."
@@ -47,15 +46,9 @@ actor CodexDesktopSidebarClient {
     static let recentID = "recent"
     static let bundleID = "com.openai.codex"
 
-    @MainActor static func installedExecutable() -> URL? {
-        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return nil }
-        return ["Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "Contents/Resources/codex"]
-            .map { app.appendingPathComponent($0) }.first { FileManager.default.isExecutableFile(atPath: $0.path) }
-    }
-
-    private let executable: URL
+    private let candidates: [URL]
     private let home: URL
-    private let codexHome: URL
+    nonisolated let codexHome: URL
     private var connection: AgentCLIConnection?
     private var opening: Task<AgentCLIConnection, Error>?
     private var generation = UUID()
@@ -83,10 +76,14 @@ actor CodexDesktopSidebarClient {
         }
     }
 
-    init(executable: URL, home: URL, codexHome: URL) {
-        self.executable = executable
+    init(candidates: [URL], home: URL, codexHome: URL) {
+        self.candidates = candidates
         self.home = home
         self.codexHome = codexHome
+    }
+
+    init(executable: URL, home: URL, codexHome: URL) {
+        self.init(candidates: [executable], home: home, codexHome: codexHome)
     }
 
     private func session() async throws -> AgentCLIConnection {
@@ -97,11 +94,12 @@ actor CodexDesktopSidebarClient {
             guard generation == token else { throw CancellationError() }
             return result
         }
-        let task = Task { [executable, home, codexHome] () throws -> AgentCLIConnection in
+        let task = Task { [candidates, home, codexHome] () throws -> AgentCLIConnection in
             var environment = ProcessInfo.processInfo.environment.filter { ["PATH", "LANG", "TMPDIR", "USER", "LOGNAME"].contains($0.key) }
             environment["HOME"] = home.path
             environment["CODEX_HOME"] = codexHome.path
-            let conn = try AgentCLIConnection(executable: executable, arguments: InstalledCodexCLI.arguments,
+            let binary = try await InstalledCodexCLI.executable(candidates: candidates)
+            let conn = try AgentCLIConnection(executable: binary, arguments: InstalledCodexCLI.arguments,
                 directory: home, environment: environment, codexProtocol: true) { _ in }
             do {
                 _ = try await conn.request("initialize", params: Data(#"{"clientInfo":{"name":"kolmogor_sidebar","version":"1"},"capabilities":{"experimentalApi":true}}"#.utf8), timeout: .seconds(10))
@@ -171,6 +169,11 @@ actor CodexDesktopSidebarClient {
     func account() async throws -> Account { try await account(on: session()) }
 
     private func account(on conn: AgentCLIConnection) async throws -> Account {
+        let bytes = try await conn.request("account/read", params: Data("{}".utf8), timeout: .seconds(10))
+        return try Self.decodeAccount(bytes)
+    }
+
+    static func decodeAccount(_ bytes: Data) throws -> Account {
         struct Reply: Decodable {
             struct Identity: Decodable {
                 let type: String
@@ -182,7 +185,6 @@ actor CodexDesktopSidebarClient {
             let account: Identity?
             let workspaceRouting: Routing?
         }
-        let bytes = try await conn.request("account/read", params: Data("{}".utf8), timeout: .seconds(10))
         let reply = try JSONDecoder().decode(Reply.self, from: bytes)
         guard let identity = reply.account else { throw Failure.signedOut }
         return Account(userID: reply.userId, workspaceID: reply.workspaceRouting?.chatgptAccountId,
@@ -237,6 +239,7 @@ actor CodexDesktopSidebarClient {
     }
 
     struct ModelSelection: Codable, Sendable {
+        let provider: String
         let state: ModelState
         let choices: [ModelOption]
     }
@@ -280,7 +283,7 @@ actor CodexDesktopSidebarClient {
         var seen = Set<String>()
         let visible = options.filter { !$0.hidden && !$0.model.isEmpty && seen.insert($0.model).inserted }
         guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return ModelSelection(state: try await modelState(row, owner: owner), choices: visible)
+        return ModelSelection(provider: row.modelProvider, state: try await modelState(row, owner: owner), choices: visible)
     }
 
     // Codex locks a conversation to its active writer. Resuming an unowned
@@ -316,20 +319,10 @@ actor CodexDesktopSidebarClient {
         return row
     }
 
-    func selectModel(_ model: String, replacing expected: String?, in id: String, owner: Account) async throws {
-        let catalog = try await modelSelection(id, owner: owner)
-        guard catalog.choices.contains(where: { $0.model == model }) else { throw Failure.unavailableModel }
-        try await withIdleOwner(id, owner: owner, expected: expected) { conn in
-            _ = try await conn.request("thread/settings/update", params: JSONEncoder().encode(["threadId": id, "model": model]), timeout: .seconds(10))
-            guard try await liveModel(id, on: conn).model == model, currentAuthFile() == authFile,
-                  try await account(on: conn) == owner else { throw Failure.modelChanged }
-        }
-    }
-
     /// Bind the model to this specific turn at the owner. A later edit to the
     /// thread default cannot reroute this send while a durable queue drains.
-    func sendWithModel(_ model: String, text: String, submission: UUID, in id: String, owner: Account) async throws {
-        try await withIdleOwner(id, owner: owner, expected: model) { conn in
+    func sendWithModel(_ model: String, replacing expected: String?, text: String, submission: UUID, in id: String, owner: Account) async throws {
+        try await withIdleOwner(id, owner: owner, expected: expected) { conn in
             let params: [String: Any] = ["threadId": id, "model": model, "clientUserMessageId": submission.uuidString.lowercased(),
                                          "input": [["type": "text", "text": text]]]
             let request = try JSONSerialization.data(withJSONObject: params)
@@ -368,8 +361,8 @@ actor CodexDesktopSidebarClient {
         return entries.map(\.clientUserMessageId)
     }
 
-    // Queueing is durable. Only the official desktop app wakes and runs the thread,
-    // using its existing writer, model, tools and approval policy.
+    // An existing writer can consume an ordinary follow-up from the durable queue.
+    // Explicit model choices always go through turn/start.
     func enqueue(_ text: String, submission: UUID, in id: String, owner: Account, expectedModel: String? = nil) async throws {
         if let expectedModel {
             guard try await currentModel(id, owner: owner).current == expectedModel else { throw Failure.modelChanged }

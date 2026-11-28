@@ -37,7 +37,7 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         // Two processes cannot append independent wire sequences to the same test trace.
         native.protocolTracePath = configuration.protocolTracePath.map { $0 + ".installed-cli" }
         #endif
-        native.executable = .installedCLI
+        native.executable = .installedCLI()
         native.backend = .external
         native.modelProvider = "openai"
         native.model = ""
@@ -92,6 +92,11 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         }
         history.tasks.sort { $0.updatedAt > $1.updatedAt }
         return history
+    }
+
+    func continueCodexConversation(_ turn: SyncedCodexTurn, accessMode: AccessMode) async throws {
+        listen()
+        try await cli.continueCodexConversation(turn, accessMode: accessMode)
     }
 
     func readSavedChat(_ id: String) async throws -> AgentTask {

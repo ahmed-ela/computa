@@ -128,6 +128,13 @@ enum InstalledCodexCLI {
         "-c", "features.plugins=false", "-c", "features.apps=false",
     ]
 
+    static var userProfile: URL {
+        if let path = ProcessInfo.processInfo.environment["CODEX_HOME"], path.hasPrefix("/") {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+    }
+
     static var candidateURLs: [URL] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return [home.appendingPathComponent(".local/bin/codex").path,

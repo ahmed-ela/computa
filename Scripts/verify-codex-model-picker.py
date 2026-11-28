@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import plistlib
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -15,6 +16,8 @@ import tempfile
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--shared-owner", action="store_true", help="Keep the optional desktop owner attached while sending")
+parser.add_argument("--cli", type=Path, default=shutil.which("codex"))
 parser.add_argument("--app", type=Path, default=Path("/Applications/ChatGPT.app"))
 parser.add_argument("--temporary-root", type=Path)
 parser.add_argument("--scratch-path", type=Path)
@@ -24,7 +27,11 @@ app = options.app.resolve()
 info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
 assert info["CFBundleIdentifier"] == "com.openai.codex"
 main = app / "Contents/MacOS" / info["CFBundleExecutable"]
-cli = app / "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+if not options.cli:
+    parser.error("Install the standalone Codex CLI or supply --cli")
+cli = Path(options.cli).resolve()
+if any(part.endswith(".app") for part in cli.parts):
+    parser.error("The standalone check requires a CLI installed outside an app bundle")
 
 
 def until(action, seconds=60):
@@ -82,9 +89,10 @@ def seed(profile, env):
         ended = receive(lambda f: f.get("method") == "turn/completed" and f["params"]["turn"]["id"] == turn)
         assert ended["params"]["turn"]["status"] == "completed"
         rpc("thread/name/set", {"threadId": thread, "name": "Kolmogor model switch qualification"})
-        return thread
-    finally:
+        return thread, process
+    except BaseException:
         stop(process)
+        raise
 
 
 with tempfile.TemporaryDirectory(prefix="kolmogor-picker-", dir=options.temporary_root) as tmp:
@@ -99,6 +107,7 @@ with tempfile.TemporaryDirectory(prefix="kolmogor-picker-", dir=options.temporar
                    "CODEX_APP_SERVER_WS_URL": "ws+unix://localhost" + str(endpoint) + ":/rpc"}
     server = subprocess.Popen([sys.executable, repo / "Tests/Fixtures/CodexPickerResponses.py", root])
     tests = None
+    seed_writer = None
 
     def desktop_pids():
         lines = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True).splitlines()
@@ -123,6 +132,17 @@ with tempfile.TemporaryDirectory(prefix="kolmogor-picker-", dir=options.temporar
             until(lambda: not desktop_pids(), 10)
 
     def open_desktop():
+        if not (profile / ".codex-global-state.json").exists():
+            # Model switching is exercised on an existing chat. Give the disposable
+            # app a single synthetic project so first-run personalization is independent.
+            (profile / ".codex-global-state.json").write_text(json.dumps({
+                "electron-saved-workspace-roots": [str(profile)],
+                "active-workspace-roots": [str(profile)],
+                "electron-persisted-atom-state": {
+                    "electron:onboarding-projectless-completed": True,
+                    "last_completed_onboarding": int(time.time()),
+                },
+            }))
         launch = ["open", "-gn"]
         for key, value in desktop_env.items():
             launch += ["--env", f"{key}={value}"]
@@ -146,21 +166,9 @@ with tempfile.TemporaryDirectory(prefix="kolmogor-picker-", dir=options.temporar
         (profile / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-loopback-fixture"}))
         (profile / "config.toml").write_text('model="gpt-6.2-sol"\nopenai_base_url=' + json.dumps((root / "endpoint").read_text()) +
             '\nweb_search="disabled"\n[features]\nplugins=false\nhooks=false\napps=false\n[desktop]\nexternal-agent-import-sync-enabled=false\n')
-        # Model switching is exercised on an existing chat. Give the disposable
-        # app a single synthetic project so first-run personalization is independent.
-        (profile / ".codex-global-state.json").write_text(json.dumps({
-            "electron-saved-workspace-roots": [str(profile)],
-            "active-workspace-roots": [str(profile)],
-            "electron-persisted-atom-state": {
-                "electron:onboarding-projectless-completed": True,
-                "last_completed_onboarding": int(time.time()),
-            },
-        }))
-        thread = seed(profile, env)
+        thread, seed_writer = seed(profile, env)
         assert (root / "initial-model").read_text() == "gpt-6.2-sol"
         (root / "thread").write_text(thread)
-        subprocess.run([cli, "app-server", "daemon", "start"], env=env, check=True, stdout=subprocess.DEVNULL)
-        open_desktop()
         # First-run onboarding can consume the launch URL. Act only in this
         # synthetic account, then ask the same Electron instance to open the thread.
         def ready():
@@ -171,31 +179,57 @@ with tempfile.TemporaryDirectory(prefix="kolmogor-picker-", dir=options.temporar
                     visible("--press", "Continue")
                 return False
             return visible("--press", "Skip")
-        until(ready, 120)
-        if not visible("PROBE-REPLY-1"):
+        if options.shared_owner:
+            stop(seed_writer)
+            subprocess.run([cli, "app-server", "daemon", "start"], env=env, check=True, stdout=subprocess.DEVNULL)
             open_desktop()
-            until(lambda: visible("PROBE-REPLY-1"))
+            until(ready, 120)
+            if not visible("PROBE-REPLY-1"):
+                open_desktop()
+                until(lambda: visible("PROBE-REPLY-1"))
+        else:
+            assert not desktop_pids() and not endpoint.exists()
+            (root / "holding-writer").touch()
         command = ["swift", "test"]
         if options.scratch_path:
             command += ["--scratch-path", str(options.scratch_path)]
         command += ["--filter", "CodexDesktopSidebarTests.testSwitchModelOnOfficialDesktopAndReopenSameConversation"]
-        tests = subprocess.Popen(command, cwd=repo, env={**os.environ, "KOLMOGOR_MODEL_PICKER_FIXTURE": str(root)})
+        test_env = {**os.environ, "CODEX_HOME": str(profile), "KOLMOGOR_FIXTURE_CLI": str(cli), "KOLMOGOR_MODEL_PICKER_FIXTURE": str(root)}
+        tests = subprocess.Popen(command, cwd=repo, env=test_env)
         def waiting():
             if tests.poll() is not None:
                 raise RuntimeError("Kolmogor finished before verifying the switched reply")
             return (root / "reopen-desktop").exists()
+        if not options.shared_owner:
+            def waiting_for_contention_check():
+                if tests.poll() is not None:
+                    raise RuntimeError("Kolmogor failed the competing-writer check")
+                return (root / "release-writer").exists()
+            until(waiting_for_contention_check, 900)
+            assert not (root / "switch-receipt").exists(), "A busy writer received a duplicate submission"
+            stop(seed_writer)
+            (root / "writer-released").touch()
         until(waiting, 900)
         receipt = json.loads((root / "switch-receipt").read_text())
         messages = ["PROBE-REPLY-1", receipt["prompt"], "PROBE-REPLY-AFTER-SWITCH"]
-        until(lambda: visible(*messages))
-        close_desktop()
+        if options.shared_owner:
+            until(lambda: visible(*messages))
+            close_desktop()
+        else:
+            assert not desktop_pids() and not endpoint.exists(), "Sending unexpectedly launched a desktop or shared daemon"
+            desktop_env.pop("CODEX_APP_SERVER_WS_URL")
         open_desktop()
+        until(ready, 120)
+        if not visible(*messages):
+            open_desktop()
         until(lambda: visible(*messages))
         (root / "desktop-reopened").write_text(thread)
         if tests.wait(90):
             raise RuntimeError("Reopen check failed")
+        subprocess.run(command, cwd=repo, env={**test_env, "KOLMOGOR_FIXTURE_REOPEN_ONLY": "1"}, check=True, timeout=180)
     finally:
         stop(tests)
+        stop(seed_writer)
         try:
             close_desktop()
         finally:

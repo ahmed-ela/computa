@@ -8,7 +8,9 @@ import XCTest
 @MainActor
 final class CodexDesktopSidebarTests: XCTestCase {
     private func officialExecutable() throws -> URL {
-        guard let executable = CodexDesktopSidebarClient.installedExecutable() else {
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: CodexDesktopSidebarClient.bundleID),
+              let executable = ["Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "Contents/Resources/codex"]
+                .map({ app.appendingPathComponent($0) }).first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
             throw XCTSkip("The official Codex desktop application is required for this integration test.")
         }
         return executable
@@ -114,10 +116,18 @@ final class CodexDesktopSidebarTests: XCTestCase {
         XCTAssertEqual(Array(recent.chats.prefix(ref.recent.count)).map(\.id), ref.recent)
     }
 
-    private func chatWindow(_ sync: CodexSidebarSync) async throws -> WKWebView {
+    private func standaloneRuntime(executable: URL, folder: URL, profile: URL) -> CodexAppServerRuntime {
+        let runtime = CodexAppServerRuntime(configuration: .init(executable: .installedCLI(candidates: [executable]),
+            installedCLIProfile: profile, modelProvider: "openai", model: "", workspacePath: folder.path,
+            codexHomePath: folder.appendingPathComponent("kolmogor-runtime").path, baseInstructions: "", reasoningEffort: "medium"))
+        addTeardownBlock { _ = await runtime.shutdown() }
+        return runtime
+    }
+
+    private func chatWindow(_ sync: CodexSidebarSync, runtime: (any AgentRuntimeClient)? = nil) async throws -> WKWebView {
         let browser = EmbeddedBrowserSession(persistent: false)
         addTeardownBlock { @MainActor in browser.shutdown() }
-        let app = AppState(tasks: [], preferences: isolatedTestPreferences(), browserSession: browser, desktopSidebar: sync)
+        let app = AppState(tasks: [], runtime: runtime, preferences: isolatedTestPreferences(), browserSession: browser, desktopSidebar: sync)
         let host = NSHostingView(rootView: WebWorkspaceView(state: app))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 980, height: 720),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -188,14 +198,15 @@ final class CodexDesktopSidebarTests: XCTestCase {
         let folder = URL(fileURLWithPath: root, isDirectory: true)
         let profile = folder.appendingPathComponent("profile")
         let id = try String(contentsOf: folder.appendingPathComponent("thread"), encoding: .utf8)
-        let executable = try officialExecutable()
+        let executable = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["KOLMOGOR_FIXTURE_CLI"]))
+        XCTAssertEqual(ProcessInfo.processInfo.environment["CODEX_HOME"], profile.path)
+        let runtime = standaloneRuntime(executable: executable, folder: folder, profile: profile)
         let name = "gpt-6.1-sol"
         let picker = "document.querySelector('select[aria-label=\"Codex model\"]')"
         func openChat() async throws -> WKWebView {
-            let sync = CodexSidebarSync(interval: .seconds(1), preferences: isolatedTestPreferences()) {
-                CodexDesktopSidebarClient(executable: executable, home: folder, codexHome: profile)
-            }
-            let view = try await chatWindow(sync)
+            let sync = try XCTUnwrap(CodexSidebarSync.installed(preferences: isolatedTestPreferences(),
+                candidates: [executable], home: folder, profile: profile))
+            let view = try await chatWindow(sync, runtime: runtime)
             let source = "document.querySelector('[aria-label=\"Codex desktop chats\"]')"
             try await waitFor("!!" + source, in: view)
             _ = try await view.evaluateJavaScript(source + ".click()")
@@ -207,16 +218,21 @@ final class CodexDesktopSidebarTests: XCTestCase {
         }
         let view = try await openChat()
         let transcript = "document.querySelector('.desktop-reader')?.textContent"
+        if ProcessInfo.processInfo.environment["KOLMOGOR_FIXTURE_REOPEN_ONLY"] == "1" {
+            let receipt = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: folder.appendingPathComponent("switch-receipt")))
+            let marker = try XCTUnwrap(receipt["prompt"])
+            try await waitFor("\(picker).value === '\(name)' && \(transcript)?.includes('\(marker)') && \(transcript)?.includes('PROBE-REPLY-1') && \(transcript)?.includes('PROBE-REPLY-AFTER-SWITCH')", in: view)
+            return
+        }
         try await waitFor("\(transcript)?.includes('PROBE-REPLY-1')", in: view)
         try await waitFor("\(picker).value === 'gpt-6.2-sol'", in: view)
         _ = try await view.evaluateJavaScript("""
           (() => { let field = \(picker); field.value = '\(name)'; field.dispatchEvent(new Event('change', {bubbles:true})); })()
           """)
         try await waitFor("\(picker).value === '\(name)' && !\(picker).disabled", in: view)
-        // Let the background observer read the live owner after a switch but before
-        // sending. Another app-server still sees the old model on disk here.
+        // A catalog refresh before Send must preserve the pending next-turn choice.
         try await Task.sleep(for: .milliseconds(5300))
-        try await waitFor("\(picker).value === '\(name)' && \(picker).title === 'Current model in Codex'", in: view)
+        try await waitFor("\(picker).value === '\(name)' && \(picker).title === 'Model for the next message'", in: view)
         let marker = "SWITCH_" + UUID().uuidString
         _ = try await view.evaluateJavaScript("""
           (() => { let f = document.querySelector('textarea[aria-label="Message Codex"]'); f.value = '\(marker)';
@@ -225,6 +241,15 @@ final class CodexDesktopSidebarTests: XCTestCase {
         let send = "document.querySelector('[aria-label=\"Send to Codex\"]')"
         try await waitFor("!\(send).disabled", in: view)
         _ = try await view.evaluateJavaScript(send + ".click()")
+        if FileManager.default.fileExists(atPath: folder.appendingPathComponent("holding-writer").path) {
+            try await waitFor("Array.from(document.querySelectorAll('[role=alert]')).some(e => e.textContent.includes('owns this conversation')) && document.querySelector('textarea').value === '\(marker)'", in: view)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("switch-receipt").path))
+            try Data().write(to: folder.appendingPathComponent("release-writer"))
+            let released = folder.appendingPathComponent("writer-released")
+            for _ in 0..<100 where !FileManager.default.fileExists(atPath: released.path) { try await Task.sleep(for: .milliseconds(100)) }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: released.path))
+            _ = try await view.evaluateJavaScript(send + ".click()")
+        }
         try await waitFor("\(transcript)?.includes('\(marker)') && \(transcript)?.includes('PROBE-REPLY-AFTER-SWITCH')", in: view, seconds: 60)
         // The recorder checks the model field on the wire and the prior reply in the request.
         let receipt = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: folder.appendingPathComponent("switch-receipt")))
@@ -266,7 +291,7 @@ final class CodexDesktopSidebarTests: XCTestCase {
             launch.waitUntilExit()
             XCTAssertEqual(launch.terminationStatus, 0)
         }) { CodexDesktopSidebarClient(executable: executable, home: folder, codexHome: profile) }
-        let view = try await chatWindow(sync)
+        let view = try await chatWindow(sync, runtime: standaloneRuntime(executable: executable, folder: folder, profile: profile))
         try await waitFor("!!document.querySelector('[aria-label=\"Codex desktop chats\"][aria-pressed]')", in: view)
         _ = try await view.evaluateJavaScript("document.querySelector('[aria-label=\"Codex desktop chats\"][aria-pressed]').click()")
         let row = "document.querySelector('[data-desktop-chat=\"\(id)\"] button')"
@@ -313,7 +338,7 @@ final class CodexDesktopSidebarTests: XCTestCase {
         let sync = CodexSidebarSync(wake: { wakes.append($0.uuidString.lowercased()) }) {
             CodexDesktopSidebarClient(executable: executable, home: directory, codexHome: directory)
         }
-        let view = try await chatWindow(sync)
+        let view = try await chatWindow(sync, runtime: standaloneRuntime(executable: executable, folder: directory, profile: directory))
         func expectDOM(_ script: String, _ reason: String, line: UInt = #line) async throws {
             let deadline = ContinuousClock.now + .seconds(16)
             while ContinuousClock.now < deadline {
@@ -407,24 +432,15 @@ final class CodexDesktopSidebarTests: XCTestCase {
             (() => { const select = \(picker); select.value = 'gpt-6.1-sol';
                 select.dispatchEvent(new Event('change', {bubbles:true})); })()
             """)
-        try await expectDOM("document.querySelector('.desktop-model-notice')?.textContent.includes('Open in Codex')",
-                            "A private writer requires a handoff")
-        try await expectDOM("\(picker).value === 'gpt-6.2-sol' && document.querySelector('[aria-label=\"Send to Codex\"]').disabled && document.querySelector('textarea').value === 'Follow up from Kolmogor'",
-                            "An unconfirmed switch keeps the previous model and the unsent draft")
-        _ = try await view.evaluateJavaScript("""
-            Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {
-                writeText: async text => { window.copiedCodexDraft = text }
-            }});
-            Array.from(document.querySelectorAll('.desktop-model-notice button')).find(b => b.textContent === 'Copy draft').click()
-            """)
-        try await expectDOM("window.copiedCodexDraft === 'Follow up from Kolmogor' && document.querySelector('.desktop-model-notice').textContent.includes('Draft copied')",
-                            "The explicit copy action transfers the draft without changing the Codex conversation")
-        XCTAssertTrue(wakes.isEmpty)
-        _ = try await view.evaluateJavaScript("Array.from(document.querySelectorAll('.desktop-model-notice button')).find(b => b.textContent === 'Cancel').click()")
-        try await expectDOM("!document.querySelector('[aria-label=\"Send to Codex\"]').disabled", "Composer is ready")
+        try await expectDOM("\(picker).value === 'gpt-6.1-sol' && \(picker).title === 'Model for the next message'",
+                            "Picking a model preserves the current writer and the next-turn choice")
         _ = try await view.evaluateJavaScript("document.querySelector('[aria-label=\"Send to Codex\"]').click()")
-        try await expectDOM("document.querySelector('.desktop-queue')?.textContent.includes('1 message queued')", "Codex acknowledged the queued reply")
-        XCTAssertEqual(wakes, [second])
+        try await expectDOM("Array.from(document.querySelectorAll('[role=alert]')).some(e => e.textContent.includes('owns this conversation')) && document.querySelector('textarea').value === 'Follow up from Kolmogor'",
+                            "A competing writer preserves the unsent draft without waking the desktop")
+        XCTAssertTrue(wakes.isEmpty)
+        let prior = "Existing queued message"
+        _ = try await call("thread/queue/add", ["threadId": second, "clientUserMessageId": UUID().uuidString.lowercased(),
+                                                "input": [["type": "text", "text": prior]]])
         // Deliver a stale change event after another message has been queued.
         // The native boundary must protect the queue even if the menu was open.
         _ = try await view.evaluateJavaScript("""
@@ -433,13 +449,13 @@ final class CodexDesktopSidebarTests: XCTestCase {
             """)
         try await expectDOM("Array.from(document.querySelectorAll('[role=alert]')).some(e => e.textContent.includes('queued messages'))",
                             "A pending submission prevents even a private-desktop model handoff")
-        XCTAssertEqual(wakes, [second])
+        XCTAssertTrue(wakes.isEmpty)
         let queued = try await call("thread/queue/list", ["threadId": second])
         let rows = try XCTUnwrap(queued["data"] as? [[String: Any]])
         XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual((rows.first?["input"] as? [[String: Any]])?.first?["text"] as? String, "Follow up from Kolmogor")
+        XCTAssertEqual((rows.first?["input"] as? [[String: Any]])?.first?["text"] as? String, prior)
         _ = try await call("thread/queue/start", ["threadId": second, "queuedSubmissionId": try XCTUnwrap(rows.first?["id"] as? String)])
-        try await expectDOM("document.querySelector('.desktop-reader')?.textContent.includes('Follow up from Kolmogor')", "The official writer consumed the submission in the same thread")
+        try await expectDOM("document.querySelector('.desktop-reader')?.textContent.includes('Existing queued message')", "The official writer consumed the submission in the same thread")
         try await call("thread/section/move", ["threadId": first, "sectionId": NSNull()])
         try await expectOrder([pin, group, second, "recent", first])
         _ = try await view.evaluateJavaScript("\(header("recent")).click()")
