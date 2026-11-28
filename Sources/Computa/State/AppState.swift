@@ -449,7 +449,7 @@ final class AppState {
             ?? returningPin.flatMap { $0.kind == .browser ? UUID(uuidString: $0.id) : nil }
         let temporaryKeys = Set(temporaryDrafts.map { $0.lowercased() })
         let profiles = workspaceTabs.agents.filter { !temporaryKeys.contains($0.key) }
-        workspaceTabs.save(SavedWorkspace(thinkingSelections: threadThinkingSelections.isEmpty ? nil : threadThinkingSelections, agents: profiles.isEmpty ? nil : profiles, order: order,
+        workspaceTabs.save(SavedWorkspace(importedChatID: selectionWindow.importedChatID, showsImportedChats: selectionWindow.showsDesktopChats ? true : nil, thinkingSelections: threadThinkingSelections.isEmpty ? nil : threadThinkingSelections, agents: profiles.isEmpty ? nil : profiles, order: order,
             pinnedCount: pins.isEmpty ? nil : pins.count, selectedAgent: selected, drafts: drafts,
             browserProfile: pages.isEmpty ? nil : browserSession.workspaceProfileID,
             pages: pages, selectedPage: selectedPage, browserIsPrimary: selectedPage != nil && (selectionWindow.browserIsPrimary || returningPin?.kind == .browser),

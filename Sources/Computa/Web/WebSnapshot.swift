@@ -63,6 +63,7 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
     let canStartFresh: Bool
     let desktopSections: [CodexDesktopSidebarClient.Section]?
     let desktopSidebarError: String?
+    let codexImportRequest: UUID?
     let showsDesktopChats: Bool
     let desktopReader: CodexSidebarSync.Reader?
     let savedChats: [SavedChatSummary]
@@ -131,8 +132,9 @@ struct WebUISnapshot: Codable, Equatable, Sendable {
         agentNames = names
         let viewingCodex = state.workspaceTabs.showsDesktopChats
         showsDesktopChats = viewingCodex
-        desktopSections = state.desktopSidebar.map { viewingCodex ? $0.presentedSections : [] }
-        desktopSidebarError = viewingCodex ? state.desktopSidebar?.error : nil
+        codexImportRequest = state.workspaceTabs.codexImportRequest
+        desktopSections = state.desktopSidebar.map { viewingCodex ? $0.sections(in: state.workspaceTabs) : [] }
+        desktopSidebarError = viewingCodex ? (state.workspaceTabs.codexImportError ?? state.desktopSidebar?.error) : nil
         desktopReader = showsDesktopChats ? state.workspaceTabs.desktopReader : nil
         savedChats = state.savedChats
         savedChatSelection = state.savedChatSelection

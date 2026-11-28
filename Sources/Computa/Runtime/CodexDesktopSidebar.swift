@@ -100,7 +100,7 @@ actor CodexDesktopSidebarClient {
             environment["CODEX_HOME"] = codexHome.path
             let binary = try await InstalledCodexCLI.executable(candidates: candidates)
             let conn = try AgentCLIConnection(executable: binary, arguments: InstalledCodexCLI.arguments,
-                directory: home, environment: environment, codexProtocol: true) { _ in }
+                directory: home, environment: environment, codexProtocol: true, reportInvalidRequests: true) { _ in }
             do {
                 _ = try await conn.request("initialize", params: Data(#"{"clientInfo":{"name":"kolmogor_sidebar","version":"1"},"capabilities":{"experimentalApi":true}}"#.utf8), timeout: .seconds(10))
                 try await conn.send(Data(#"{"method":"initialized"}"#.utf8))
@@ -227,164 +227,68 @@ actor CodexDesktopSidebarClient {
         guard rows.contains(where: { $0.id == id }), currentAuthFile() == authFile else { throw Failure.noChat }
     }
 
-    struct ModelOption: Codable, Equatable, Sendable {
-        let model: String
-        let displayName: String
-        let hidden: Bool
-    }
-
-    struct ModelState: Codable, Sendable {
-        let current: String?
-        let live: Bool
-    }
-
-    struct ModelSelection: Codable, Sendable {
-        let provider: String
-        let state: ModelState
-        let choices: [ModelOption]
-    }
-
-    private struct ThreadModel: Decodable {
-        let id: String
-        struct Status: Decodable { let type: String }
-        let status: Status
-        let modelProvider: String
-        let model: String?
-    }
-
-    private func threadModel(_ id: String, owner: Account) async throws -> ThreadModel {
-        struct Reply: Decodable { let thread: ThreadModel }
+    func checkImportSource(_ id: String, owner: Account) async throws {
+        await refreshAccountSession()
         try await verifyVisible(id, owner: owner)
-        let row = try await read(Reply.self, "thread/read", ["threadId": id]).thread
-        guard row.id == id, currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return row
     }
 
-    private func modelState(_ row: ThreadModel, owner: Account) async throws -> ModelState {
-        if let conn = try await CodexDesktopOwner.connect(home: codexHome) {
-            do {
-                guard try await account(on: conn) == owner else { throw Failure.noChat }
-                let live = try await liveModel(row.id, on: conn)
-                await conn.close()
-                guard currentAuthFile() == authFile else { throw Failure.noChat }
-                if live.status.type != "notLoaded" { return ModelState(current: live.model, live: true) }
-            } catch { await conn.close(); throw error }
+    /// Capture complete items, including normally deferred tool output. Check the
+    /// source on both sides of pagination before publishing anything locally.
+    func importSnapshot(_ id: String, owner: Account, title: String) async throws -> CodexImportStore.Snapshot {
+        struct Stamp: Decodable, Equatable {
+            struct Status: Decodable, Equatable { let type: String }
+            let id: String
+            let updatedAt: Double
+            let model: String?
+            let status: Status
         }
-        return ModelState(current: row.model, live: false)
-    }
-
-    func currentModel(_ id: String, owner: Account) async throws -> ModelState {
-        try await modelState(threadModel(id, owner: owner), owner: owner)
-    }
-
-    func modelSelection(_ id: String, owner: Account) async throws -> ModelSelection {
-        let row = try await threadModel(id, owner: owner)
-        let options = try await all(ModelOption.self, "model/list", ["modelProvider": row.modelProvider, "includeHidden": false])
-        var seen = Set<String>()
-        let visible = options.filter { !$0.hidden && !$0.model.isEmpty && seen.insert($0.model).inserted }
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return ModelSelection(provider: row.modelProvider, state: try await modelState(row, owner: owner), choices: visible)
-    }
-
-    // Codex locks a conversation to its active writer. Resuming an unowned
-    // conversation can also start its queued turn immediately. Keep this
-    // sidebar client read-only with respect to the conversation's execution.
-    private func withIdleOwner<T: Sendable>(_ id: String, owner: Account, expected: String?,
-                                             perform: (AgentCLIConnection) async throws -> T) async throws -> T {
-        guard let conn = try await CodexDesktopOwner.connect(home: codexHome) else {
-            // A queue can change after the picker opens. Changing the model in
-            // the desktop could also reroute a previously queued prompt.
-            guard try await queuedMessages(id, owner: owner).isEmpty else { throw Failure.pendingQueue }
-            throw Failure.ownerUnavailable
-        }
-        do {
+        struct Reply: Decodable { let thread: Stamp }
+        func stamp() async throws -> Stamp {
             try await verifyVisible(id, owner: owner)
-            guard try await account(on: conn) == owner else { throw Failure.noChat }
-            let row = try await liveModel(id, on: conn)
-            guard try await queuedMessages(id, owner: owner).isEmpty else { throw Failure.pendingQueue }
-            guard row.status.type != "notLoaded" else { throw Failure.ownerUnavailable }
-            guard row.status.type == "idle" else { throw Failure.busyThread }
-            guard row.model == expected else { throw Failure.modelChanged }
-            let result = try await perform(conn)
-            await conn.close()
-            return result
-        } catch { await conn.close(); throw error }
-    }
-
-    private func liveModel(_ id: String, on conn: AgentCLIConnection) async throws -> ThreadModel {
-        struct Reply: Decodable { let thread: ThreadModel }
-        let result = try await conn.request("thread/read", params: JSONEncoder().encode(["threadId": id]), timeout: .seconds(10))
-        let row = try JSONDecoder().decode(Reply.self, from: result).thread
-        guard row.id == id else { throw Failure.noChat }
-        return row
-    }
-
-    /// Bind the model to this specific turn at the owner. A later edit to the
-    /// thread default cannot reroute this send while a durable queue drains.
-    func sendWithModel(_ model: String, replacing expected: String?, text: String, submission: UUID, in id: String, owner: Account) async throws {
-        try await withIdleOwner(id, owner: owner, expected: expected) { conn in
-            let params: [String: Any] = ["threadId": id, "model": model, "clientUserMessageId": submission.uuidString.lowercased(),
-                                         "input": [["type": "text", "text": text]]]
-            let request = try JSONSerialization.data(withJSONObject: params)
-            struct Reply: Decodable { struct Turn: Decodable { let id: String }; let turn: Turn }
-            do {
-                let reply = try await conn.request("turn/start", params: request, timeout: .seconds(15))
-                guard !(try JSONDecoder().decode(Reply.self, from: reply)).turn.id.isEmpty else { throw Failure.inconsistent }
-            } catch let error as AgentCLIInvalidRequest { throw error }
-            catch { throw Failure.deliveryUnconfirmed }
+            let value = try await read(Reply.self, "thread/read", ["threadId": id]).thread
+            guard value.id == id, value.status.type != "active" else { throw Failure.busyThread }
+            return value
         }
-    }
-
-    func conversationPage(_ id: String, owner: Account, cursor: String?, ascending: Bool) async throws -> Data {
-        try await verifyVisible(id, owner: owner)
-        var params: [String: any Sendable] = ["threadId": id, "sortDirection": ascending ? "asc" : "desc", "limit": 32,
-            "deferOutput": ["commandExecution": true, "mcpToolCall": true]]
-        if let cursor { params["cursor"] = cursor }
-        let data = try await session().request("thread/items/list", params: JSONSerialization.data(withJSONObject: params), timeout: .seconds(30))
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return data
-    }
-
-    func itemDetails(_ id: String, owner: Account, turn: String, item: String) async throws -> Data {
-        try await verifyVisible(id, owner: owner)
-        let params: [String: Any] = ["threadId": id, "turnId": turn, "itemIds": [item]]
-        let data = try await session().request("thread/items/read", params: JSONSerialization.data(withJSONObject: params), timeout: .seconds(30))
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return data
-    }
-
-    func queuedMessages(_ id: String, owner: Account) async throws -> [String] {
-        struct Entry: Decodable { let clientUserMessageId: String }
-        try await verifyVisible(id, owner: owner)
-        let entries = try await all(Entry.self, "thread/queue/list", ["threadId": id])
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return entries.map(\.clientUserMessageId)
-    }
-
-    // An existing writer can consume an ordinary follow-up from the durable queue.
-    // Explicit model choices always go through turn/start.
-    func enqueue(_ text: String, submission: UUID, in id: String, owner: Account, expectedModel: String? = nil) async throws {
-        if let expectedModel {
-            guard try await currentModel(id, owner: owner).current == expectedModel else { throw Failure.modelChanged }
-        } else {
-            try await verifyVisible(id, owner: owner)
+        let first = try await stamp()
+        struct Policy: Decodable {
+            struct Requirements: Decodable { let modelProvider: String? }
+            let requirements: Requirements?
         }
-        let params: [String: Any] = ["threadId": id, "clientUserMessageId": submission.uuidString.lowercased(),
-            "input": [["type": "text", "text": text]]]
-        let bytes = try JSONSerialization.data(withJSONObject: params)
-        let conn = try await session()
-        guard currentAuthFile() == authFile else { throw Failure.noChat }
-        struct Acknowledgment: Decodable {
-            struct Submission: Decodable { let clientUserMessageId: String }
-            let queuedSubmission: Submission
-        }
+        guard try await read(Policy.self, "configRequirements/read", [:]).requirements?.modelProvider == nil
+        else { throw AgentCLIError.unavailable("Your managed Codex profile restricts provider transfers.") }
+        let routed: CodexRoutedHistory?
         do {
-            let data = try await conn.request("thread/queue/add", params: bytes, timeout: .seconds(15))
-            let ack = try JSONDecoder().decode(Acknowledgment.self, from: data)
-            guard UUID(uuidString: ack.queuedSubmission.clientUserMessageId) == submission else { throw Failure.inconsistent }
-        } catch {
-            // Never replay an ambiguous write, including after a response timeout.
-            throw Failure.deliveryUnconfirmed
+            let records = try await all(CodexRoutedHistory.Attachment.self, "thread/attachment/list", ["threadId": id])
+            routed = try CodexRoutedHistory(records)
+        } catch let error as AgentCLIInvalidRequest where error.code == -32601 { routed = nil }
+        var pages: [Data] = [], seen = Set<String>()
+        var params: [String: any Sendable] = ["threadId":id,"sortDirection":"asc","limit":16]
+        while true {
+            try Task.checkCancellation()
+            let data = try await session().request("thread/items/list", params: JSONSerialization.data(withJSONObject: params), timeout: .seconds(30))
+            guard let page = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rows = page["data"] as? [[String: Any]], rows.allSatisfy({ $0["outputDeferred"] as? Bool != true }) else { throw Failure.inconsistent }
+            if let routed, !routed.records.isEmpty {
+                var merged: [[String: Any]] = []
+                for row in rows {
+                    merged.append(row)
+                    guard let turn = row["turnId"] as? String, let key = (row["item"] as? [String: Any])?["id"] as? String else { throw Failure.inconsistent }
+                    for extra in try routed.exchanges(anchor: turn + "/" + key) {
+                        let tid = extra.id.uuidString
+                        merged.append(["turnId":tid, "model":extra.model, "item":["id":"user","type":"userMessage","content":[["type":"text","text":extra.prompt]]]])
+                        let item = extra.status == "completed"
+                            ? ["id":"reply","type":"agentMessage","text":extra.answer ?? ""]
+                            : ["id":"reply","type":"deliveryStatus","message":extra.answer ?? "Reply unconfirmed"]
+                        merged.append(["turnId":tid,"model":extra.model,"item":item])
+                    }
+                }
+                pages.append(try JSONSerialization.data(withJSONObject: ["data":merged]))
+            } else { pages.append(data) }
+            guard let next = page["nextCursor"] as? String else { break }
+            guard !next.isEmpty, seen.insert(next).inserted else { throw Failure.inconsistent }
+            params["cursor"] = next
         }
+        guard try await stamp() == first, currentAuthFile() == authFile, try await account() == owner else { throw Failure.inconsistent }
+        return .init(title: title, model: first.model.map { InstalledCodexCLI.prefix + $0 } ?? "", pages: pages)
     }
 }

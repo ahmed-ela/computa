@@ -118,12 +118,12 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerW
               message.webView === webView, WebUIResourceLocator.contains(webView?.url),
               let state, let source = state.desktopSidebar, let body = message.body as? [String: Any],
               let action = body["action"] as? String else { replyHandler(nil, "Unavailable conversation."); return }
-        if ["send", "wake"].contains(action), state.approvalGateBlocksInteraction || state.presentedSheet != nil || windowTabs.isAPIProvidersPresented {
+        if ["send", "import", "changeModel"].contains(action), state.approvalGateBlocksInteraction || state.presentedSheet != nil || windowTabs.isAPIProvidersPresented {
             replyHandler(nil, "Finish the open dialog first.")
             return
         }
         Task {
-            do { replyHandler(try await source.conversation(action, body: body, in: windowTabs, runtime: state.conversationRuntime, accessMode: state.accessMode), nil) }
+            do { replyHandler(try await source.conversation(action, body: body, in: windowTabs, runtime: state.conversationRuntime), nil) }
             catch { replyHandler(nil, error.localizedDescription) }
         }
     }
@@ -217,14 +217,18 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerW
                 state.workspaceTabs.move(tab, to: target)
             }
 
-        case "showDesktopChats", "openDesktopChat", "setDesktopSectionCollapsed":
+        case "showDesktopChats", "browseCodexImports", "closeCodexImports", "openDesktopChat", "setDesktopSectionCollapsed":
             guard let source = state.desktopSidebar, !windowTabs.isClosed, !windowTabs.isAPIProvidersPresented,
                   !state.approvalGateBlocksInteraction, state.presentedSheet == nil else { return }
             if action == "showDesktopChats", let enabled = body["enabled"] as? Bool {
                 windowTabs.showsDesktopChats = enabled
+            } else if action == "browseCodexImports" {
+                Task { await source.browse(in: windowTabs) }
+            } else if action == "closeCodexImports" {
+                source.cancelBrowse(in: windowTabs)
             } else if action == "setDesktopSectionCollapsed", windowTabs.showsDesktopChats,
                       let id = body["id"] as? String, let collapsed = body["collapsed"] as? Bool {
-                source.setCollapsed(collapsed, sectionID: id)
+                source.setCollapsed(collapsed, sectionID: id, in: windowTabs)
             } else if action == "openDesktopChat", let id = body["id"] as? String {
                 source.open(id, in: windowTabs)
             }

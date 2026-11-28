@@ -30,6 +30,8 @@ struct SavedWorkspace: Codable, Equatable {
         let model: String
         let effort: String
     }
+    var importedChatID: String? = nil
+    var showsImportedChats: Bool? = nil
     var thinkingSelections: [String: ThinkingSelection]? = nil
 
     struct ProviderSignIn: Codable, Equatable {
@@ -112,7 +114,14 @@ final class WorkspaceTabs {
     var selectedPage: UUID?
     // Transient so a new tab can receive address focus after its window attaches.
     var requestedBrowserAddress: UUID?
-    var showsDesktopChats = false
+    var showsDesktopChats = false {
+        didSet { if oldValue != showsDesktopChats { onChange?() } }
+    }
+    var importedChatID: String? {
+        didSet { if oldValue != importedChatID { onChange?() } }
+    }
+    var codexImportRequest: UUID?
+    var codexImportError: String?
     var desktopReader: CodexSidebarSync.Reader?
     var savedChatSelection: AppState.SavedChatSelection?
     var isSidebarCollapsed = false
@@ -175,6 +184,8 @@ final class WorkspaceTabs {
         self.defaults = defaults
         let snapshot = defaults.data(forKey: Self.snapshotKey).flatMap { try? JSONDecoder().decode(SavedWorkspace.self, from: $0) }
         saved = snapshot
+        importedChatID = snapshot?.importedChatID
+        showsDesktopChats = snapshot?.showsImportedChats ?? false
         profiles = AgentProfiles(snapshot?.agents ?? [:])
         let legacy = defaults.stringArray(forKey: Self.legacyKey)
         hasSavedAgents = snapshot != nil || legacy != nil

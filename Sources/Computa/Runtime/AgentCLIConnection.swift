@@ -15,6 +15,7 @@ enum AgentCLIError: LocalizedError, Sendable {
 /// failure or an arbitrary internal server error cannot establish that.
 struct AgentCLIInvalidRequest: LocalizedError, Sendable {
     let message: String
+    var code: Int? = nil
     var errorDescription: String? { message }
 }
 
@@ -27,6 +28,7 @@ actor AgentCLIConnection {
     private let process: OwnedChildProcess
     private let input: FileHandle
     private let output: FileHandle
+    private let onClose: (@Sendable () -> Void)?
     private let handler: MessageHandler
     private var reader: Task<Void, Never>?
     private var sequence = 0
@@ -34,7 +36,8 @@ actor AgentCLIConnection {
     private var requests: [Int: CheckedContinuation<Data, Error>] = [:]
 
     init(executable: URL, arguments: [String], directory: URL, environment: [String: String],
-         codexProtocol: Bool = false, reportInvalidRequests: Bool = false, handler: @escaping MessageHandler) throws {
+         codexProtocol: Bool = false, reportInvalidRequests: Bool = false, onClose: (@Sendable () -> Void)? = nil, handler: @escaping MessageHandler) throws {
+        self.onClose = onClose
         self.codexProtocol = codexProtocol
         self.reportInvalidRequests = reportInvalidRequests
         let stdin = Pipe(), stdout = Pipe()
@@ -99,7 +102,7 @@ actor AgentCLIConnection {
             let detail = String(reason.prefix(1200))
             let code = error["code"] as? Int
             if reportInvalidRequests && (code == -32601 || code == -32602) {
-                waiting.resume(throwing: AgentCLIInvalidRequest(message: detail))
+                waiting.resume(throwing: AgentCLIInvalidRequest(message: detail, code: code))
             } else {
                 waiting.resume(throwing: code == -32000 ? AgentCLIError.signInRequired(detail) : .protocolError(detail))
             }
@@ -141,6 +144,7 @@ actor AgentCLIConnection {
     func close(reason: AgentCLIError = .cancelled) async -> [String] {
         if !stopped {
             stopped = true
+            onClose?()
             let waiting = requests
             requests.removeAll()
             for continuation in waiting.values { continuation.resume(throwing: reason) }

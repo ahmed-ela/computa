@@ -88,9 +88,6 @@ struct WebWorkspaceView: View {
             else { state.desktopSidebar?.detach(windowTabs) }
         }
         .onDisappear { state.desktopSidebar?.detach(windowTabs) }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            state.desktopSidebar?.becameActive()
-        }
         .focusedSceneValue(\.tabWorkspace, state)
         .focusedSceneValue(\.workspaceSidebarCollapsed, launcherAllowed && !commandPanelPresented ? sidebarCollapseBinding : nil)
         .focusedSceneValue(\.browserPageCommandsAllowed, launcherAllowed && !commandPanelPresented)

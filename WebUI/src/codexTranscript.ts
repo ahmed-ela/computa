@@ -4,6 +4,7 @@ export interface CodexItem {
   [field: string]: unknown;
 }
 export interface CodexEntry {
+  model?: string;
   item: CodexItem;
   turnId: string;
   outputDeferred?: boolean;

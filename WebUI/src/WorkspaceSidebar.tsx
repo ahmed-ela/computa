@@ -122,7 +122,7 @@ export function WorkspaceSidebar({ snapshot, search, setSearch, nativeHost, post
     }
   }, [selectedTab]);
   const noun = snapshot.mixesBrowserTabsInSidebar ? 'tabs' : 'agents';
-  const searchLabel = snapshot.showsDesktopChats ? 'Search Codex chats' : 'Search ' + noun;
+  const searchLabel = snapshot.showsDesktopChats ? (snapshot.codexImportRequest ? 'Search Codex chats' : 'Search imported chats') : 'Search ' + noun;
   const select = (item: Item) => {
     if (item.ref.kind === 'agent') post({ action: 'selectTask', id: item.ref.id });
     else post({ action: 'selectWorkspaceTab', tab: item.ref });

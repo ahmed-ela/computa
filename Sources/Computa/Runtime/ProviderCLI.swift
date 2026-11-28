@@ -47,6 +47,15 @@ enum ProviderCLI: String, CaseIterable, Sendable, Codable {
         return String(parts[3])
     }
 
+    static func conversationProvider(for modelID: String) -> Self? {
+        guard let provider = Self(modelID: modelID), let slug = slug(modelID), slug != "default" else { return nil }
+        switch provider {
+        case .antigravity: return slug.hasPrefix("gemini-") ? provider : nil
+        case .claude: return provider
+        default: return nil
+        }
+    }
+
     var option: LocalModelOption {
         LocalModelOption(id: modelID, label: name + " / CLI default",
                          detail: "Uses the model, account and tool permissions configured in " + name + ".", highMemory: false)

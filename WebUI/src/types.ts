@@ -202,6 +202,7 @@ export interface AppSnapshot {
   workspaceOrder?: WorkspaceTab[];
   workspacePinnedCount?: number;
   desktopSections?: DesktopSection[];
+  codexImportRequest?: string;
   showsDesktopChats?: boolean;
   desktopSidebarError?: string;
   desktopReader?: DesktopReader;
@@ -251,6 +252,7 @@ export type NativeAction =
   | {action: 'saveAgentSettings'; taskID: string; name: string; instructions: string}
   | {action: 'openAgentHistory'; taskID: string; conversationID: string}
   | { action: 'ready' }
+  | { action: 'browseCodexImports' | 'closeCodexImports' }
   | { action: 'showDesktopChats'; enabled: boolean }
   | { action: 'setDesktopSectionCollapsed'; id: string; collapsed: boolean }
   | { action: 'openDesktopChat'; id: string }

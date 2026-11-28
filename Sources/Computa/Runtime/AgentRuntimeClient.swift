@@ -12,17 +12,6 @@ struct WorkspaceHistory: Sendable {
     var savedChats: [SavedChatSummary] = []
 }
 
-struct SyncedCodexTurn: Sendable {
-    let profile: URL
-    let thread: String
-    let owner: CodexDesktopSidebarClient.Account
-    let expected: String?
-    let provider: String
-    let model: String
-    let prompt: String
-    let submission: UUID
-}
-
 /// The UI's only knowledge of an agent backend. A future app-server adapter can
 /// translate thread and item notifications into these domain events without
 /// leaking JSON-RPC details into SwiftUI views.
@@ -31,13 +20,13 @@ protocol AgentRuntimeClient: Sendable {
     var firstMessageStore: FirstMessageStore? { get }
     var restartStore: AgentRestartStore? { get }
 
+    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption]
     func installedCLIModels() async throws -> [LocalModelOption]
     func readCodexCLIUsage() async -> CodexCLIUsage.Report
     func loadTasks() async throws -> [AgentTask]
     func loadWorkspaceHistory(including threadIDs: Set<String>) async throws -> WorkspaceHistory
     func readSavedChat(_ id: String) async throws -> AgentTask
-    func continueCodexConversation(_ turn: SyncedCodexTurn, accessMode: AccessMode) async throws
     func events() -> AsyncStream<AgentRuntimeEvent>
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String) async throws
     func submit(prompt: String, toTaskID taskID: AgentTask.ID, modelID: String, accessMode: AccessMode) async throws
@@ -63,7 +52,7 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
-    func continueCodexConversation(_ turn: SyncedCodexTurn, accessMode: AccessMode) async throws { throw InstalledCodexCLI.Failure.missing }
+    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply { throw AgentCLIError.unavailable("This runtime cannot route provider replies.") }
     var firstMessageStore: FirstMessageStore? { nil }
     var restartStore: AgentRestartStore? { nil }
     func loadWorkspaceHistory(including threadIDs: Set<String>) async throws -> WorkspaceHistory {
