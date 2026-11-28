@@ -105,6 +105,8 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         return task
     }
 
+    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply { try await providerChats.routedReply(prompt, model: model) }
+
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { try await providerChats.models(provider) }
 
     func installedCLIModels() async throws -> [LocalModelOption] { try await cli.installedCLIModels() }

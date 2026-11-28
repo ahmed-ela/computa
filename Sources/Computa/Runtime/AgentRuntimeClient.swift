@@ -21,6 +21,7 @@ struct SyncedCodexTurn: Sendable {
     let model: String
     let prompt: String
     let submission: UUID
+    var routedContext: String? = nil
 }
 
 /// The UI's only knowledge of an agent backend. A future app-server adapter can
@@ -31,6 +32,7 @@ protocol AgentRuntimeClient: Sendable {
     var firstMessageStore: FirstMessageStore? { get }
     var restartStore: AgentRestartStore? { get }
 
+    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption]
     func installedCLIModels() async throws -> [LocalModelOption]
     func readCodexCLIUsage() async -> CodexCLIUsage.Report
@@ -63,6 +65,7 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
+    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply { throw AgentCLIError.unavailable("This runtime cannot route provider replies.") }
     func continueCodexConversation(_ turn: SyncedCodexTurn, accessMode: AccessMode) async throws { throw InstalledCodexCLI.Failure.missing }
     var firstMessageStore: FirstMessageStore? { nil }
     var restartStore: AgentRestartStore? { nil }

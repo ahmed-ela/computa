@@ -191,6 +191,80 @@ final class CodexDesktopSidebarTests: XCTestCase {
         XCTAssertLessThanOrEqual(try XCTUnwrap(mounted), 192)
     }
 
+    /// Opt in with a synthetic, explicitly prepared official thread. Never select the user's active chat.
+    func testRealRoutedConversation() async throws {
+        guard let root = ProcessInfo.processInfo.environment["KOLMOGOR_ROUTER_LIVE"] else { throw XCTSkip("Requires a disposable signed-in conversation.") }
+        struct Fixture: Decodable { let id: UUID; let wordA: String; let title: String }
+        let folder = URL(fileURLWithPath: root)
+        let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: folder.appendingPathComponent("thread.json")))
+        guard fixture.title.hasPrefix("Kolmogor model check "), fixture.wordA.range(of: #"^LANTERN-[0-9A-F]{8}$"#, options: .regularExpression) != nil
+        else { throw CocoaError(.fileReadCorruptFile) }
+        let profile = InstalledCodexCLI.userProfile
+        let id = fixture.id.uuidString.lowercased()
+        let runtime = SelectableCodexRuntime(configuration: .init(executable: .installedCLI(), installedCLIProfile: profile,
+            modelProvider: "openai", model: "", workspacePath: folder.path, codexHomePath: folder.appendingPathComponent("kolmogor-runtime").path,
+            baseInstructions: "", reasoningEffort: "medium"))
+        addTeardownBlock { _ = await runtime.shutdown() }
+        let source = try XCTUnwrap(CodexSidebarSync.installed(preferences: isolatedTestPreferences()))
+        let view = try await chatWindow(source, runtime: runtime)
+        let scope = "document.querySelector('[aria-label=\"Codex desktop chats\"]')"
+        try await waitFor("!!" + scope, in: view)
+        _ = try await view.evaluateJavaScript(scope + ".click()")
+        let row = "document.querySelector('[data-desktop-chat=\"\(id)\"] button')"
+        try await waitFor("!!" + row, in: view)
+        _ = try await view.evaluateJavaScript(row + ".click()")
+        let picker = "document.querySelector('select[aria-label=\"Codex model\"]')"
+        let body = "document.querySelector('.desktop-reader')?.innerText"
+        try await waitFor("\(body)?.includes('\(fixture.wordA)') && !!\(picker)", in: view)
+        let gemini = "cli/antigravity/model/gemini-3.8-flash", claude = "cli/claude/model/claude-sonnet-4-6"
+        func select(_ value: String) async throws {
+            _ = try await view.evaluateJavaScript("(() => { const p = \(picker); p.value = '\(value)'; p.dispatchEvent(new Event('change',{bubbles:true})); })()")
+        }
+        func awaitResult(_ predicate: String, seconds: Int = 120) async throws {
+            let until = ContinuousClock.now + .seconds(seconds)
+            while ContinuousClock.now < until {
+                if (try? await view.evaluateJavaScript(predicate)) as? Bool == true { return }
+                if let error = try? await view.evaluateJavaScript("document.querySelector('.composer-zone [role=alert], .desktop-reader [role=alert]')?.textContent"),
+                   let reason = error as? String, !reason.isEmpty { throw NSError(domain: "RouterTest", code: 1, userInfo: [NSLocalizedDescriptionKey: reason]) }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            try await waitFor(predicate, in: view, seconds: 1)
+        }
+        func load(_ provider: String, model: String) async throws {
+            try await select("@load/" + provider)
+            try await awaitResult("Array.from(\(picker).options).some(o=>o.value==='\(model)') && !\(picker).disabled")
+        }
+        let mode = ProcessInfo.processInfo.environment["KOLMOGOR_ROUTER_TEST_MODE"] ?? "closed"
+        if mode == "reopen" {
+            try await awaitResult("\(body)?.includes('\(fixture.wordA)-O-G-C') && \(body)?.includes('gemini-3.8-flash') && \(body)?.includes('claude-sonnet-4-6') && \(picker).value === '\(claude)'")
+            return
+        }
+        try await load("antigravity", model: gemini)
+        try await load("claude", model: claude)
+        if mode == "catalog" { return }
+        func requireClosed() throws {
+            guard NSRunningApplication.runningApplications(withBundleIdentifier: CodexDesktopSidebarClient.bundleID).allSatisfy(\.isTerminated)
+            else { throw NSError(domain: "RouterTest", code: 2, userInfo: [NSLocalizedDescriptionKey: "Codex desktop is running"]) }
+        }
+        var answer = fixture.wordA
+        for (model, suffix) in [("gpt-6.1-sol", "O"), (gemini, "G"), (claude, "C")] {
+            try requireClosed()
+            try await select(model)
+            try await awaitResult("\(picker).value === '\(model)' && !\(picker).disabled")
+            let prompt = "Append -" + suffix + " to the previous assistant reply. Reply with the resulting marker only. Use no tools."
+            let quoted = String(decoding: try JSONEncoder().encode(prompt), as: UTF8.self)
+            _ = try await view.evaluateJavaScript("(() => { const f = document.querySelector('textarea[aria-label=\"Message Codex\"]'); f.value = \(quoted); f.dispatchEvent(new Event('input',{bubbles:true})); })()")
+            let send = "document.querySelector('[aria-label=\"Send to Codex\"]')"
+            try await awaitResult("!\(send).disabled")
+            try requireClosed()
+            _ = try await view.evaluateJavaScript(send + ".click()")
+            answer += "-" + suffix
+            try await awaitResult("\(body)?.includes('\(answer)')", seconds: 150)
+            try requireClosed()
+            try Data(answer.utf8).write(to: folder.appendingPathComponent("receipt-" + suffix), options: .atomic)
+        }
+    }
+
     func testSwitchModelOnOfficialDesktopAndReopenSameConversation() async throws {
         guard let root = ProcessInfo.processInfo.environment["KOLMOGOR_MODEL_PICKER_FIXTURE"] else {
             throw XCTSkip("Requires an isolated running Codex desktop and recording model endpoint.")

@@ -5,12 +5,12 @@ import { ResponseMarkdown } from './ResponseMarkdown';
 import { Icon } from './Icon';
 import { shouldSubmitPromptKey } from './promptQueue';
 import { activityLabel, activityText, entryKey, CodexHistoryWindow } from './codexTranscript';
-import type { CodexEntry, CodexPage, HistoryDirection, UserPart } from './codexTranscript';
+import type { CodexEntry, CodexPage, HistoryDirection, RoutedExchange, UserPart } from './codexTranscript';
 import type { DesktopReader } from './types';
 import { codexModelReady } from './codexModelSelection';
 import type { CodexModelIntent, CodexModelState } from './codexModelSelection';
 
-function call<T>(reader: DesktopReader, action: string, fields: Record<string, string> = {}): Promise<T> {
+function call<T>(reader: DesktopReader, action: string, fields: Record<string, string | string[]> = {}): Promise<T> {
   const bridge = window.webkit?.messageHandlers?.codexConversation;
   if (!bridge) return Promise.reject(new Error('Codex is unavailable.'));
   return bridge.postMessage({action, thread: reader.id, selection: reader.request, ...fields}) as Promise<T>;
@@ -59,10 +59,12 @@ function Chat({reader}: {reader: DesktopReader}) {
   const [draft, setDraft] = useState('');
   const [changing, setChanging] = useState(false);
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const [external, setExternal] = useState<Record<string, ModelCatalog['choices']>>({});
+  const [routeError, setRouteError] = useState('');
   const [modelError, setModelError] = useState('');
   const [catalogError, setCatalogError] = useState('');
   const [intent, setIntent] = useState<CodexModelIntent>({kind:'follow'});
-  const modelReady = codexModelReady(intent, catalog?.state) && (intent.kind === 'next' || !!catalog?.state.current);
+  const modelReady = !routeError && codexModelReady(intent, catalog?.state) && (intent.kind === 'next' || !!catalog?.state.current);
   const modelRevision = useRef(0);
   const modelBusy = useRef(false);
   const activeReader = useRef(true);
@@ -90,12 +92,33 @@ function Chat({reader}: {reader: DesktopReader}) {
     const interval = setInterval(() => { void refresh(); }, 5000);
     return () => { activeReader.current = false; clearInterval(interval); window.removeEventListener('focus', onFocus); };
   }, [reader.request]);
+  const restoredSelection = useRef(false);
+  useEffect(() => {
+    if (restoredSelection.current || !catalog || !loaded || !atLast || routeError || modelRevision.current) return;
+    restoredSelection.current = true;
+    const last = entries.at(-1)?.routed?.at(-1);
+    if (last?.status !== 'completed') return;
+    const target = /^cli\/(antigravity|claude)\/model\/(.+)$/.exec(last.model);
+    if (!target) return;
+    const [, provider, name] = target;
+    setExternal(previous => ({...previous, [provider]: [{model: last.model, displayName: name}]}));
+    setIntent({kind: 'next', model: last.model, expected: catalog.state.current});
+  }, [catalog, entries, loaded, atLast, routeError]);
   const changeModel = async (model: string) => {
     if (modelBusy.current || busy.current || !catalog) return;
     modelBusy.current = true;
     ++modelRevision.current;
     setChanging(true); setModelError('');
     try {
+      if (model.startsWith('@load/')) {
+        const provider = model.slice(6);
+        const choices = await call<ModelCatalog['choices']>(reader, 'routeModels', {provider});
+        if (activeReader.current) {
+          setExternal(previous => ({...previous, [provider]: choices}));
+          if (!choices.length) setModelError('The provider returned no available models.');
+        }
+        return;
+      }
       const result = await call<string>(reader, 'changeModel', {model, ...(catalog.state.current ? {expected: catalog.state.current} : {})});
       if (!activeReader.current) return;
       if (result !== 'nextTurn') throw new Error('Codex could not verify this model is available.');
@@ -116,8 +139,19 @@ function Chat({reader}: {reader: DesktopReader}) {
     let active = true, version = 0, fetching = false;
     let lastHead = '';
     const history = new CodexHistoryWindow();
-    const read = (direction: HistoryDirection, cursor?: string) =>
-      call<CodexPage>(reader, 'page', {direction, ...(cursor ? {cursor} : {})});
+    const read = async (direction: HistoryDirection, cursor?: string) => {
+      const page = await call<CodexPage>(reader, 'page', {direction, ...(cursor ? {cursor} : {})});
+      if (!page.data.length) return page;
+      const anchors = page.data.map(row => row.turnId + '/' + row.item.id);
+      try {
+        const routes = await call<RoutedExchange[]>(reader, 'routeHistory', {anchors});
+        for (const [i, row] of page.data.entries()) row.routed = routes.filter(exchange => exchange.anchor === anchors[i]);
+        if (active) setRouteError('');
+      } catch (error) {
+        if (active && !errorText(error).toLowerCase().includes('method not found')) setRouteError(errorText(error));
+      }
+      return page;
+    };
     const publish = () => {
       available.current = {before: !!history.before, after: !!history.after};
       setAtFirst(!history.before); setAtLast(!history.after);
@@ -189,7 +223,7 @@ function Chat({reader}: {reader: DesktopReader}) {
     } else if (followBottom.current) view.scrollTop = view.scrollHeight;
   }, [entries]);
   useEffect(() => {
-    if (uncertain && (queue.includes(uncertain.id) || entries.some(e => e.item.clientId === uncertain.id))) {
+    if (uncertain && (queue.includes(uncertain.id) || entries.some(e => e.item.clientId === uncertain.id || e.routed?.some(turn => turn.id.toLowerCase() === uncertain.id.toLowerCase() && turn.status === 'completed')))) {
       setDraft(value => value === uncertain.text ? '' : value);
       setUncertain(null); setSendError('');
     }
@@ -203,15 +237,16 @@ function Chat({reader}: {reader: DesktopReader}) {
       const expected = intent.kind === 'next' ? intent.expected : catalog?.state.current;
       const receipt = await call<string>(reader, 'send', {text:draft, submission,
         ...(intent.kind === 'next' ? {model:intent.model} : {}), ...(expected ? {expected} : {})});
-      if (!['started', 'queued', 'queuedWakeFailed'].includes(receipt)) {
+      if (!['started', 'routed', 'queued', 'queuedWakeFailed'].includes(receipt)) {
         setUncertain({id:submission, text:draft});
         setSendError('Delivery is unconfirmed. Check the conversation before resending.');
         return;
       }
-      if (receipt !== 'started') setQueue(previous => previous.includes(submission) ? previous : [...previous, submission]);
+      if (receipt === 'queued' || receipt === 'queuedWakeFailed') setQueue(previous => previous.includes(submission) ? previous : [...previous, submission]);
       if (receipt === 'queuedWakeFailed') setSendError('Your message is queued. The client using this chat can resume it.');
-      if (intent.kind === 'next') setCatalog(value => value && ({...value, state:{current:intent.model, live:false}}));
-      setIntent({kind:'follow'}); setUncertain(null); setDraft('');
+      if (receipt !== 'routed' && intent.kind === 'next') setCatalog(value => value && ({...value, state:{current:intent.model, live:false}}));
+      if (receipt !== 'routed') setIntent({kind:'follow'});
+      setUncertain(null); setDraft('');
       followBottom.current = true;
       navigate.current('desc', true);
     } catch (e) { setSendError(errorText(e)); }
@@ -236,7 +271,14 @@ function Chat({reader}: {reader: DesktopReader}) {
       }}>
       {!loaded && !historyError && <p role="status">Loading messages…</p>}
       {historyError && <p role="alert">{historyError}</p>}
-      {entries.map(entry => <div key={entryKey(entry)} data-codex-entry={entryKey(entry)}><TranscriptEntry entry={entry} reader={reader} /></div>)}
+      {routeError && <p role="alert">Provider history could not be loaded. {routeError}</p>}
+      {entries.map(entry => <div key={entryKey(entry)} data-codex-entry={entryKey(entry)}><TranscriptEntry entry={entry} reader={reader} />
+        {entry.routed?.map(exchange => <div key={exchange.id}>
+          <article><strong>You</strong><p className="desktop-reader-user">{exchange.prompt}</p></article>
+          <article><strong>{exchange.model.split('/model/').at(-1)}</strong>
+            {exchange.status === 'completed' ? <ResponseMarkdown text={exchange.answer ?? ''} />
+              : <p role="status">{exchange.status === 'failed' ? exchange.answer : 'Waiting for a confirmed provider reply.'}</p>}</article>
+        </div>)}</div>)}
       {loaded && !entries.length && <p>No messages yet.</p>}
     </section>
     <div className="composer-zone">
@@ -246,6 +288,7 @@ function Chat({reader}: {reader: DesktopReader}) {
       {(modelError || catalogError) && <p role="alert">{modelError || catalogError}</p>}
       {intent.kind === 'next' && !modelReady && <div className="desktop-model-notice" role="status">The conversation’s model changed while you were drafting.
         <Button variant="ghost" onClick={() => { setModelError(''); setIntent({kind:'follow'}); }}>Use current model</Button></div>}
+      {intent.kind === 'next' && intent.model.startsWith('cli/') && <p className="desktop-model-notice">Sends this chat’s text history to the selected provider for a conversation-only reply. These replies appear in Kolmogor.</p>}
       <div className="composer-shell">
         <Textarea aria-label="Message Codex" placeholder="Message Codex…" rows={2} value={draft} maxLength={200000} disabled={sending}
           onInput={event => setDraft((event.currentTarget as HTMLTextAreaElement).value)}
@@ -256,6 +299,10 @@ function Chat({reader}: {reader: DesktopReader}) {
               select.value = intent.kind === 'next' ? intent.model : catalog.state.current ?? ''; void changeModel(wanted); }}>
             {!catalog.choices.some(choice => choice.model === catalog.state.current) && <option value={catalog.state.current ?? ''} disabled>{catalog.state.current || 'Codex default'}</option>}
             {catalog.choices.map(choice => <option key={choice.model} value={choice.model}>{choice.displayName || choice.model}</option>)}
+            {(['antigravity', 'claude'] as const).map(provider => <optgroup key={provider} label={provider === 'claude' ? 'Claude Code' : 'Gemini via Antigravity'}>
+              {(external[provider] ?? []).map(choice => <option key={choice.model} value={choice.model}>{choice.displayName}</option>)}
+              <option value={'@load/' + provider}>{external[provider]?.length ? 'Refresh models…' : 'Load models…'}</option>
+            </optgroup>)}
           </select>}
           <Button aria-label="Send to Codex" disabled={!loaded || !draft.trim() || sending || changing || !modelReady || uncertain?.text === draft}
           onClick={() => { void send(); }}><Icon name="send" size={16} /></Button></div>

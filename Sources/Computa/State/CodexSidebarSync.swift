@@ -186,13 +186,27 @@ final class CodexSidebarSync {
             response = try JSONSerialization.jsonObject(with: bytes)
         case "models":
             response = try JSONSerialization.jsonObject(with: JSONEncoder().encode(try await client.modelSelection(reader.id, owner: owner)))
+        case "routeModels":
+            guard let value = body["provider"] as? String, let provider = ProviderCLI(rawValue: value),
+                  [.antigravity, .claude].contains(provider), let runtime else { throw Client.Failure.unavailableModel }
+            try await client.checkExternalRoute(reader.id, owner: owner)
+            let models = try await runtime.providerCLIModels(provider)
+            response = models.filter { ProviderCLI.conversationProvider(for: $0.id) == provider }.map { ["model": $0.id, "displayName": $0.label] }
+        case "routeHistory":
+            guard let anchors = body["anchors"] as? [String], anchors.count <= 32 else { throw Client.Failure.inconsistent }
+            let exchanges = try await client.routeExchanges(reader.id, owner: owner, anchors: anchors)
+            response = try JSONSerialization.jsonObject(with: JSONEncoder().encode(exchanges))
         case "currentModel":
             response = try JSONSerialization.jsonObject(with: JSONEncoder().encode(try await client.currentModel(reader.id, owner: owner)))
         case "changeModel":
             guard let model = body["model"] as? String, !model.isEmpty, modelWrites.insert(reader.id).inserted else { throw Client.Failure.inconsistent }
             defer { modelWrites.remove(reader.id) }
             let selection = try await client.modelSelection(reader.id, owner: owner)
-            guard selection.choices.contains(where: { $0.model == model }) else { throw Client.Failure.unavailableModel }
+            if let provider = ProviderCLI(modelID: model) {
+                guard ProviderCLI.conversationProvider(for: model) == provider, let runtime else { throw Client.Failure.unavailableModel }
+                try await client.checkExternalRoute(reader.id, owner: owner)
+                guard try await runtime.providerCLIModels(provider).contains(where: { $0.id == model }) else { throw Client.Failure.unavailableModel }
+            } else if !selection.choices.contains(where: { $0.model == model }) { throw Client.Failure.unavailableModel }
             guard selection.state.current == body["expected"] as? String else { throw Client.Failure.modelChanged }
             guard try await client.queuedMessages(reader.id, owner: owner).isEmpty else { throw Client.Failure.pendingQueue }
             response = "nextTurn"
@@ -210,20 +224,28 @@ final class CodexSidebarSync {
             let expected = body["expected"] as? String
             let selection = try await client.modelSelection(reader.id, owner: owner)
             guard selection.state.current == expected else { throw Client.Failure.modelChanged }
-            guard let model = body["model"] as? String ?? expected,
-                  selection.choices.contains(where: { $0.model == model }) else { throw Client.Failure.unavailableModel }
+            guard let model = body["model"] as? String ?? expected else { throw Client.Failure.unavailableModel }
+            if let provider = ProviderCLI(modelID: model) {
+                guard ProviderCLI.conversationProvider(for: model) == provider, let runtime else { throw Client.Failure.unavailableModel }
+                do { response = try await client.routeReply(text, model: model, expected: expected, submission: submission, in: reader.id, owner: owner, runtime: runtime) }
+                catch Client.Failure.deliveryUnconfirmed { response = "unconfirmed" }
+                break
+            }
+            guard selection.choices.contains(where: { $0.model == model }) else { throw Client.Failure.unavailableModel }
+            let context = try await client.contextForNativeTurn(reader.id, owner: owner)
             do {
                 do {
-                    try await client.sendWithModel(model, replacing: expected, text: text, submission: submission, in: reader.id, owner: owner)
+                    try await client.sendWithModel(model, replacing: expected, text: text, submission: submission, in: reader.id, owner: owner, routedContext: context)
                 } catch Client.Failure.ownerUnavailable {
                     guard let runtime else { throw InstalledCodexCLI.Failure.missing }
                     try await runtime.continueCodexConversation(.init(profile: client.codexHome, thread: reader.id, owner: owner,
-                        expected: expected, provider: selection.provider, model: model, prompt: text, submission: submission), accessMode: accessMode)
+                        expected: expected, provider: selection.provider, model: model, prompt: text, submission: submission, routedContext: context), accessMode: accessMode)
                 }
                 response = "started"
             } catch Client.Failure.ownerUnavailable where body["model"] == nil,
                     Client.Failure.pendingQueue where body["model"] == nil,
                     Client.Failure.busyThread where body["model"] == nil {
+                guard context == nil else { throw Client.Failure.busyThread }
                 // The private owner was already running. Preserve a follow-up's
                 // queue semantics; a model-bound message must never enter this path.
                 do { try await client.enqueue(text, submission: submission, in: reader.id, owner: owner, expectedModel: expected) }

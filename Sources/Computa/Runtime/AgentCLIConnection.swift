@@ -15,6 +15,7 @@ enum AgentCLIError: LocalizedError, Sendable {
 /// failure or an arbitrary internal server error cannot establish that.
 struct AgentCLIInvalidRequest: LocalizedError, Sendable {
     let message: String
+    var code: Int? = nil
     var errorDescription: String? { message }
 }
 
@@ -99,7 +100,7 @@ actor AgentCLIConnection {
             let detail = String(reason.prefix(1200))
             let code = error["code"] as? Int
             if reportInvalidRequests && (code == -32601 || code == -32602) {
-                waiting.resume(throwing: AgentCLIInvalidRequest(message: detail))
+                waiting.resume(throwing: AgentCLIInvalidRequest(message: detail, code: code))
             } else {
                 waiting.resume(throwing: code == -32000 ? AgentCLIError.signInRequired(detail) : .protocolError(detail))
             }

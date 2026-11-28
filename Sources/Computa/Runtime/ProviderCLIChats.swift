@@ -147,6 +147,53 @@ actor ProviderCLIChats {
         } catch { await conn.close(); throw error }
     }
 
+    private func selectModel(_ modelID: String, session: String, config: [String: Any], connection conn: AgentCLIConnection) async throws {
+        if let slug = ProviderCLI.slug(modelID) {
+            let catalog = AgentCLIModels(session: config)
+            guard catalog.entries.contains(where: { $0.id == slug }) else {
+                throw AgentCLIError.unavailable("The CLI no longer lists this model. Refresh its models and choose again.")
+            }
+            if let key = catalog.configID {
+                let changed = try await rpc(conn, "session/set_config_option", ["sessionId": session, "configId": key, "value": slug])
+                let controls = changed["configOptions"] as? [[String: Any]]
+                guard controls?.first(where: { $0["id"] as? String == key })?["currentValue"] as? String == slug else {
+                    throw AgentCLIError.protocolError("The CLI did not confirm the selected model.")
+                }
+            } else {
+                _ = try await rpc(conn, "session/set_model", ["sessionId": session, "modelId": slug])
+            }
+        }
+    }
+
+    /// A fresh ACP session gets only the messages from the selected thread.
+    /// Client capabilities and approval scope belong to this connection.
+    func routedReply(_ prompt: String, model: String) async throws -> RoutedCLIReply {
+        guard let provider = ProviderCLI.conversationProvider(for: model), let slug = ProviderCLI.slug(model), !shuttingDown else { throw CodexDesktopSidebarClient.Failure.unavailableModel }
+        let directory = root.appendingPathComponent("RoutedSessions/" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let collector = RoutedACPResponse()
+        let conn = try connection(provider, directory: directory) { [weak collector] frame in await collector?.receive(frame) }
+        let key = UUID()
+        discoveries[key] = conn
+        defer { discoveries.removeValue(forKey: key) }
+        do {
+            await collector.attach(conn)
+            _ = try await initialize(conn)
+            let config = try await rpc(conn, "session/new", ["cwd": directory.path, "mcpServers": [Any]()])
+            guard let session = config["sessionId"] as? String, !session.isEmpty else { throw AgentCLIError.protocolError("The CLI omitted its session ID.") }
+            try await selectModel(model, session: session, config: config, connection: conn)
+            await collector.expect(session, model: slug, configID: AgentCLIModels(session: config).configID)
+            let result: [String: Any]
+            do { result = try await rpc(conn, "session/prompt", ["sessionId": session, "prompt": [["type": "text", "text": prompt]]], timeout: .seconds(600)) }
+            catch { throw CodexDesktopSidebarClient.Failure.deliveryUnconfirmed }
+            guard result["stopReason"] as? String == "end_turn" else { throw AgentCLIError.protocolError("The provider did not complete this reply.") }
+            let answer = try await collector.result()
+            await conn.close()
+            return RoutedCLIReply(session: session, model: model, text: answer)
+        } catch { await conn.close(); throw error }
+    }
+
     func submit(_ prompt: String, id: String, provider: ProviderCLI, modelID: String) async throws {
         guard UUID(uuidString: id) != nil, !shuttingDown else { throw AgentCLIError.cancelled }
         guard active[id] == nil else { throw InstalledCodexCLI.Failure.busy }
@@ -202,22 +249,8 @@ actor ProviderCLIChats {
                 session = newID
             }
             try check(id, turnID)
-            if let slug = ProviderCLI.slug(modelID) {
-                let catalog = AgentCLIModels(session: config)
-                guard catalog.entries.contains(where: { $0.id == slug }) else {
-                    throw AgentCLIError.unavailable("The CLI no longer lists this model. Refresh its models and choose again.")
-                }
-                if let key = catalog.configID {
-                    let changed = try await rpc(conn, "session/set_config_option", ["sessionId": session, "configId": key, "value": slug])
-                    let controls = changed["configOptions"] as? [[String: Any]]
-                    guard controls?.first(where: { $0["id"] as? String == key })?["currentValue"] as? String == slug else {
-                        throw AgentCLIError.protocolError("The CLI did not confirm the selected model.")
-                    }
-                } else {
-                    _ = try await rpc(conn, "session/set_model", ["sessionId": session, "modelId": slug])
-                }
-                try check(id, turnID)
-            }
+            try await selectModel(modelID, session: session, config: config, connection: conn)
+            try check(id, turnID)
             var task = saved?.task ?? AgentTask(id: id, runtimeThreadID: id, title: String(prompt.prefix(72)),
                 summary: prompt, status: .running, workspace: directory.path, model: modelID, entries: [])
             task.restartInterruptedTurnID = nil

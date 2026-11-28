@@ -3625,6 +3625,7 @@ private extension CodexAppServerRuntime {
                   serverGeneration == generation, turnSubmissionClaims[id] == claim else { throw Failure.busyThread }
             var params: [String: Any] = ["threadId": id, "model": turn.model,
                 "clientUserMessageId": turn.submission.uuidString.lowercased(), "input": [["type": "text", "text": turn.prompt]]]
+            if let context = turn.routedContext { params["additionalContext"] = CodexDesktopSidebarClient.additionalRouteContext(context) }
             if accessMode == .askEveryTime {
                 let sandbox = resumed["sandbox"] as? [String: Any]
                 switch sandbox?["type"] as? String {

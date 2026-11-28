@@ -3,7 +3,12 @@ export interface CodexItem {
   id: string;
   [field: string]: unknown;
 }
+export interface RoutedExchange {
+  id: string; anchor: string; model: string; prompt: string;
+  status: 'unconfirmed' | 'completed' | 'failed'; answer?: string;
+}
 export interface CodexEntry {
+  routed?: RoutedExchange[];
   item: CodexItem;
   turnId: string;
   outputDeferred?: boolean;
