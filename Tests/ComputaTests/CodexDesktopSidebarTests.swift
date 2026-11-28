@@ -124,6 +124,39 @@ final class CodexDesktopSidebarTests: XCTestCase {
         throw CocoaError(.coderInvalidValue)
     }
 
+    func testImportedWebsiteSelectionRequiresCurrentAccountChoiceAtSelectAndSend() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let prefs = isolatedTestPreferences()
+        let source = try XCTUnwrap(CodexSidebarSync.installed(preferences: prefs, candidates: [], directory: root))
+        let store = try CodexImportStore(directory: root)
+        let id = try store.accepted(owner: "A", source: "S", snapshot: .init(title: "Example", model: "gpt", pages: []))
+        let window = WorkspaceTabs(defaults: prefs)
+        window.showsDesktopChats = true
+        source.attach(window)
+        source.open(id, in: window)
+        let reader = try XCTUnwrap(window.desktopReader)
+        let runtime = CodexAppServerRuntime(configuration: .localQwen)
+        let choice = WebsiteModelChoice(provider: "gemini", key: "Flash", label: "Flash")
+        let option = WebsiteModelCatalog.option(for: choice)
+        let selection = ["thread": id, "selection": reader.request.uuidString, "model": option.id, "expected": "gpt"]
+        do {
+            _ = try await source.conversation("changeModel", body: selection, in: window, runtime: runtime)
+            XCTFail("An unobserved account choice was selectable")
+        } catch { XCTAssertEqual(try store.selectedModel(id), "gpt") }
+        _ = try await source.conversation("changeModel", body: selection, in: window, runtime: runtime, websiteOptions: [option])
+        let submission = ["thread": id, "selection": reader.request.uuidString, "expected": option.id,
+                          "submission": UUID().uuidString, "text": "hello"]
+        do {
+            _ = try await source.conversation("send", body: submission, in: window, runtime: runtime, websiteOptions: [])
+            XCTFail("An expired account choice reached submission")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, CodexDesktopSidebarClient.Failure.unavailableModel.localizedDescription)
+            XCTAssertEqual(try store.selectedModel(id), option.id)
+            XCTAssertEqual((try store.page(id, cursor: nil, ascending: true)["data"] as? [[String: Any]])?.count, 0)
+        }
+    }
+
     /// Opt in with a synthetic, explicitly prepared official thread. Never select the user's active chat.
     func testRealImportAndProviderContinuation() async throws {
         guard let root = ProcessInfo.processInfo.environment["KOLMOGOR_IMPORT_LIVE"] else { throw XCTSkip("Requires a disposable signed-in conversation.") }

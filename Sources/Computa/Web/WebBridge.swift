@@ -123,7 +123,8 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerW
             return
         }
         Task {
-            do { replyHandler(try await source.conversation(action, body: body, in: windowTabs, runtime: state.conversationRuntime), nil) }
+            do { replyHandler(try await source.conversation(action, body: body, in: windowTabs, runtime: state.conversationRuntime,
+                                                           websiteOptions: state.modelOptions), nil) }
             catch { replyHandler(nil, error.localizedDescription) }
         }
     }

@@ -1163,6 +1163,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         try await core.resolveApproval(requestID: requestID, approved: approved)
     }
 
+    func conversationReply(_ prompt: String, model: String, chat: String, submission: UUID) async throws -> RoutedConversationReply {
+        try await core.websiteConversationReply(prompt, model: model, chat: chat, submission: submission)
+    }
+
     func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
         await core.configureEmbeddedWebModelTransport(transport)
     }
@@ -1810,6 +1814,14 @@ private extension CodexAppServerRuntime {
             await webModelServer.setGroqSubmissionIntervalForTesting(interval)
         }
         #endif
+
+        func websiteConversationReply(_ prompt: String, model: String, chat: String, submission: UUID) async throws -> RoutedConversationReply {
+            guard !isShuttingDown, !isPreparingCommandShutdown, embeddedWebModelConfigured else {
+                throw WebModelServer.Failure.embeddedRequired
+            }
+            return try await webModelServer.importedReply(prompt, model: model, chat: chat, submission: submission,
+                generation: websiteSessionRuntimeGeneration)
+        }
 
         func configureEmbeddedWebModelTransport(_ transport: any WebModelTransport) async {
             guard !isShuttingDown, !isPreparingCommandShutdown else { return }

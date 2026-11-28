@@ -219,6 +219,13 @@ enum WebsiteModelCatalog {
         return selected
     }
 
+    /// Imported chats can route only explicit choices offered by the regular picker.
+    static func importedSelection(for id: String) -> Selection? {
+        guard let selection = inferenceSelection(for: id), discoveryProviders.contains(selection.provider),
+              selection.choice != nil || selection.modeChoice != nil else { return nil }
+        return selection
+    }
+
     /// Decimal components are bounded by the existing 128-byte field limit and
     /// compared without machine-integer conversion or lexical version ordering.
     static func plainGPTVersion(_ label: String) -> [String]? {

@@ -6,7 +6,8 @@ import { Icon } from './Icon';
 import { shouldSubmitPromptKey } from './promptQueue';
 import { activityLabel, activityText, entryKey, CodexHistoryWindow } from './codexTranscript';
 import type { CodexEntry, CodexPage, HistoryDirection, UserPart } from './codexTranscript';
-import type { DesktopReader } from './types';
+import { groupModelOptions, modelOptionLabel } from './ModelSelector';
+import type { AppSnapshot, DesktopReader } from './types';
 
 function call<T>(reader: DesktopReader, action: string, fields: Record<string, string | string[]> = {}): Promise<T> {
   const bridge = window.webkit?.messageHandlers?.codexConversation;
@@ -20,7 +21,7 @@ function TranscriptEntry({entry}: {entry: CodexEntry}) {
   const [open, setOpen] = useState(false);
   const item = entry.item;
   if (item.type === 'deliveryStatus') return <p role="status">{String(item.message)}</p>;
-  if (item.type === 'agentMessage') return <article><strong>{entry.model?.split('/model/').at(-1) || 'Codex'}</strong><ResponseMarkdown text={String(item.text ?? '')} /></article>;
+  if (item.type === 'agentMessage') return <article><strong>{entry.modelLabel || entry.model?.split('/model/').at(-1) || 'Codex'}</strong><ResponseMarkdown text={String(item.text ?? '')} /></article>;
   if (item.type === 'userMessage') return <article><strong>You</strong>
     {(item.content as UserPart[] ?? []).map((part, i) =>
       part.type === 'image' && /^data:image\/(png|jpeg|webp|gif);base64,/i.test(part.url ?? '')
@@ -36,11 +37,19 @@ function TranscriptEntry({entry}: {entry: CodexEntry}) {
 type Choice = {model:string; displayName:string};
 const providers = [{id:'codex',name:'Codex CLI'}, {id:'antigravity',name:'Gemini via Antigravity'}, {id:'claude',name:'Claude Code'}];
 
-function Chat({reader}: {reader:DesktopReader}) {
+type WebsitePickerProps = {
+  snapshot: AppSnapshot;
+  onConnect: (route: string) => void;
+};
+
+function Chat({reader, snapshot, onConnect}: {reader:DesktopReader} & WebsitePickerProps) {
   const [history] = useState(() => new CodexHistoryWindow());
   const [entries,setEntries] = useState<CodexEntry[]>([]);
   const [model,setModel] = useState<string | null>(null);
   const [choices,setChoices] = useState<Record<string,Choice[]>>({});
+  const websites = groupModelOptions(snapshot.modelOptions.filter(option => option.id.startsWith('browser/')), model ?? '',
+    snapshot.providerSetups.filter(setup => setup.route.startsWith('browser/')));
+  const websiteChoices = websites.flatMap(group => group.options).filter(option => option.available !== false);
   const [draft,setDraft] = useState('');
   const [error,setError] = useState('');
   const [working,setWorking] = useState(false);
@@ -77,7 +86,9 @@ function Chat({reader}: {reader:DesktopReader}) {
     if (working || model === null || !value) return;
     setWorking(true); setError('');
     try {
-      if (value.startsWith('@')) {
+      if (value.startsWith('@browser/')) {
+        onConnect(value.slice(1));
+      } else if (value.startsWith('@')) {
         const provider = value.slice(1);
         const next = await call<Choice[]>(reader,'models',{provider});
         if (alive.current) { setChoices(old => ({...old,[provider]:next})); if (!next.length) setError('No available models on this account.'); }
@@ -123,13 +134,20 @@ function Chat({reader}: {reader:DesktopReader}) {
         <div className="desktop-send">
           <select aria-label="Conversation model" value={model ?? ''} disabled={working || model === null}
             onChange={e=>{const select=e.currentTarget as HTMLSelectElement; const value=select.value; select.value=model ?? ''; void choose(value);}}>
-            {!Object.values(choices).flat().some(c=>c.model===model) && <option value={model ?? ''} disabled>{model?.split('/model/').at(-1) || 'Choose a model'}</option>}
+            {!websiteChoices.some(option=>option.id===model) && !Object.values(choices).flat().some(c=>c.model===model) && <option value={model ?? ''} disabled>{model?.startsWith('browser/') ? 'Previously selected website model (unavailable)' : model?.split('/model/').at(-1) || 'Choose a model'}</option>}
+            {websites.map(group=><optgroup key={group.route} label={group.name + ' (website)'}>
+              {group.options.filter(option=>option.available !== false).map(option=><option key={option.id} value={option.id}>{modelOptionLabel(option)}</option>)}
+              <option value={'@'+group.route} disabled={!snapshot.canRefreshWebsiteModels || group.setup?.checkStatus === 'checking'}>
+                {group.setup?.checkStatus === 'checking' ? 'Checking models…'
+                  : group.options.some(option=>option.available !== false) ? 'Manage website connection…' : 'Connect ' + group.name + '…'}
+              </option>
+            </optgroup>)}
             {providers.map(p=><optgroup key={p.id} label={p.name}>
               {(choices[p.id] ?? []).map(c=><option key={c.model} value={c.model}>{c.displayName}</option>)}
               <option value={'@'+p.id}>{choices[p.id] ? 'Refresh models…' : 'Load models…'}</option>
             </optgroup>)}
           </select>
-          <Button aria-label="Send to selected model" disabled={!loaded || !model || working || !draft.trim()} onClick={()=>{void send();}}><Icon name="send" size={16}/></Button>
+          <Button aria-label="Send to selected model" disabled={!loaded || !model || working || !draft.trim() || (model.startsWith('browser/') && !websiteChoices.some(option=>option.id===model))} onClick={()=>{void send();}}><Icon name="send" size={16}/></Button>
         </div>
       </div>
       <p className="desktop-model-notice">Replies use this copy’s text history with the selected provider.</p>
@@ -137,10 +155,10 @@ function Chat({reader}: {reader:DesktopReader}) {
   </>;
 }
 
-export function DesktopConversation({reader,browsing}: {reader?:DesktopReader; browsing:boolean}) {
+export function DesktopConversation({reader,browsing,snapshot,onConnect}: {reader?:DesktopReader; browsing:boolean} & WebsitePickerProps) {
   return <>
     <header className="desktop-reader-title"><strong>{browsing ? 'Import from Codex' : reader?.title ?? 'Imported chats'}</strong></header>
     {browsing ? <div className="no-task-view"><p>Choose a Codex chat to copy into Kolmogor. Future replies stay in the app where you send them.</p></div>
-      : reader ? <Chat key={reader.request} reader={reader} /> : <div className="no-task-view"><p>Import a Codex chat to continue it here.</p></div>}
+      : reader ? <Chat key={reader.request} reader={reader} snapshot={snapshot} onConnect={onConnect} /> : <div className="no-task-view"><p>Import a Codex chat to continue it here.</p></div>}
   </>;
 }

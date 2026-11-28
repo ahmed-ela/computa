@@ -192,7 +192,31 @@ final class CodexImportStore {
                     WHERE EXISTS(SELECT 1 FROM sized WHERE size>CAST(? AS INTEGER))
                 ) ORDER BY ordinal
                 """, [chat, String(budget), String(budget)])
-            let prompt = prefix + "\n[" + lines.joined(separator: ",") + "]" + user
+            func render(_ rows: ArraySlice<String>) -> String {
+                prefix + "\n[" + rows.joined(separator: ",") + "]" + user
+            }
+            var prompt = render(lines[...])
+            if model.hasPrefix("browser/") {
+                // Measure the actual provider envelope, including JSON escaping. Preserve the
+                // newest complete messages and the entire new message, or fail before sending.
+                func fits(_ candidate: String) throws -> Bool {
+                    do { _ = try WebModelServer.importedRequest(candidate, model: model); return true }
+                    catch WebModelResponseCodec.Failure.promptTooLarge { return false }
+                    catch is WebsiteContextBudget.CompactionRequired { return false }
+                }
+                if try !fits(prompt) {
+                    let omission = #"{"role":"context","text":"Earlier messages omitted for length."}"#
+                    let rows = lines.filter { $0 != omission }
+                    func suffix(_ count: Int) -> String { render(([omission] + rows.suffix(count))[...]) }
+                    guard try fits(suffix(0)) else { throw AgentCLIError.unavailable("Shorten the new message before sending it to the website.") }
+                    var low = 0, high = rows.count
+                    while low < high {
+                        let mid = low + (high - low + 1) / 2
+                        if try fits(suffix(mid)) { low = mid } else { high = mid - 1 }
+                    }
+                    prompt = suffix(low)
+                }
+            }
             try append(
                 chat: chat, turn: turn,
                 item: ["id": "user", "type": "userMessage", "content": [["type": "text", "text": text]]], model: model)
@@ -205,14 +229,18 @@ final class CodexImportStore {
         }
     }
     private func payload(_ turn: String, _ item: [String: Any], _ model: String) throws -> String {
-        String(
-            decoding: try JSONSerialization.data(withJSONObject: ["turnId": turn, "item": item, "model": model]), as: UTF8.self)
+        var entry: [String: Any] = ["turnId": turn, "item": item, "model": model]
+        if let selection = WebsiteModelCatalog.importedSelection(for: model),
+           let name = selection.choice?.label ?? selection.modeChoice?.label {
+            entry["modelLabel"] = WebsiteModelCatalog.providerLabel(selection.provider) + " / " + name
+        }
+        return String(decoding: try JSONSerialization.data(withJSONObject: entry), as: UTF8.self)
     }
     private func append(chat: String, turn: String, item: [String: Any], model: String) throws {
         guard let key = item["id"] as? String else { throw CocoaError(.coderInvalidValue) }
         try run("INSERT INTO item(chat,turn,item,payload) VALUES(?,?,?,?)", [chat, turn, key, try payload(turn, item, model)])
     }
-    func finish(_ submission: UUID, chat: String, model: String, result: Result<RoutedCLIReply, Error>) throws {
+    func finish(_ submission: UUID, chat: String, model: String, result: Result<RoutedConversationReply, Error>) throws {
         let item: [String: Any]
         switch result {
         case .success(let reply):

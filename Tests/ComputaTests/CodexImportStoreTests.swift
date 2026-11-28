@@ -26,6 +26,25 @@ final class CodexImportStoreTests: XCTestCase {
         let first = (page["data"] as? [[String: Any]])?.first?["item"] as? [String: Any]
         XCTAssertEqual(first?["text"] as? String, old)
     }
+    func testWebsiteBudgetKeepsRecentHistoryAndRejectsOversizedUserMessageBeforeWriting() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let db = try CodexImportStore(directory: url)
+        let model = WebsiteModelCatalog.freshProfileDefaultModelID
+        let items = [String(repeating: "old escaped \"word\" ", count: 9_000), "recent evidence"].enumerated().map { i, text in
+            ["turnId": "t", "item": ["id": String(i), "type": "agentMessage", "text": text]] as [String: Any]
+        }
+        let chat = try db.accepted(owner: "owner", source: "source", snapshot: .init(
+            title: "Fixture", model: model, pages: [try JSONSerialization.data(withJSONObject: ["data": items])]))
+        XCTAssertThrowsError(try db.begin(String(repeating: "x", count: 180_000), submission: UUID(), chat: chat, model: model))
+        XCTAssertEqual((try db.page(chat, cursor: nil, ascending: true)["data"] as? [[String: Any]])?.count, 2)
+        let prompt = try db.begin("continue", submission: UUID(), chat: chat, model: model)
+        XCTAssertTrue(prompt.contains("Earlier messages omitted"))
+        XCTAssertTrue(prompt.contains("recent evidence"))
+        XCTAssertFalse(prompt.contains("old escaped"))
+        XCTAssertNoThrow(try WebModelServer.importedRequest(prompt, model: model))
+    }
+
     func testAccountIsolationAtomicImportAndIndependentHistoryAfterRestart() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }

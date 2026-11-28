@@ -5,6 +5,7 @@ export interface CodexItem {
 }
 export interface CodexEntry {
   model?: string;
+  modelLabel?: string;
   item: CodexItem;
   turnId: string;
   outputDeferred?: boolean;

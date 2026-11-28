@@ -4,6 +4,64 @@ import XCTest
 @testable import Computa
 
 final class WebModelServerTests: XCTestCase {
+    func testImportedChatUsesFreshVerifiedWebsiteSelectionAcrossTurns() async throws {
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        let transport = ChoiceWebModelTransport()
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        let chat = UUID().uuidString
+        for provider in namedWebsiteModelProviders where WebsiteModelCatalog.discoveryProviders.contains(provider) {
+            let choice = syntheticWebsiteChoice(provider: provider, key: "fixture-old", label: "Fixture Old")
+            let reply = try await server.importedReply("The previous answer was LANTERN. Continue.",
+                model: choice.modelID, chat: chat, submission: UUID(), generation: websiteInferenceFixtureGeneration)
+            XCTAssertEqual(reply.model, choice.modelID)
+            XCTAssertEqual(reply.text, "OK")
+            XCTAssertFalse(reply.session.isEmpty)
+        }
+        let created = await transport.createdTokens(), closed = await transport.cleanupTokens()
+        XCTAssertEqual(created.count, 6)
+        XCTAssertEqual(created, closed)
+    }
+
+    func testImportedDeepSeekModeRequiresMatchingWebsiteProofAndFinalText() throws {
+        let mode = WebsiteModeChoice(deepSeekMode: .deepthink)
+        let proof: [String: Any] = ["selected": mode.dictionary, "source": "website_mode_toggle",
+                                    "backendModel": NSNull(), "search": false]
+        var response: [String: Any] = ["status": "completed", "end_turn": true, "id": "resp_test",
+            "model": mode.requestID, "output": [["type": "message", "phase": "final_answer"]],
+            "output_text": "answer", "metadata": ["computa_website_mode": proof]]
+        func read() throws -> RoutedConversationReply {
+            try WebModelServer.importedAnswer(JSONSerialization.data(withJSONObject: response), model: mode.requestID)
+        }
+        XCTAssertEqual(try read().model, mode.requestID)
+        response["end_turn"] = false
+        XCTAssertThrowsError(try read())
+        response["end_turn"] = true
+        response["metadata"] = ["computa_website_model": proof]
+        XCTAssertThrowsError(try read())
+        response["metadata"] = ["computa_website_mode": proof.merging(["search": true]) { _, new in new }]
+        XCTAssertThrowsError(try read())
+        for id in ["browser/chatgpt", "browser/gemini", "browser/deepseek", "browser/groq",
+                   syntheticWebsiteChoice(provider: "groq", key: "fixture-old", label: "Fixture Old").modelID] {
+            XCTAssertNil(WebsiteModelCatalog.importedSelection(for: id))
+        }
+    }
+
+    func testImportedChatRejectsChangedWebsiteSelectionWithoutReplay() async throws {
+        let server = try await makeWebsiteInferenceFixtureServer(testCase: self)
+        let transport = ChoiceWebModelTransport(point: .complete, mutation: .wrongSelectedKey)
+        await server.configureEmbeddedTransport(WebsiteInferenceFixtureTransport(transport))
+        let choice = syntheticWebsiteChoice(provider: "claude", key: "fixture-new", label: "Fixture New")
+        do {
+            _ = try await server.importedReply("hello", model: choice.modelID, chat: UUID().uuidString,
+                submission: UUID(), generation: websiteInferenceFixtureGeneration)
+            XCTFail("Unexpected reply from a different website selection")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, WebModelServer.Failure.modelMismatch.localizedDescription)
+        }
+        let ops = await transport.operations()
+        XCTAssertEqual(ops.filter { $0 == "webProviderSend" }.count, 1)
+    }
+
     func testChatGPTByteBudgetStopsBeforeSendThenRequiresNativeCompactionCheckpoints() async throws {
         let label = "chat-byte-checkpoint"
         let base = FixtureWebModelTransport(replyTexts: [
