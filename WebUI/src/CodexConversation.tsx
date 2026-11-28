@@ -137,9 +137,10 @@ function Chat({reader, snapshot, onConnect}: {reader:DesktopReader} & WebsitePic
             {!websiteChoices.some(option=>option.id===model) && !Object.values(choices).flat().some(c=>c.model===model) && <option value={model ?? ''} disabled>{model?.startsWith('browser/') ? 'Previously selected website model (unavailable)' : model?.split('/model/').at(-1) || 'Choose a model'}</option>}
             {websites.map(group=><optgroup key={group.route} label={group.name + ' (website)'}>
               {group.options.filter(option=>option.available !== false).map(option=><option key={option.id} value={option.id}>{modelOptionLabel(option)}</option>)}
-              {!group.options.some(option=>option.available !== false) && <option value={'@'+group.route} disabled={!snapshot.canRefreshWebsiteModels || group.setup?.checkStatus === 'checking'}>
-                {group.setup?.checkStatus === 'checking' ? 'Checking models…' : 'Connect ' + group.name + '…'}
-              </option>}
+              <option value={'@'+group.route} disabled={!snapshot.canRefreshWebsiteModels || group.setup?.checkStatus === 'checking'}>
+                {group.setup?.checkStatus === 'checking' ? 'Checking models…'
+                  : group.options.some(option=>option.available !== false) ? 'Manage website connection…' : 'Connect ' + group.name + '…'}
+              </option>
             </optgroup>)}
             {providers.map(p=><optgroup key={p.id} label={p.name}>
               {(choices[p.id] ?? []).map(c=><option key={c.model} value={c.model}>{c.displayName}</option>)}
