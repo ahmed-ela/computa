@@ -167,7 +167,7 @@ actor ProviderCLIChats {
 
     /// A fresh ACP session gets only the messages from the selected thread.
     /// Client capabilities and approval scope belong to this connection.
-    func routedReply(_ prompt: String, model: String) async throws -> RoutedCLIReply {
+    func routedReply(_ prompt: String, model: String) async throws -> RoutedConversationReply {
         guard let provider = ProviderCLI.conversationProvider(for: model), let slug = ProviderCLI.slug(model), !shuttingDown else { throw CodexDesktopSidebarClient.Failure.unavailableModel }
         let directory = root.appendingPathComponent("RoutedSessions/" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -190,7 +190,7 @@ actor ProviderCLIChats {
             guard result["stopReason"] as? String == "end_turn" else { throw AgentCLIError.protocolError("The provider did not complete this reply.") }
             let answer = try await collector.result()
             await conn.close()
-            return RoutedCLIReply(session: session, model: model, text: answer)
+            return RoutedConversationReply(session: session, model: model, text: answer)
         } catch { await conn.close(); throw error }
     }
 

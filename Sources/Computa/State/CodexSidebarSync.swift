@@ -130,7 +130,8 @@ final class CodexSidebarSync {
         }
     }
 
-    func conversation(_ action: String, body: [String: Any], in window: WorkspaceTabs, runtime: (any AgentRuntimeClient)? = nil)
+    func conversation(_ action: String, body: [String: Any], in window: WorkspaceTabs, runtime: (any AgentRuntimeClient)? = nil,
+                      websiteOptions: [LocalModelOption] = [])
         async throws -> Any
     {
         guard !window.isClosed, window.showsDesktopChats, let id = body["thread"] as? String,
@@ -147,6 +148,12 @@ final class CodexSidebarSync {
         if action == "currentModel" { return current }
         guard let runtime else { throw InstalledCodexCLI.Failure.missing }
         func choices(_ provider: String) async throws -> [LocalModelOption] {
+            if provider.hasPrefix("browser/") {
+                return websiteOptions.filter { option in
+                    guard let selected = WebsiteModelCatalog.importedSelection(for: option.id) else { return false }
+                    return provider == "browser/" + selected.provider && option.available != false && option.selectable != false
+                }
+            }
             if provider == "codex" { return try await runtime.installedCLIModels() }
             guard let route = ProviderCLI(rawValue: provider), [.antigravity, .claude].contains(route) else {
                 throw Client.Failure.unavailableModel
@@ -166,7 +173,8 @@ final class CodexSidebarSync {
         switch action {
         case "changeModel":
             guard let model = body["model"] as? String else { throw Client.Failure.unavailableModel }
-            let provider = InstalledCodexCLI.slug(model) != nil ? "codex" : ProviderCLI.conversationProvider(for: model)?.rawValue
+            let provider = WebsiteModelCatalog.importedSelection(for: model).map { "browser/" + $0.provider }
+                ?? (InstalledCodexCLI.slug(model) != nil ? "codex" : ProviderCLI.conversationProvider(for: model)?.rawValue)
             guard let provider,
                 try await choices(provider).contains(where: { $0.id == model && $0.available != false && $0.selectable != false }
                 ),
@@ -179,9 +187,14 @@ final class CodexSidebarSync {
                 !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 text.utf16.count <= 200_000, let submission = (body["submission"] as? String).flatMap(UUID.init(uuidString:))
             else { throw Client.Failure.inconsistent }
+            if current.hasPrefix("browser/") {
+                guard let selection = WebsiteModelCatalog.importedSelection(for: current),
+                      try await choices("browser/" + selection.provider).contains(where: { $0.id == current })
+                else { throw Client.Failure.unavailableModel }
+            }
             let prompt = try db.begin(text, submission: submission, chat: id, model: current)
             do {
-                let reply = try await runtime.routedCLIReply(prompt, model: current)
+                let reply = try await runtime.conversationReply(prompt, model: current, chat: id, submission: submission)
                 try db.finish(submission, chat: id, model: current, result: .success(reply))
             } catch {
                 try db.finish(submission, chat: id, model: current, result: .failure(error))

@@ -3,7 +3,7 @@ import Foundation
 /// An imported chat gets an independent ephemeral Codex session. The source
 /// thread identifier is deliberately absent from this interface.
 enum ImportedCodexReply {
-    static func run(_ prompt: String, model: String, directory: URL, profile: URL) async throws -> RoutedCLIReply {
+    static func run(_ prompt: String, model: String, directory: URL, profile: URL) async throws -> RoutedConversationReply {
         guard let slug = InstalledCodexCLI.slug(model) else { throw InstalledCodexCLI.Failure.unavailable }
         let work = directory.appendingPathComponent("ImportedReplies/" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(
@@ -90,7 +90,7 @@ enum ImportedCodexReply {
                 return try await group.next()!
             }
             await conn.close()
-            return RoutedCLIReply(session: thread, model: model, text: answer)
+            return RoutedConversationReply(session: thread, model: model, text: answer)
         } catch {
             await conn.close()
             throw error

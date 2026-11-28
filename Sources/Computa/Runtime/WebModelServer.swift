@@ -1623,6 +1623,54 @@ actor WebModelServer {
         return CleanupResult(receipt: receipt, issues: [])
     }
 
+    static func importedRequest(_ prompt: String, model: String) throws -> WebModelResponseCodec.Request {
+        guard WebsiteModelCatalog.importedSelection(for: model) != nil else { throw Failure.modelNotFound }
+        let body = try JSONSerialization.data(withJSONObject: ["model": model, "input": prompt, "stream": false, "tools": []])
+        let request = try WebModelResponseCodec.prepareRequest(body)
+        try WebsiteContextBudget.validate(request, maintenance: false)
+        return request
+    }
+
+    /// An imported copy already owns durable chat and submission IDs. Pass them directly to
+    /// the same verified inference path as a native turn, without creating an agent or a tool loop.
+    func importedReply(_ prompt: String, model: String, chat: String, submission: UUID,
+                       generation: UUID) async throws -> RoutedConversationReply {
+        let thread = try Self.canonicalID(chat), turn = submission.uuidString.lowercased()
+        let request = try Self.importedRequest(prompt, model: model)
+        let preparation = UUID()
+        try prepareInferenceTurn(taskID: thread, threadID: thread, runtimeGeneration: generation, preparationID: preparation)
+        let reply: RoutedConversationReply
+        do {
+            try registerInferenceTurn(taskID: thread, threadID: thread, turnID: turn, runtimeGeneration: generation, preparationID: preparation)
+            let result = try await infer(request, taskID: thread, identity: NativeRequestIdentity(threadID: thread, turnID: turn))
+            reply = try Self.importedAnswer(result.data, model: model)
+        } catch {
+            _ = await finish(taskID: thread, runtimeGeneration: generation)
+            throw error
+        }
+        let issues = await finish(taskID: thread, runtimeGeneration: generation)
+        guard issues.isEmpty else { throw Failure.cleanupFailed }
+        return reply
+    }
+
+    static func importedAnswer(_ data: Data, model: String) throws -> RoutedConversationReply {
+        guard let selection = WebsiteModelCatalog.importedSelection(for: model),
+              let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              value["status"] as? String == "completed", value["end_turn"] as? Bool == true,
+              value["model"] as? String == model, let id = value["id"] as? String, !id.isEmpty,
+              let metadata = value["metadata"] as? [String: Any],
+              let output = value["output"] as? [[String: Any]], output.count == 1,
+              output[0]["type"] as? String == "message", output[0]["phase"] as? String == "final_answer",
+              let text = value["output_text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw Failure.providerFailed }
+        var snapshot: [String: Any] = [:]
+        snapshot["modelEvidence"] = metadata["computa_website_model"]
+        snapshot["modeEvidence"] = metadata["computa_website_mode"]
+        _ = try WebsiteSelectionEvidence.parse(snapshot: snapshot, provider: selection.provider,
+            expectedModel: selection.choice, expectedMode: selection.modeChoice)
+        return RoutedConversationReply(session: id, model: model, text: text)
+    }
+
     func infer(_ data: Data, taskID: String) async throws -> Data {
         let prepared: WebModelResponseCodec.Request
         let identity: NativeRequestIdentity

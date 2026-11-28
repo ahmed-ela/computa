@@ -104,7 +104,10 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         return task
     }
 
-    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply {
+    func conversationReply(_ prompt: String, model: String, chat: String, submission: UUID) async throws -> RoutedConversationReply {
+        if model.hasPrefix("browser/") {
+            return try await bundled.conversationReply(prompt, model: model, chat: chat, submission: submission)
+        }
         if InstalledCodexCLI.slug(model) != nil {
             return try await ImportedCodexReply.run(prompt, model: model, directory: importWorkRoot, profile: importProfile)
         }

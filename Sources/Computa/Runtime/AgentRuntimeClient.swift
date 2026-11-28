@@ -20,7 +20,7 @@ protocol AgentRuntimeClient: Sendable {
     var firstMessageStore: FirstMessageStore? { get }
     var restartStore: AgentRestartStore? { get }
 
-    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply
+    func conversationReply(_ prompt: String, model: String, chat: String, submission: UUID) async throws -> RoutedConversationReply
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption]
     func installedCLIModels() async throws -> [LocalModelOption]
     func readCodexCLIUsage() async -> CodexCLIUsage.Report
@@ -52,7 +52,7 @@ struct RuntimeShutdownReport: Equatable, Sendable {
 }
 
 extension AgentRuntimeClient {
-    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply { throw AgentCLIError.unavailable("This runtime cannot route provider replies.") }
+    func conversationReply(_ prompt: String, model: String, chat: String, submission: UUID) async throws -> RoutedConversationReply { throw AgentCLIError.unavailable("This runtime cannot route provider replies.") }
     var firstMessageStore: FirstMessageStore? { nil }
     var restartStore: AgentRestartStore? { nil }
     func loadWorkspaceHistory(including threadIDs: Set<String>) async throws -> WorkspaceHistory {

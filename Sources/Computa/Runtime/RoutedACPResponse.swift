@@ -1,6 +1,6 @@
 import Foundation
 
-struct RoutedCLIReply: Sendable {
+struct RoutedConversationReply: Sendable {
     let session: String
     let model: String
     let text: String
