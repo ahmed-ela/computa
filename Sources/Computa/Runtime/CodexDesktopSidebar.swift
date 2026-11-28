@@ -283,19 +283,25 @@ actor CodexDesktopSidebarClient {
         return ModelSelection(state: try await modelState(row, owner: owner), choices: visible)
     }
 
-    // Never resume a thread on our independent sidebar app-server. It can see the
-    // same files while the desktop is still running a different in-memory session.
+    // Codex locks a conversation to its active writer. Resuming an unowned
+    // conversation can also start its queued turn immediately. Keep this
+    // sidebar client read-only with respect to the conversation's execution.
     private func withIdleOwner<T: Sendable>(_ id: String, owner: Account, expected: String?,
                                              perform: (AgentCLIConnection) async throws -> T) async throws -> T {
-        guard let conn = try await CodexDesktopOwner.connect(home: codexHome) else { throw Failure.ownerUnavailable }
+        guard let conn = try await CodexDesktopOwner.connect(home: codexHome) else {
+            // A queue can change after the picker opens. Changing the model in
+            // the desktop could also reroute a previously queued prompt.
+            guard try await queuedMessages(id, owner: owner).isEmpty else { throw Failure.pendingQueue }
+            throw Failure.ownerUnavailable
+        }
         do {
             try await verifyVisible(id, owner: owner)
             guard try await account(on: conn) == owner else { throw Failure.noChat }
             let row = try await liveModel(id, on: conn)
+            guard try await queuedMessages(id, owner: owner).isEmpty else { throw Failure.pendingQueue }
             guard row.status.type != "notLoaded" else { throw Failure.ownerUnavailable }
             guard row.status.type == "idle" else { throw Failure.busyThread }
             guard row.model == expected else { throw Failure.modelChanged }
-            guard try await queuedMessages(id, owner: owner).isEmpty else { throw Failure.pendingQueue }
             let result = try await perform(conn)
             await conn.close()
             return result

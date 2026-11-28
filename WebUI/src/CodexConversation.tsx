@@ -3,6 +3,7 @@ import { Button } from '@octanejs/shadcn/Button';
 import { Textarea } from '@octanejs/shadcn/Textarea';
 import { ResponseMarkdown } from './ResponseMarkdown';
 import { Icon } from './Icon';
+import { copyText } from './clipboard';
 import { shouldSubmitPromptKey } from './promptQueue';
 import { activityLabel, activityText, entryKey, CodexHistoryWindow } from './codexTranscript';
 import type { CodexEntry, CodexPage, HistoryDirection, UserPart } from './codexTranscript';
@@ -57,6 +58,7 @@ function Chat({reader}: {reader: DesktopReader}) {
   const [historyError, setHistoryError] = useState('');
   const [queue, setQueue] = useState<string[]>([]);
   const [draft, setDraft] = useState('');
+  const [copiedDraft, setCopiedDraft] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
   const [modelError, setModelError] = useState('');
   const [catalogError, setCatalogError] = useState('');
@@ -245,6 +247,7 @@ function Chat({reader}: {reader: DesktopReader}) {
       {sendError && <p role="alert">{sendError}</p>}
       {(modelError || catalogError) && <p role="alert">{modelError || catalogError}</p>}
       {intent.kind === 'handoff' && <div className="desktop-model-notice" role="status">Choose {catalog?.choices.find(c => c.model === intent.model)?.displayName ?? intent.model} in Codex and send the next message there. Its reply will appear here.
+        {draft && <Button variant="ghost" onClick={() => void copyText(draft).then(() => setCopiedDraft(draft)).catch(e => setModelError(errorText(e)))}>{copiedDraft === draft ? 'Draft copied' : 'Copy draft'}</Button>}
         <Button variant="ghost" onClick={() => void call(reader, 'openModelInCodex').catch(e => setModelError(errorText(e)))}>Open in Codex</Button>
         <Button variant="ghost" onClick={() => setIntent({kind:'follow'})}>Cancel</Button></div>}
       {(intent.kind === 'unconfirmed' || (intent.kind === 'bound' && !modelReady)) && <div className="desktop-model-notice" role="status">Codex hasn’t confirmed the selected model for this turn.

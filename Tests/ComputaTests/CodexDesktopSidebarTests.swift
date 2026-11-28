@@ -411,11 +411,28 @@ final class CodexDesktopSidebarTests: XCTestCase {
                             "A private writer requires a handoff")
         try await expectDOM("\(picker).value === 'gpt-6.2-sol' && document.querySelector('[aria-label=\"Send to Codex\"]').disabled && document.querySelector('textarea').value === 'Follow up from Kolmogor'",
                             "An unconfirmed switch keeps the previous model and the unsent draft")
+        _ = try await view.evaluateJavaScript("""
+            Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {
+                writeText: async text => { window.copiedCodexDraft = text }
+            }});
+            Array.from(document.querySelectorAll('.desktop-model-notice button')).find(b => b.textContent === 'Copy draft').click()
+            """)
+        try await expectDOM("window.copiedCodexDraft === 'Follow up from Kolmogor' && document.querySelector('.desktop-model-notice').textContent.includes('Draft copied')",
+                            "The explicit copy action transfers the draft without changing the Codex conversation")
         XCTAssertTrue(wakes.isEmpty)
         _ = try await view.evaluateJavaScript("Array.from(document.querySelectorAll('.desktop-model-notice button')).find(b => b.textContent === 'Cancel').click()")
         try await expectDOM("!document.querySelector('[aria-label=\"Send to Codex\"]').disabled", "Composer is ready")
         _ = try await view.evaluateJavaScript("document.querySelector('[aria-label=\"Send to Codex\"]').click()")
         try await expectDOM("document.querySelector('.desktop-queue')?.textContent.includes('1 message queued')", "Codex acknowledged the queued reply")
+        XCTAssertEqual(wakes, [second])
+        // Deliver a stale change event after another message has been queued.
+        // The native boundary must protect the queue even if the menu was open.
+        _ = try await view.evaluateJavaScript("""
+            (() => { const select = \(picker); select.value = 'gpt-6.1-sol';
+                select.dispatchEvent(new Event('change', {bubbles:true})); })()
+            """)
+        try await expectDOM("Array.from(document.querySelectorAll('[role=alert]')).some(e => e.textContent.includes('queued messages'))",
+                            "A pending submission prevents even a private-desktop model handoff")
         XCTAssertEqual(wakes, [second])
         let queued = try await call("thread/queue/list", ["threadId": second])
         let rows = try XCTUnwrap(queued["data"] as? [[String: Any]])
