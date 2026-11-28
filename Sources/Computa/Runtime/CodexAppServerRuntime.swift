@@ -941,7 +941,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
 
         enum Executable: Sendable {
             case bundled
-            case installedCLI
+            case installedCLI(candidates: [URL] = InstalledCodexCLI.candidateURLs)
             #if DEBUG
             /// Only isolated tests replace the transport with a bounded fixture.
             case fixture(path: String)
@@ -949,8 +949,8 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
 
             func resolve() async throws -> ResolvedExecutable {
                 switch self {
-                case .installedCLI:
-                    return ResolvedExecutable(url: try await InstalledCodexCLI.executable(),
+                case .installedCLI(let candidates):
+                    return ResolvedExecutable(url: try await InstalledCodexCLI.executable(candidates: candidates),
                                               arguments: InstalledCodexCLI.arguments, capabilities: [])
                 case .bundled:
                     let artifact = try ComputaRuntimeArtifact.resolve()
@@ -970,6 +970,7 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         }
 
         var executable: Executable = .bundled
+        var installedCLIProfile = InstalledCodexCLI.userProfile
         var backend: LocalInferenceBackend = .external
         var modelProvider: String
         var model: String
@@ -1095,6 +1096,10 @@ final class CodexAppServerRuntime: AgentRuntimeClient, @unchecked Sendable {
         var continuation: AsyncStream<AgentRuntimeEvent>.Continuation?
         eventStream = AsyncStream { continuation = $0 }
         core = Core(configuration: configuration, events: continuation!, visualGrounder: visualGrounder)
+    }
+
+    func continueCodexConversation(_ turn: SyncedCodexTurn, accessMode: AccessMode) async throws {
+        try await core.continueCodexConversation(turn, accessMode: accessMode)
     }
 
     func installedCLIModels() async throws -> [LocalModelOption] {
@@ -1481,6 +1486,11 @@ private extension CodexAppServerRuntime {
         private var nativeStopOperationIDs: [AgentTask.ID: UUID] = [:]
         private var pendingCompactionRequests: Set<AgentTask.ID> = []
         private var compactionReservations: Set<AgentTask.ID> = []
+        // Official shared threads use the CLI's canonical history; they are never
+        // registered in Kolmogor's private chat index.
+        private var syncedOperations = Set<String>()
+        private var syncedSubscriptions = Set<String>()
+        private var syncedReleasePending = Set<String>()
         private var turnSubmissionClaims: [AgentTask.ID: UUID] = [:]
         // Unlike an in-flight claim, this survives its removal so a delayed
         // prior terminal event cannot overwrite even a failed newer submit.
@@ -1658,10 +1668,7 @@ private extension CodexAppServerRuntime {
                 codexHomePath: configuration.codexHomePath
             )
             if configuration.usesInstalledCLI {
-                let userHome = FileManager.default.homeDirectoryForCurrentUser
-                let configured = ProcessInfo.processInfo.environment["CODEX_HOME"]
-                environment["CODEX_HOME"] = configured.flatMap { $0.hasPrefix("/") ? $0 : nil }
-                    ?? userHome.appendingPathComponent(".codex").path
+                environment["CODEX_HOME"] = configuration.installedCLIProfile.path
             }
             // The explicitly opted-in external test/backend retains only its
             // endpoint controls, never ambient credentials or other Codex state.
@@ -3553,6 +3560,117 @@ private extension CodexAppServerRuntime {
                   result?["modelProvider"] as? String == "openai" else { throw InstalledCodexCLI.Failure.unavailable }
         }
 
+        private func syncedResult(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
+            let bytes = try await request(method: method, params: params, timeout: .seconds(15))
+            guard let envelope = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+                  let result = envelope["result"] as? [String: Any] else { throw RuntimeError.malformedResponse(method) }
+            return result
+        }
+
+        private func checkSyncedThread(_ turn: SyncedCodexTurn) async throws {
+            typealias Failure = CodexDesktopSidebarClient.Failure
+            let account = try await syncedResult("account/read", [:])
+            guard try CodexDesktopSidebarClient.decodeAccount(JSONSerialization.data(withJSONObject: account)) == turn.owner
+                else { throw Failure.noChat }
+            let list = try await syncedResult("thread/list", ["includedThreadIds": [turn.thread], "currentAccountOnly": true,
+                "useStateDbOnly": true, "archived": false, "limit": 1])
+            guard let rows = list["data"] as? [[String: Any]], rows.count == 1,
+                  rows[0]["id"] as? String == turn.thread else { throw Failure.noChat }
+            let queue = try await syncedResult("thread/queue/list", ["threadId": turn.thread, "limit": 1])
+            guard let queued = queue["data"] as? [Any], queued.isEmpty else { throw Failure.pendingQueue }
+        }
+
+        func continueCodexConversation(_ turn: SyncedCodexTurn, accessMode: AccessMode) async throws {
+            typealias Failure = CodexDesktopSidebarClient.Failure
+            let id = turn.thread
+            guard configuration.usesInstalledCLI, UUID(uuidString: id) != nil,
+                  turn.profile.standardizedFileURL.resolvingSymlinksInPath().path == configuration.installedCLIProfile.standardizedFileURL.resolvingSymlinksInPath().path else { throw Failure.noChat }
+            guard syncedOperations.insert(id).inserted else { throw Failure.busyThread }
+            let claim = UUID()
+            guard turnSubmissionClaims[id] == nil else { syncedOperations.remove(id); throw Failure.busyThread }
+            turnSubmissionClaims[id] = claim
+            defer {
+                if turnSubmissionClaims[id] == claim { turnSubmissionClaims.removeValue(forKey: id) }
+                syncedOperations.remove(id)
+                Task { await self.releaseIdleSyncedThread(id) }
+            }
+            try await start()
+            let generation = serverGeneration
+            try await checkSyncedThread(turn)
+            guard try await installedCLIModels(provider: turn.provider).contains(where: { $0.id == InstalledCodexCLI.prefix + turn.model })
+                else { throw Failure.unavailableModel }
+            let initial = try await syncedResult("thread/read", ["threadId": id])
+            guard let row = initial["thread"] as? [String: Any], row["id"] as? String == id,
+                  row["modelProvider"] as? String == turn.provider else { throw Failure.noChat }
+            guard row["model"] as? String == turn.expected else { throw Failure.modelChanged }
+            let status = (row["status"] as? [String: Any])?["type"] as? String
+            guard status == "notLoaded" || (status == "idle" && syncedSubscriptions.contains(id)),
+                  turnIdentity.activeTurnID(for: id) == nil else { throw Failure.busyThread }
+            // Only Send may acquire the writer. Resume can drain an existing queue,
+            // so pass no model or workspace overrides and check again before dispatch.
+            let resumed: [String: Any]
+            do { resumed = try await syncedResult("thread/resume", ["threadId": id, "excludeTurns": true]) }
+            catch let error as AgentRPCError where error.message == "thread " + id + " already has an active writer" {
+                throw Failure.ownerUnavailable
+            }
+            guard let thread = resumed["thread"] as? [String: Any], thread["id"] as? String == id else { throw Failure.noChat }
+            syncedSubscriptions.insert(id)
+            taskForThread[id] = id
+            guard resumed["modelProvider"] as? String == turn.provider,
+                  turn.expected == nil || resumed["model"] as? String == turn.expected else { throw Failure.modelChanged }
+            try await checkSyncedThread(turn)
+            let current = try await syncedResult("thread/read", ["threadId": id])
+            guard let currentThread = current["thread"] as? [String: Any],
+                  (currentThread["status"] as? [String: Any])?["type"] as? String == "idle",
+                  serverGeneration == generation, turnSubmissionClaims[id] == claim else { throw Failure.busyThread }
+            var params: [String: Any] = ["threadId": id, "model": turn.model,
+                "clientUserMessageId": turn.submission.uuidString.lowercased(), "input": [["type": "text", "text": turn.prompt]]]
+            if accessMode == .askEveryTime {
+                let sandbox = resumed["sandbox"] as? [String: Any]
+                switch sandbox?["type"] as? String {
+                case "workspaceWrite", "dangerFullAccess": params["sandboxPolicy"] = accessMode.sandboxPolicy
+                default: params["sandboxPolicy"] = ["type": "readOnly", "networkAccess": false]
+                }
+                // Keep a stricter existing approval policy when one is present.
+                if let policy = resumed["approvalPolicy"] as? String, (policy == "on-failure" || (policy == "never" && sandbox?["type"] as? String == "dangerFullAccess")) {
+                    params["approvalPolicy"] = accessMode.approvalPolicy
+                }
+            }
+            accessModeForTask[id] = accessMode
+            let token = turnIdentity.beginStart(taskID: id)
+            do {
+                let result = try await syncedResult("turn/start", params)
+                guard let reply = result["turn"] as? [String: Any], let turnID = reply["id"] as? String, !turnID.isEmpty
+                    else { throw Failure.deliveryUnconfirmed }
+                _ = turnIdentity.acknowledgeStart(taskID: id, turnID: turnID, token: token)
+            } catch {
+                turnIdentity.cancelStart(taskID: id, token: token)
+                throw Failure.deliveryUnconfirmed
+            }
+        }
+
+        private func releaseIdleSyncedThread(_ id: String) async {
+            guard syncedSubscriptions.contains(id) else { return }
+            guard syncedOperations.insert(id).inserted else { syncedReleasePending.insert(id); return }
+            syncedReleasePending.remove(id)
+            defer {
+                syncedOperations.remove(id)
+                if syncedReleasePending.remove(id) != nil { Task { await self.releaseIdleSyncedThread(id) } }
+            }
+            do {
+                let result = try await syncedResult("thread/read", ["threadId": id])
+                guard let thread = result["thread"] as? [String: Any],
+                      (thread["status"] as? [String: Any])?["type"] as? String == "idle" else { return }
+                let resultQueue = try await syncedResult("thread/queue/list", ["threadId": id, "limit": 1])
+                guard let queue = resultQueue["data"] as? [Any], queue.isEmpty else { return }
+                let reply = try await syncedResult("thread/unsubscribe", ["threadId": id])
+                if reply["status"] as? String == "unsubscribed" {
+                    syncedSubscriptions.remove(id)
+                    if threadForTask[id] == nil { taskForThread.removeValue(forKey: id); accessModeForTask.removeValue(forKey: id) }
+                }
+            } catch { /* A future idle notification or Send will recheck the subscription. */ }
+        }
+
         func refreshInstalledCLIModels() async throws -> [LocalModelOption] {
             guard configuration.usesInstalledCLI else { throw InstalledCodexCLI.Failure.missing }
             // Login and account changes in Terminal belong to another process.
@@ -3582,7 +3700,7 @@ private extension CodexAppServerRuntime {
             return codexCLIUsage.completeRead(id, buckets: buckets)
         }
 
-        private func installedCLIModels() async throws -> [LocalModelOption] {
+        private func installedCLIModels(provider: String? = nil) async throws -> [LocalModelOption] {
             guard configuration.usesInstalledCLI else { throw InstalledCodexCLI.Failure.missing }
             let bytes = try await request(method: "account/read", params: [:], timeout: .seconds(15))
             let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any]
@@ -3592,6 +3710,7 @@ private extension CodexAppServerRuntime {
             struct Reply: Decodable { let result: InstalledCodexCLI.Page }
             return try await InstalledCodexCLI.models { cursor in
                 var params: [String: Any] = ["limit": 100, "includeHidden": false]
+                if let provider { params["modelProvider"] = provider }
                 if let cursor { params["cursor"] = cursor }
                 let bytes = try await self.request(method: "model/list", params: params, timeout: .seconds(15))
                 do { return try JSONDecoder().decode(Reply.self, from: bytes).result }
@@ -3931,6 +4050,9 @@ private extension CodexAppServerRuntime {
                   let taskID = taskForThread[threadID]
             else { return }
 
+            if syncedSubscriptions.contains(threadID), method == "turn/completed" || method == "thread/status/changed" {
+                Task { await self.releaseIdleSyncedThread(threadID) }
+            }
             switch method {
             case "turn/started":
                 guard let turn = params["turn"] as? [String: Any],
@@ -8701,6 +8823,8 @@ private extension CodexAppServerRuntime {
         }
 
         private func serverFailed(_ error: Error) {
+            syncedSubscriptions.removeAll()
+            syncedReleasePending.removeAll()
             retireCrashCheckpoints()
             if configuration.usesInstalledCLI {
                 events.yield(.codexCLIUsageUpdated(codexCLIUsage.invalidate()))

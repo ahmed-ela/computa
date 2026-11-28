@@ -7,6 +7,8 @@ import { shouldSubmitPromptKey } from './promptQueue';
 import { activityLabel, activityText, entryKey, CodexHistoryWindow } from './codexTranscript';
 import type { CodexEntry, CodexPage, HistoryDirection, UserPart } from './codexTranscript';
 import type { DesktopReader } from './types';
+import { codexModelReady } from './codexModelSelection';
+import type { CodexModelIntent, CodexModelState } from './codexModelSelection';
 
 function call<T>(reader: DesktopReader, action: string, fields: Record<string, string> = {}): Promise<T> {
   const bridge = window.webkit?.messageHandlers?.codexConversation;
@@ -14,6 +16,8 @@ function call<T>(reader: DesktopReader, action: string, fields: Record<string, s
   return bridge.postMessage({action, thread: reader.id, selection: reader.request, ...fields}) as Promise<T>;
 }
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+type ModelCatalog = {state: CodexModelState; choices: {model: string; displayName: string}[]};
 
 function TranscriptEntry({entry, reader}: {entry: CodexEntry; reader: DesktopReader}) {
   const [open, setOpen] = useState(false);
@@ -53,9 +57,55 @@ function Chat({reader}: {reader: DesktopReader}) {
   const [historyError, setHistoryError] = useState('');
   const [queue, setQueue] = useState<string[]>([]);
   const [draft, setDraft] = useState('');
+  const [changing, setChanging] = useState(false);
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const [modelError, setModelError] = useState('');
+  const [catalogError, setCatalogError] = useState('');
+  const [intent, setIntent] = useState<CodexModelIntent>({kind:'follow'});
+  const modelReady = codexModelReady(intent, catalog?.state) && (intent.kind === 'next' || !!catalog?.state.current);
+  const modelRevision = useRef(0);
+  const modelBusy = useRef(false);
+  const activeReader = useRef(true);
+  useEffect(() => {
+    activeReader.current = true;
+    let pending = false, haveCatalog = false;
+    const refresh = async (full = false) => {
+      if (pending || modelBusy.current) return;
+      pending = true;
+      const revision = modelRevision.current;
+      try {
+        const next = full || !haveCatalog ? await call<ModelCatalog>(reader, 'models') : null;
+        const state = next ? next.state : await call<CodexModelState>(reader, 'currentModel');
+        if (activeReader.current && revision === modelRevision.current) {
+          setCatalogError('');
+          if (next) { haveCatalog = true; setCatalog(next); }
+          else setCatalog(previous => previous && (previous.state.current !== state.current || previous.state.live !== state.live) ? {...previous, state} : previous);
+        }
+      } catch (error) { if (activeReader.current && revision === modelRevision.current) setCatalogError(errorText(error)); }
+      finally { pending = false; }
+    };
+    void refresh();
+    const onFocus = () => { void refresh(true); };
+    window.addEventListener('focus', onFocus);
+    const interval = setInterval(() => { void refresh(); }, 5000);
+    return () => { activeReader.current = false; clearInterval(interval); window.removeEventListener('focus', onFocus); };
+  }, [reader.request]);
+  const changeModel = async (model: string) => {
+    if (modelBusy.current || busy.current || !catalog) return;
+    modelBusy.current = true;
+    ++modelRevision.current;
+    setChanging(true); setModelError('');
+    try {
+      const result = await call<string>(reader, 'changeModel', {model, ...(catalog.state.current ? {expected: catalog.state.current} : {})});
+      if (!activeReader.current) return;
+      if (result !== 'nextTurn') throw new Error('Codex could not verify this model is available.');
+      setIntent({kind:'next', model, expected:catalog.state.current});
+    } catch (error) {
+      if (activeReader.current) setModelError(errorText(error));
+    } finally { modelBusy.current = false; if (activeReader.current) setChanging(false); }
+  };
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState('');
-  const [wakeFailed, setWakeFailed] = useState(false);
   const [uncertain, setUncertain] = useState<{id:string; text:string} | null>(null);
   const busy = useRef(false);
   const update = useRef<() => void>(() => {});
@@ -145,18 +195,23 @@ function Chat({reader}: {reader: DesktopReader}) {
     }
   }, [uncertain, queue, entries]);
   const send = async () => {
-    if (busy.current || !draft.trim() || !loaded || uncertain?.text === draft) return;
+    if (busy.current || modelBusy.current || !modelReady || !draft.trim() || !loaded || uncertain?.text === draft) return;
     busy.current = true;
     setSending(true); setSendError('');
     try {
       const submission = crypto.randomUUID();
-      const receipt = await call<string>(reader, 'send', {text:draft, submission});
-      if (receipt === 'unconfirmed') {
+      const expected = intent.kind === 'next' ? intent.expected : catalog?.state.current;
+      const receipt = await call<string>(reader, 'send', {text:draft, submission,
+        ...(intent.kind === 'next' ? {model:intent.model} : {}), ...(expected ? {expected} : {})});
+      if (!['started', 'queued', 'queuedWakeFailed'].includes(receipt)) {
         setUncertain({id:submission, text:draft});
-        setSendError('Delivery is unconfirmed. Check this chat in Codex before sending the same message again.');
+        setSendError('Delivery is unconfirmed. Check the conversation before resending.');
         return;
       }
-      setUncertain(null); setDraft(''); setQueue(previous => [...previous, submission]); setWakeFailed(receipt === 'queuedWakeFailed');
+      if (receipt !== 'started') setQueue(previous => previous.includes(submission) ? previous : [...previous, submission]);
+      if (receipt === 'queuedWakeFailed') setSendError('Your message is queued. The client using this chat can resume it.');
+      if (intent.kind === 'next') setCatalog(value => value && ({...value, state:{current:intent.model, live:false}}));
+      setIntent({kind:'follow'}); setUncertain(null); setDraft('');
       followBottom.current = true;
       navigate.current('desc', true);
     } catch (e) { setSendError(errorText(e)); }
@@ -186,14 +241,23 @@ function Chat({reader}: {reader: DesktopReader}) {
     </section>
     <div className="composer-zone">
       {queue.length > 0 && <div className="desktop-queue" role="status">{queue.length === 1 ? '1 message queued in Codex' : queue.length + ' messages queued in Codex'}
-        <Button variant="ghost" onClick={() => { void call(reader, 'wake').then(() => { setWakeFailed(false); update.current(); }).catch(e => setSendError(errorText(e))); }}>Wake Codex</Button></div>}
-      {wakeFailed && queue.length > 0 && <p role="alert">Open Codex to resume this conversation.</p>}
+        <Button variant="ghost" onClick={() => { void call(reader, 'wake').then(() => { update.current(); }).catch(e => setSendError(errorText(e))); }}>Wake Codex</Button></div>}
       {sendError && <p role="alert">{sendError}</p>}
+      {(modelError || catalogError) && <p role="alert">{modelError || catalogError}</p>}
+      {intent.kind === 'next' && !modelReady && <div className="desktop-model-notice" role="status">The conversation’s model changed while you were drafting.
+        <Button variant="ghost" onClick={() => { setModelError(''); setIntent({kind:'follow'}); }}>Use current model</Button></div>}
       <div className="composer-shell">
         <Textarea aria-label="Message Codex" placeholder="Message Codex…" rows={2} value={draft} maxLength={200000} disabled={sending}
           onInput={event => setDraft((event.currentTarget as HTMLTextAreaElement).value)}
           onKeyDown={event => { if (shouldSubmitPromptKey(event)) { event.preventDefault(); void send(); } }} />
-        <div className="desktop-send"><Button aria-label="Send to Codex" disabled={!loaded || !draft.trim() || sending || uncertain?.text === draft}
+        <div className="desktop-send">
+          {catalog && <select aria-label="Codex model" title={intent.kind === 'next' ? 'Model for the next message' : catalog.state.live ? 'Current model in Codex' : 'Last model recorded by Codex'} value={intent.kind === 'next' ? intent.model : catalog.state.current ?? ''} disabled={changing || sending || !!queue.length}
+            onChange={event => { const select = event.currentTarget as HTMLSelectElement; const wanted = select.value;
+              select.value = intent.kind === 'next' ? intent.model : catalog.state.current ?? ''; void changeModel(wanted); }}>
+            {!catalog.choices.some(choice => choice.model === catalog.state.current) && <option value={catalog.state.current ?? ''} disabled>{catalog.state.current || 'Codex default'}</option>}
+            {catalog.choices.map(choice => <option key={choice.model} value={choice.model}>{choice.displayName || choice.model}</option>)}
+          </select>}
+          <Button aria-label="Send to Codex" disabled={!loaded || !draft.trim() || sending || changing || !modelReady || uncertain?.text === draft}
           onClick={() => { void send(); }}><Icon name="send" size={16} /></Button></div>
       </div>
     </div>

@@ -27,6 +27,7 @@ let package = Package(
                 .copy("Resources/MLXServer"),
                 .copy("Resources/BrowserModels"),
                 .copy("Resources/ProviderSetup"),
+                .copy("Resources/CodexDesktop"),
                 .copy("Resources/BrowserToolCatalog.json"),
                 .copy("Resources/Tokenizers")
             ]

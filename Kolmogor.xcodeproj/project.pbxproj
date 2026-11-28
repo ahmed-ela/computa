@@ -119,6 +119,7 @@
 		3CBF7B2242877C5412FB3640 /* RuntimeWorkflowBenchmarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25557D3BC862F59B70B68D3E /* RuntimeWorkflowBenchmarkTests.swift */; };
 		3CDEC8D7E5D0F5C68628EF3B /* WorkspaceReviewServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C144EBE1B757DB532D5061BE /* WorkspaceReviewServiceTests.swift */; };
 		3DAB566EF2E906AF14117E1F /* WebViewHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = A67672C725CCDB2EBE03F1ED /* WebViewHost.swift */; };
+		3DAE865C0012095737F72A35 /* CodexDesktopOwner.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5D9F9AA83BB38C854A02B81 /* CodexDesktopOwner.swift */; };
 		3DF22A935C0EA4C1B8E998CA /* HeadlessMLXModelSwitchLiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A0B37EEF6A12256DAAB58F2 /* HeadlessMLXModelSwitchLiveTests.swift */; };
 		3E9B305F6D6F614FE10CF9DA /* GroqHistoryHTTPDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91194F09817A26FD428295AB /* GroqHistoryHTTPDelivery.swift */; };
 		3EBE0E1B04112B06D68FDEC1 /* ChatGPTTemporaryCookieRetirement.swift in Sources */ = {isa = PBXBuildFile; fileRef = C96C5177658B3503B15C994D /* ChatGPTTemporaryCookieRetirement.swift */; };
@@ -301,6 +302,7 @@
 		A39D89D9B2AC29D36E859398 /* KimiFixturePage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17ABB6E7DA09D65AFC27EE12 /* KimiFixturePage.swift */; };
 		A3C6F9C84ACA38C0F3260E29 /* QwenWebsiteFailureHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E76A89C0415BE7AE44C3E0 /* QwenWebsiteFailureHistoryTests.swift */; };
 		A603DB8795DAD4BBE0A5709C /* AccessibilitySessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ED85332EDB5FEC1F6F4855C /* AccessibilitySessionTests.swift */; };
+		A64E1CE3503C14F02B4CEC65 /* CodexDesktop in Resources */ = {isa = PBXBuildFile; fileRef = 15F5D35E92396425B1FD0E0B /* CodexDesktop */; };
 		A7B3DC7C18C6E40679CCA594 /* SemanticReadReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10897D9C1B05025C902E147D /* SemanticReadReceipt.swift */; };
 		A82BBC3914AF6BA65A6CB9DA /* ProviderCLIIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D926C3E7EA5C7E0A10869612 /* ProviderCLIIntegrationTests.swift */; };
 		A93F86E16C520903A5A09BA6 /* Tokenizers in Resources */ = {isa = PBXBuildFile; fileRef = ACE41BC8E0DF650EC57066B6 /* Tokenizers */; };
@@ -527,6 +529,7 @@
 		14D6E6A300952F904B27478A /* HeadlessMLXServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeadlessMLXServerTests.swift; sourceTree = "<group>"; };
 		1558DD75484B5021B12EBEF9 /* WebsiteRequestFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebsiteRequestFixture.swift; sourceTree = "<group>"; };
 		15A54D28993961608A6E2A6E /* ReadOnlyForegroundVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadOnlyForegroundVerifier.swift; sourceTree = "<group>"; };
+		15F5D35E92396425B1FD0E0B /* CodexDesktop */ = {isa = PBXFileReference; lastKnownFileType = folder; name = CodexDesktop; path = Sources/Computa/Resources/CodexDesktop; sourceTree = SOURCE_ROOT; };
 		16667021DA4F40A3B70D0275 /* APIProviderHTTPClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIProviderHTTPClientTests.swift; sourceTree = "<group>"; };
 		1688493422CB39A2BA902B4E /* GroqHistoryTool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroqHistoryTool.swift; sourceTree = "<group>"; };
 		16C255B4CEE3D5BCED32DA94 /* RuntimeContextResumeLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeContextResumeLiveTests.swift; sourceTree = "<group>"; };
@@ -917,6 +920,7 @@
 		F312EBE620A333B50C4D82EF /* WorkflowBenchmarkTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowBenchmarkTransport.swift; sourceTree = "<group>"; };
 		F49E16BB5F588EB2E95A6EE2 /* ComputaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ComputaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F5D74741A991701193F8CE03 /* GroqToolCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GroqToolCatalog.swift; sourceTree = "<group>"; };
+		F5D9F9AA83BB38C854A02B81 /* CodexDesktopOwner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexDesktopOwner.swift; sourceTree = "<group>"; };
 		F77F1721EF4EB17188596D44 /* GeminiVerificationCookieObservationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiVerificationCookieObservationTests.swift; sourceTree = "<group>"; };
 		F82F268E3798BF0124F3D6FA /* ClaudeResponseStreamDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeResponseStreamDiagnostic.swift; sourceTree = "<group>"; };
 		F8470F6FDC88E1B9D6A7F6AC /* ContextIndicatorPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextIndicatorPresentationTests.swift; sourceTree = "<group>"; };
@@ -1069,6 +1073,7 @@
 				F82F268E3798BF0124F3D6FA /* ClaudeResponseStreamDiagnostic.swift */,
 				3E3AA7644D96C8048040CA8E /* CodexAppServerRuntime.swift */,
 				484520E619D45D5E5908C807 /* CodexDesktopLayout.swift */,
+				F5D9F9AA83BB38C854A02B81 /* CodexDesktopOwner.swift */,
 				2A4A6287D974EFA74820BEAD /* CodexDesktopSidebar.swift */,
 				7811AF771E520AC090D0E513 /* ComputaAgentInstructions.swift */,
 				D67E02989491AFAA8AFB1C58 /* ComputaModelToolCatalog.swift */,
@@ -1497,6 +1502,7 @@
 				90FB9FE1438BCB1F35BB3D18 /* AgentRuntime */,
 				8C909FD7325F2B05A5D2AF35 /* BrowserModels */,
 				6FFE715F6565058E340DD4F5 /* BrowserToolCatalog.json */,
+				15F5D35E92396425B1FD0E0B /* CodexDesktop */,
 				EC1B7ACF24BCCABBC7AFF322 /* MLXServer */,
 				A044E59C9C3A2327F295B42B /* ProviderSetup */,
 				ACE41BC8E0DF650EC57066B6 /* Tokenizers */,
@@ -1663,6 +1669,7 @@
 				62B0E394015FC2B8F0317245 /* Assets.xcassets in Resources */,
 				67472CFEC98190A2B2448540 /* BrowserModels in Resources */,
 				EF3217806DAEF1B396475751 /* BrowserToolCatalog.json in Resources */,
+				A64E1CE3503C14F02B4CEC65 /* CodexDesktop in Resources */,
 				2BDC5F3D02FBB56F42415266 /* MLXServer in Resources */,
 				4C2CA2E9DB725E8AE2A33B84 /* ProviderSetup in Resources */,
 				A93F86E16C520903A5A09BA6 /* Tokenizers in Resources */,
@@ -2018,6 +2025,7 @@
 				2C0411E080B696DE275F6865 /* ClaudeResponseStreamDiagnostic.swift in Sources */,
 				9F8D8FBE19E9ABCECBBBC0ED /* CodexAppServerRuntime.swift in Sources */,
 				5F7A4E90B1F40A1D899065C8 /* CodexDesktopLayout.swift in Sources */,
+				3DAE865C0012095737F72A35 /* CodexDesktopOwner.swift in Sources */,
 				5BDC03C0F2C4092F90DB7F9B /* CodexDesktopSidebar.swift in Sources */,
 				319BD5C45504B2434CE1B146 /* CodexSidebarSync.swift in Sources */,
 				AB6380628B54B18E0CB72BB8 /* CompactionAssistantEvidence.swift in Sources */,

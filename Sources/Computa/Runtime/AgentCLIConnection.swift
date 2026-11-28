@@ -11,10 +11,19 @@ enum AgentCLIError: LocalizedError, Sendable {
     }
 }
 
+/// JSON-RPC rejected the method or arguments before dispatch. A transport
+/// failure or an arbitrary internal server error cannot establish that.
+struct AgentCLIInvalidRequest: LocalizedError, Sendable {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 /// One private stdio connection per task. Only its own process group is stopped.
 actor AgentCLIConnection {
     typealias MessageHandler = @Sendable (Data) async -> Void
+    private let reportInvalidRequests: Bool
     private let codexProtocol: Bool
+    nonisolated var processIdentifier: pid_t { process.processIdentifier }
     private let process: OwnedChildProcess
     private let input: FileHandle
     private let output: FileHandle
@@ -25,8 +34,9 @@ actor AgentCLIConnection {
     private var requests: [Int: CheckedContinuation<Data, Error>] = [:]
 
     init(executable: URL, arguments: [String], directory: URL, environment: [String: String],
-         codexProtocol: Bool = false, handler: @escaping MessageHandler) throws {
+         codexProtocol: Bool = false, reportInvalidRequests: Bool = false, handler: @escaping MessageHandler) throws {
         self.codexProtocol = codexProtocol
+        self.reportInvalidRequests = reportInvalidRequests
         let stdin = Pipe(), stdout = Pipe()
         guard fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else { throw POSIXError(.EIO) }
         process = try OwnedChildProcess(executableURL: executable, arguments: arguments,
@@ -87,7 +97,12 @@ actor AgentCLIConnection {
         if let error = msg["error"] as? [String: Any] {
             let reason = error["message"] as? String ?? "CLI request failed."
             let detail = String(reason.prefix(1200))
-            waiting.resume(throwing: error["code"] as? Int == -32000 ? AgentCLIError.signInRequired(detail) : .protocolError(detail))
+            let code = error["code"] as? Int
+            if reportInvalidRequests && (code == -32601 || code == -32602) {
+                waiting.resume(throwing: AgentCLIInvalidRequest(message: detail))
+            } else {
+                waiting.resume(throwing: code == -32000 ? AgentCLIError.signInRequired(detail) : .protocolError(detail))
+            }
         } else if let result = msg["result"], JSONSerialization.isValidJSONObject(result) {
             do { waiting.resume(returning: try JSONSerialization.data(withJSONObject: result)) }
             catch { waiting.resume(throwing: error) }

@@ -627,4 +627,6 @@ pre { max-height: 240px; margin: 0; padding: 12px; overflow: auto; border: 1px s
 .desktop-history-navigation button { color: var(--text-secondary); font-size: 11px; height: 24px; }
 .desktop-send, .desktop-queue { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .desktop-queue { justify-content: space-between; }
+.desktop-send select { margin-right: auto; max-width: 70%; color: inherit; font: inherit; background: transparent; border: 0; }
+.desktop-model-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .desktop-reader-user { white-space: pre-wrap; }

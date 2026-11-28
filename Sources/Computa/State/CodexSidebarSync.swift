@@ -17,6 +17,7 @@ final class CodexSidebarSync {
     private var disclosureOverrides: [String: Bool] = [:]
     @ObservationIgnored private let preferences: UserDefaults
     @ObservationIgnored private let wake: @MainActor (UUID) async throws -> Void
+    @ObservationIgnored private var modelWrites = Set<String>()
     @ObservationIgnored private var submissions = Set<UUID>()
     @ObservationIgnored private let interval: Duration
     @ObservationIgnored private var windows: [UUID: WorkspaceTabs] = [:]
@@ -25,10 +26,11 @@ final class CodexSidebarSync {
     @ObservationIgnored private var client: Client?
     @ObservationIgnored private var epoch = UUID()
 
-    static func installed(preferences: UserDefaults) -> CodexSidebarSync? {
-        guard let executable = Client.installedExecutable() else { return nil }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return .init(preferences: preferences) { Client(executable: executable, home: home, codexHome: home.appendingPathComponent(".codex")) }
+    static func installed(preferences: UserDefaults, candidates: [URL] = InstalledCodexCLI.candidateURLs,
+                          home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                          profile: URL = InstalledCodexCLI.userProfile) -> CodexSidebarSync? {
+        guard candidates.contains(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else { return nil }
+        return .init(preferences: preferences) { Client(candidates: candidates, home: home, codexHome: profile) }
     }
 
     init(interval: Duration = .seconds(5), preferences: UserDefaults = .standard,
@@ -162,13 +164,13 @@ final class CodexSidebarSync {
     }
 
     private static func wakeDesktop(_ id: UUID) async throws {
-        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Client.bundleID) else { throw Client.Failure.noChat }
+        guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: Client.bundleID).first(where: { !$0.isTerminated })?.bundleURL else { throw Client.Failure.ownerUnavailable }
         let config = NSWorkspace.OpenConfiguration()
         config.activates = false
         _ = try await NSWorkspace.shared.open([wakeURL(id)], withApplicationAt: app, configuration: config)
     }
 
-    func conversation(_ action: String, body: [String: Any], in window: WorkspaceTabs) async throws -> Any {
+    func conversation(_ action: String, body: [String: Any], in window: WorkspaceTabs, runtime: (any AgentRuntimeClient)? = nil, accessMode: AccessMode = .askEveryTime) async throws -> Any {
         guard !window.isClosed, window.showsDesktopChats, let client, let owner = catalog?.account,
               let reader = window.desktopReader, body["thread"] as? String == reader.id,
               let token = body["selection"] as? String, UUID(uuidString: token) == reader.request,
@@ -182,6 +184,18 @@ final class CodexSidebarSync {
             guard let turn = body["turn"] as? String, let item = body["item"] as? String else { throw Client.Failure.noChat }
             let bytes = try await client.itemDetails(reader.id, owner: owner, turn: turn, item: item)
             response = try JSONSerialization.jsonObject(with: bytes)
+        case "models":
+            response = try JSONSerialization.jsonObject(with: JSONEncoder().encode(try await client.modelSelection(reader.id, owner: owner)))
+        case "currentModel":
+            response = try JSONSerialization.jsonObject(with: JSONEncoder().encode(try await client.currentModel(reader.id, owner: owner)))
+        case "changeModel":
+            guard let model = body["model"] as? String, !model.isEmpty, modelWrites.insert(reader.id).inserted else { throw Client.Failure.inconsistent }
+            defer { modelWrites.remove(reader.id) }
+            let selection = try await client.modelSelection(reader.id, owner: owner)
+            guard selection.choices.contains(where: { $0.model == model }) else { throw Client.Failure.unavailableModel }
+            guard selection.state.current == body["expected"] as? String else { throw Client.Failure.modelChanged }
+            guard try await client.queuedMessages(reader.id, owner: owner).isEmpty else { throw Client.Failure.pendingQueue }
+            response = "nextTurn"
         case "queue":
             response = try await client.queuedMessages(reader.id, owner: owner)
         case "wake":
@@ -191,10 +205,32 @@ final class CodexSidebarSync {
             guard let text = body["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   text.utf16.count <= 200_000, let raw = body["submission"] as? String, let submission = UUID(uuidString: raw),
                   submissions.insert(submission).inserted else { throw Client.Failure.inconsistent }
-            do { try await client.enqueue(text, submission: submission, in: reader.id, owner: owner) }
-            catch Client.Failure.deliveryUnconfirmed { return "unconfirmed" }
-            do { try await wake(thread); response = "queued" }
-            catch { response = "queuedWakeFailed" }
+            guard modelWrites.insert(reader.id).inserted else { throw Client.Failure.inconsistent }
+            defer { modelWrites.remove(reader.id) }
+            let expected = body["expected"] as? String
+            let selection = try await client.modelSelection(reader.id, owner: owner)
+            guard selection.state.current == expected else { throw Client.Failure.modelChanged }
+            guard let model = body["model"] as? String ?? expected,
+                  selection.choices.contains(where: { $0.model == model }) else { throw Client.Failure.unavailableModel }
+            do {
+                do {
+                    try await client.sendWithModel(model, replacing: expected, text: text, submission: submission, in: reader.id, owner: owner)
+                } catch Client.Failure.ownerUnavailable {
+                    guard let runtime else { throw InstalledCodexCLI.Failure.missing }
+                    try await runtime.continueCodexConversation(.init(profile: client.codexHome, thread: reader.id, owner: owner,
+                        expected: expected, provider: selection.provider, model: model, prompt: text, submission: submission), accessMode: accessMode)
+                }
+                response = "started"
+            } catch Client.Failure.ownerUnavailable where body["model"] == nil,
+                    Client.Failure.pendingQueue where body["model"] == nil,
+                    Client.Failure.busyThread where body["model"] == nil {
+                // The private owner was already running. Preserve a follow-up's
+                // queue semantics; a model-bound message must never enter this path.
+                do { try await client.enqueue(text, submission: submission, in: reader.id, owner: owner, expectedModel: expected) }
+                catch Client.Failure.deliveryUnconfirmed { return "unconfirmed" }
+                do { try await wake(thread); response = "queued" }
+                catch { response = "queuedWakeFailed" }
+            } catch Client.Failure.deliveryUnconfirmed { response = "unconfirmed" }
         default: throw Client.Failure.inconsistent
         }
         guard !window.isClosed, window.showsDesktopChats, catalog?.account == owner,
