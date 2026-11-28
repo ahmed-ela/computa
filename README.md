@@ -8,4 +8,6 @@ Kolmogor lets the AI you already use browse websites, edit files, and run comman
 
 Drag **Kolmogor** from the disk image into **Applications**. Open the app and use the model picker to sign in to a chat service like ChatGPT or connect an installed tool like Codex CLI.
 
+To continue a Codex chat here, choose **Imports → Import from Codex…** and select the chat. Each app keeps its own future replies.
+
 You can keep an agent tab for each project. Choose **Agent menu → Start fresh** to begin a new conversation with the same model, folder, and saved instructions. Earlier conversations are available in **History**.

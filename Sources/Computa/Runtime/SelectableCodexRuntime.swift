@@ -9,6 +9,8 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
     private let cli: CodexAppServerRuntime
     private let providerChats: ProviderCLIChats
     private var providerOwners: [String: ProviderCLI] = [:]
+    private let importWorkRoot: URL
+    private let importProfile: URL
     private let cliThreads: InstalledCodexCLI.Threads
     private var owners: [String: Bool] = [:]
     private var submitting = Set<String>()
@@ -18,6 +20,8 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
 
     init(configuration: CodexAppServerRuntime.Configuration = .localQwen,
          providerCLISearchDirectories: [String] = ProviderCLI.directories()) {
+        importWorkRoot = URL(fileURLWithPath: configuration.codexHomePath)
+        importProfile = configuration.installedCLIProfile
         firstMessageStore = FirstMessageStore(directory: URL(fileURLWithPath: configuration.codexHomePath)
             .appendingPathComponent("FirstMessages-v1", isDirectory: true))
         restartStore = AgentRestartStore(directory: URL(fileURLWithPath: configuration.codexHomePath)
@@ -94,18 +98,18 @@ actor SelectableCodexRuntime: AgentRuntimeClient {
         return history
     }
 
-    func continueCodexConversation(_ turn: SyncedCodexTurn, accessMode: AccessMode) async throws {
-        listen()
-        try await cli.continueCodexConversation(turn, accessMode: accessMode)
-    }
-
     func readSavedChat(_ id: String) async throws -> AgentTask {
         let task = try await bundled.readSavedChat(id)
         owners[task.id] = false
         return task
     }
 
-    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply { try await providerChats.routedReply(prompt, model: model) }
+    func routedCLIReply(_ prompt: String, model: String) async throws -> RoutedCLIReply {
+        if InstalledCodexCLI.slug(model) != nil {
+            return try await ImportedCodexReply.run(prompt, model: model, directory: importWorkRoot, profile: importProfile)
+        }
+        return try await providerChats.routedReply(prompt, model: model)
+    }
 
     func providerCLIModels(_ provider: ProviderCLI) async throws -> [LocalModelOption] { try await providerChats.models(provider) }
 

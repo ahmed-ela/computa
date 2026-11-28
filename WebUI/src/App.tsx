@@ -1096,7 +1096,7 @@ export function App() {
           onClick={() => post({ action: 'toggleBrowser' })}>
           <Icon name="browser" size={18} />
         </Button>}
-        {snapshot.showsDesktopChats ? <DesktopConversation reader={snapshot.desktopReader} /> : <>
+        {snapshot.showsDesktopChats ? <DesktopConversation reader={snapshot.desktopReader} browsing={!!snapshot.codexImportRequest} /> : <>
         <TaskToolbar task={task} snapshot={snapshot} allowFresh={Boolean(task && !draftState.drafts[task.id] && !draftState.pendingSubmissions[task.id])} rowHeight={snapshot.titlebarHeight} onNewChat={snapshot.allowsBrowserSidePane && !snapshot.nativeSidebarControls ? createChat : undefined} />
         {snapshot.savedChatSelection ? (
           <div className="no-task-view" role={snapshot.savedChatSelection.error ? 'alert' : 'status'}>

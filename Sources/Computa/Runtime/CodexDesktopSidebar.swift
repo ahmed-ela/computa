@@ -227,323 +227,68 @@ actor CodexDesktopSidebarClient {
         guard rows.contains(where: { $0.id == id }), currentAuthFile() == authFile else { throw Failure.noChat }
     }
 
-    struct ModelOption: Codable, Equatable, Sendable {
-        let model: String
-        let displayName: String
-        let hidden: Bool
-    }
-
-    struct ModelState: Codable, Sendable {
-        let current: String?
-        let live: Bool
-    }
-
-    struct ModelSelection: Codable, Sendable {
-        let provider: String
-        let state: ModelState
-        let choices: [ModelOption]
-    }
-
-    private struct ThreadModel: Decodable {
-        let id: String
-        struct Status: Decodable { let type: String }
-        let status: Status
-        let modelProvider: String
-        let model: String?
-    }
-
-    private func threadModel(_ id: String, owner: Account) async throws -> ThreadModel {
-        struct Reply: Decodable { let thread: ThreadModel }
+    func checkImportSource(_ id: String, owner: Account) async throws {
+        await refreshAccountSession()
         try await verifyVisible(id, owner: owner)
-        let row = try await read(Reply.self, "thread/read", ["threadId": id]).thread
-        guard row.id == id, currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return row
     }
 
-    private func modelState(_ row: ThreadModel, owner: Account) async throws -> ModelState {
-        if let conn = try await CodexDesktopOwner.connect(home: codexHome) {
-            do {
-                guard try await account(on: conn) == owner else { throw Failure.noChat }
-                let live = try await liveModel(row.id, on: conn)
-                await conn.close()
-                guard currentAuthFile() == authFile else { throw Failure.noChat }
-                if live.status.type != "notLoaded" { return ModelState(current: live.model, live: true) }
-            } catch { await conn.close(); throw error }
+    /// Capture complete items, including normally deferred tool output. Check the
+    /// source on both sides of pagination before publishing anything locally.
+    func importSnapshot(_ id: String, owner: Account, title: String) async throws -> CodexImportStore.Snapshot {
+        struct Stamp: Decodable, Equatable {
+            struct Status: Decodable, Equatable { let type: String }
+            let id: String
+            let updatedAt: Double
+            let model: String?
+            let status: Status
         }
-        return ModelState(current: row.model, live: false)
-    }
-
-    func currentModel(_ id: String, owner: Account) async throws -> ModelState {
-        try await modelState(threadModel(id, owner: owner), owner: owner)
-    }
-
-    func modelSelection(_ id: String, owner: Account) async throws -> ModelSelection {
-        let row = try await threadModel(id, owner: owner)
-        let options = try await all(ModelOption.self, "model/list", ["modelProvider": row.modelProvider, "includeHidden": false])
-        var seen = Set<String>()
-        let visible = options.filter { !$0.hidden && !$0.model.isEmpty && seen.insert($0.model).inserted }
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return ModelSelection(provider: row.modelProvider, state: try await modelState(row, owner: owner), choices: visible)
-    }
-
-    // Codex locks a conversation to its active writer. Resuming an unowned
-    // conversation can also start its queued turn immediately. Keep this
-    // sidebar client read-only with respect to the conversation's execution.
-    private func withIdleOwner<T: Sendable>(_ id: String, owner: Account, expected: String?,
-                                             perform: (AgentCLIConnection) async throws -> T) async throws -> T {
-        guard let conn = try await CodexDesktopOwner.connect(home: codexHome) else {
-            // A queue can change after the picker opens. Changing the model in
-            // the desktop could also reroute a previously queued prompt.
-            guard try await queuedMessages(id, owner: owner).isEmpty else { throw Failure.pendingQueue }
-            throw Failure.ownerUnavailable
-        }
-        do {
+        struct Reply: Decodable { let thread: Stamp }
+        func stamp() async throws -> Stamp {
             try await verifyVisible(id, owner: owner)
-            guard try await account(on: conn) == owner else { throw Failure.noChat }
-            let row = try await liveModel(id, on: conn)
-            guard try await queuedMessages(id, owner: owner).isEmpty else { throw Failure.pendingQueue }
-            guard row.status.type != "notLoaded" else { throw Failure.ownerUnavailable }
-            guard row.status.type == "idle" else { throw Failure.busyThread }
-            guard row.model == expected else { throw Failure.modelChanged }
-            let result = try await perform(conn)
-            await conn.close()
-            return result
-        } catch { await conn.close(); throw error }
-    }
-
-    private func liveModel(_ id: String, on conn: AgentCLIConnection) async throws -> ThreadModel {
-        struct Reply: Decodable { let thread: ThreadModel }
-        let result = try await conn.request("thread/read", params: JSONEncoder().encode(["threadId": id]), timeout: .seconds(10))
-        let row = try JSONDecoder().decode(Reply.self, from: result).thread
-        guard row.id == id else { throw Failure.noChat }
-        return row
-    }
-
-    /// Bind the model to this specific turn at the owner. A later edit to the
-    /// thread default cannot reroute this send while a durable queue drains.
-    func sendWithModel(_ model: String, replacing expected: String?, text: String, submission: UUID, in id: String, owner: Account, routedContext: String? = nil) async throws {
-        try await withIdleOwner(id, owner: owner, expected: expected) { conn in
-            var params: [String: Any] = ["threadId": id, "model": model, "clientUserMessageId": submission.uuidString.lowercased(),
-                                         "input": [["type": "text", "text": text]]]
-            if let routedContext { params["additionalContext"] = Self.additionalRouteContext(routedContext) }
-            let request = try JSONSerialization.data(withJSONObject: params)
-            struct Reply: Decodable { struct Turn: Decodable { let id: String }; let turn: Turn }
-            do {
-                let reply = try await conn.request("turn/start", params: request, timeout: .seconds(15))
-                guard !(try JSONDecoder().decode(Reply.self, from: reply)).turn.id.isEmpty else { throw Failure.inconsistent }
-            } catch let error as AgentCLIInvalidRequest { throw error }
-            catch { throw Failure.deliveryUnconfirmed }
+            let value = try await read(Reply.self, "thread/read", ["threadId": id]).thread
+            guard value.id == id, value.status.type != "active" else { throw Failure.busyThread }
+            return value
         }
-    }
-
-    func conversationPage(_ id: String, owner: Account, cursor: String?, ascending: Bool) async throws -> Data {
-        try await verifyVisible(id, owner: owner)
-        var params: [String: any Sendable] = ["threadId": id, "sortDirection": ascending ? "asc" : "desc", "limit": 32,
-            "deferOutput": ["commandExecution": true, "mcpToolCall": true]]
-        if let cursor { params["cursor"] = cursor }
-        let data = try await session().request("thread/items/list", params: JSONSerialization.data(withJSONObject: params), timeout: .seconds(30))
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return data
-    }
-
-    func itemDetails(_ id: String, owner: Account, turn: String, item: String) async throws -> Data {
-        try await verifyVisible(id, owner: owner)
-        let params: [String: Any] = ["threadId": id, "turnId": turn, "itemIds": [item]]
-        let data = try await session().request("thread/items/read", params: JSONSerialization.data(withJSONObject: params), timeout: .seconds(30))
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return data
-    }
-
-    func queuedMessages(_ id: String, owner: Account) async throws -> [String] {
-        struct Entry: Decodable { let clientUserMessageId: String }
-        try await verifyVisible(id, owner: owner)
-        let entries = try await all(Entry.self, "thread/queue/list", ["threadId": id])
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return entries.map(\.clientUserMessageId)
-    }
-
-    // An existing writer can consume an ordinary follow-up from the durable queue.
-    // Explicit model choices always go through turn/start.
-    func enqueue(_ text: String, submission: UUID, in id: String, owner: Account, expectedModel: String? = nil) async throws {
-        if let expectedModel {
-            guard try await currentModel(id, owner: owner).current == expectedModel else { throw Failure.modelChanged }
-        } else {
-            try await verifyVisible(id, owner: owner)
+        let first = try await stamp()
+        struct Policy: Decodable {
+            struct Requirements: Decodable { let modelProvider: String? }
+            let requirements: Requirements?
         }
-        let params: [String: Any] = ["threadId": id, "clientUserMessageId": submission.uuidString.lowercased(),
-            "input": [["type": "text", "text": text]]]
-        let bytes = try JSONSerialization.data(withJSONObject: params)
-        let conn = try await session()
-        guard currentAuthFile() == authFile else { throw Failure.noChat }
-        struct Acknowledgment: Decodable {
-            struct Submission: Decodable { let clientUserMessageId: String }
-            let queuedSubmission: Submission
-        }
+        guard try await read(Policy.self, "configRequirements/read", [:]).requirements?.modelProvider == nil
+        else { throw AgentCLIError.unavailable("Your managed Codex profile restricts provider transfers.") }
+        let routed: CodexRoutedHistory?
         do {
-            let data = try await conn.request("thread/queue/add", params: bytes, timeout: .seconds(15))
-            let ack = try JSONDecoder().decode(Acknowledgment.self, from: data)
-            guard UUID(uuidString: ack.queuedSubmission.clientUserMessageId) == submission else { throw Failure.inconsistent }
-        } catch {
-            // Never replay an ambiguous write, including after a response timeout.
-            throw Failure.deliveryUnconfirmed
+            let records = try await all(CodexRoutedHistory.Attachment.self, "thread/attachment/list", ["threadId": id])
+            routed = try CodexRoutedHistory(records)
+        } catch let error as AgentCLIInvalidRequest where error.code == -32601 { routed = nil }
+        var pages: [Data] = [], seen = Set<String>()
+        var params: [String: any Sendable] = ["threadId":id,"sortDirection":"asc","limit":16]
+        while true {
+            try Task.checkCancellation()
+            let data = try await session().request("thread/items/list", params: JSONSerialization.data(withJSONObject: params), timeout: .seconds(30))
+            guard let page = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rows = page["data"] as? [[String: Any]], rows.allSatisfy({ $0["outputDeferred"] as? Bool != true }) else { throw Failure.inconsistent }
+            if let routed, !routed.records.isEmpty {
+                var merged: [[String: Any]] = []
+                for row in rows {
+                    merged.append(row)
+                    guard let turn = row["turnId"] as? String, let key = (row["item"] as? [String: Any])?["id"] as? String else { throw Failure.inconsistent }
+                    for extra in try routed.exchanges(anchor: turn + "/" + key) {
+                        let tid = extra.id.uuidString
+                        merged.append(["turnId":tid, "model":extra.model, "item":["id":"user","type":"userMessage","content":[["type":"text","text":extra.prompt]]]])
+                        let item = extra.status == "completed"
+                            ? ["id":"reply","type":"agentMessage","text":extra.answer ?? ""]
+                            : ["id":"reply","type":"deliveryStatus","message":extra.answer ?? "Reply unconfirmed"]
+                        merged.append(["turnId":tid,"model":extra.model,"item":item])
+                    }
+                }
+                pages.append(try JSONSerialization.data(withJSONObject: ["data":merged]))
+            } else { pages.append(data) }
+            guard let next = page["nextCursor"] as? String else { break }
+            guard !next.isEmpty, seen.insert(next).inserted else { throw Failure.inconsistent }
+            params["cursor"] = next
         }
-    }
-}
-
-extension CodexDesktopSidebarClient {
-    private typealias History = CodexRoutedHistory
-
-    func checkExternalRoute(_ id: String, owner: Account) async throws {
-        struct Requirements: Decodable {
-            struct Policy: Decodable { let modelProvider: String? }
-            let requirements: Policy?
-        }
-        try await verifyVisible(id, owner: owner)
-        let policy = try await read(Requirements.self, "configRequirements/read", [:])
-        guard policy.requirements?.modelProvider == nil else { throw AgentCLIError.unavailable("This profile requires its managed model provider.") }
-    }
-
-    private func routeHistory(_ id: String, owner: Account) async throws -> History {
-        try await verifyVisible(id, owner: owner)
-        let rows = try await all(History.Attachment.self, "thread/attachment/list", ["threadId": id])
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return try History(rows)
-    }
-
-    func routeExchanges(_ id: String, owner: Account, anchors: [String]) async throws -> [CodexRoutedHistory.Exchange] {
-        let history: History
-        do { history = try await routeHistory(id, owner: owner) }
-        catch let error as AgentCLIInvalidRequest where error.code == -32601 { return [] }
-        return try anchors.flatMap { try history.exchanges(anchor: $0) }
-    }
-
-    private func writeRouteRecord(_ record: History.Record, key: String, thread: String, owner: Account) async throws -> Bool {
-        struct Params: Encodable {
-            let threadId: String, attachmentType: String, identityKey: String
-            let payload: History.Record
-        }
-        struct Receipt: Decodable { let outcome: String; let attachment: History.Attachment }
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        let params = Params(threadId: thread, attachmentType: History.type, identityKey: key, payload: record)
-        let data = try await session().request("thread/attachment/add", params: JSONEncoder().encode(params), timeout: .seconds(15))
-        let result = try JSONDecoder().decode(Receipt.self, from: data)
-        guard ["existing", "created"].contains(result.outcome), result.attachment.identityKey == key,
-              result.attachment.payload == record else { throw Failure.inconsistent }
-        return result.outcome == "created"
-    }
-
-    private func storeBody(_ value: String, role: String, manifest: History.Record, key: String, thread: String, owner: Account) async throws -> Bool {
-        let (parts, digest) = History.parts(value, turn: manifest.turn, role: role)
-        var manifest = manifest
-        manifest.count = parts.count
-        manifest.digest = digest
-        for (key, part) in parts { _ = try await writeRouteRecord(part, key: key, thread: thread, owner: owner) }
-        return try await writeRouteRecord(manifest, key: key, thread: thread, owner: owner)
-    }
-
-    private struct Item: Decodable {
-        let turnId: String
-        struct Body: Decodable {
-            struct Part: Decodable { let type: String; let text: String? }
-            let type: String, id: String
-            let text: String?
-            let content: [Part]?
-            enum CodingKeys: String, CodingKey { case type, id, text, content }
-            init(from decoder: Decoder) throws {
-                let c = try decoder.container(keyedBy: CodingKeys.self)
-                type = try c.decode(String.self, forKey: .type)
-                id = try c.decode(String.self, forKey: .id)
-                text = type == "agentMessage" ? try c.decodeIfPresent(String.self, forKey: .text) : nil
-                content = type == "userMessage" ? try c.decode([Part].self, forKey: .content) : nil
-            }
-        }
-        let item: Body
-    }
-
-    private func conversationLines(_ id: String, owner: Account, history: History) async throws -> (String, [History.Line]) {
-        let items = try await all(Item.self, "thread/items/list", ["threadId": id, "sortDirection": "asc",
-            "deferOutput": ["commandExecution": true, "mcpToolCall": true]])
-        guard let head = items.last else { throw Failure.noChat }
-        var lines: [History.Line] = []
-        var length = 0
-        func append(_ line: History.Line) throws {
-            length += line.text.utf8.count
-            guard length <= 512_000 else { throw AgentCLIError.unavailable("This conversation exceeds the provider handoff size.") }
-            lines.append(line)
-        }
-        for row in items {
-            if let parts = row.item.content {
-                guard parts.allSatisfy({ $0.type == "text" }) else { throw AgentCLIError.unavailable("This chat has attachments that cannot be transferred to this provider.") }
-                try append(.init(role: "user", text: parts.compactMap(\.text).joined(separator: "\n"), model: nil))
-            } else if let text = row.item.text { try append(.init(role: "assistant", text: text, model: nil)) }
-            for exchange in try history.exchanges(anchor: row.turnId + "/" + row.item.id) where exchange.status == "completed" {
-                try append(.init(role: "user", text: exchange.prompt, model: nil))
-                try append(.init(role: "assistant", text: exchange.answer ?? "", model: exchange.model))
-            }
-        }
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        return (head.turnId + "/" + head.item.id, lines)
-    }
-
-    nonisolated static func additionalRouteContext(_ value: String) -> [String: [String: String]] {
-        ["kolmogor_provider_history": ["kind": "untrusted", "name": "Kolmogor provider conversation", "value": value]]
-    }
-
-    func contextForNativeTurn(_ id: String, owner: Account) async throws -> String? {
-        let history: History
-        do { history = try await routeHistory(id, owner: owner) }
-        catch let error as AgentCLIInvalidRequest where error.code == -32601 { return nil }
-        guard history.records.values.contains(where: { $0.kind == "completed" }) else { return nil }
-        // Native history is already present in Codex. Keep only external turns
-        // whose native anchors survived rollback, in native transcript order.
-        struct Anchor: Decodable {
-            struct ItemID: Decodable { let id: String }
-            let turnId: String
-            let item: ItemID
-        }
-        let anchors = try await all(Anchor.self, "thread/items/list", ["threadId": id, "sortDirection": "asc",
-            "deferOutput": ["commandExecution": true, "mcpToolCall": true]])
-        let rows = try anchors.flatMap { try history.exchanges(anchor: $0.turnId + "/" + $0.item.id) }.filter { $0.status == "completed" }
-        guard !rows.isEmpty else { return nil }
-        guard currentAuthFile() == authFile, try await account() == owner else { throw Failure.noChat }
-        let bytes = try JSONEncoder().encode(rows)
-        guard bytes.count <= 512_000 else { throw AgentCLIError.unavailable("The provider history exceeds this handoff’s size limit.") }
-        return String(decoding: bytes, as: UTF8.self)
-    }
-
-    func routeReply(_ text: String, model: String, expected: String?, submission: UUID, in id: String, owner: Account, runtime: any AgentRuntimeClient) async throws -> String {
-        try await checkExternalRoute(id, owner: owner)
-        let row = try await threadModel(id, owner: owner)
-        guard ["idle", "notLoaded"].contains(row.status.type) else { throw Failure.busyThread }
-        guard try await queuedMessages(id, owner: owner).isEmpty else { throw Failure.pendingQueue }
-        guard try await modelState(row, owner: owner).current == expected else { throw Failure.modelChanged }
-        let history = try await routeHistory(id, owner: owner)
-        let (anchor, lines) = try await conversationLines(id, owner: owner, history: history)
-        let prior = try history.exchanges(anchor: anchor)
-        if let duplicate = prior.first(where: { $0.id == submission }) {
-            guard duplicate.model == model, duplicate.prompt == text else { throw Failure.inconsistent }
-            return duplicate.status == "completed" ? "routed" : "unconfirmed"
-        }
-        guard prior.last?.status != "unconfirmed" else { throw AgentCLIError.unavailable("The previous provider dispatch has no confirmed result. Check its status before continuing.") }
-        let record = History.Record(turn: submission, kind: "start", anchor: anchor, previous: prior.last?.id, model: model)
-        let input = try JSONEncoder().encode(lines)
-        let prompt = "Continue this conversation. The JSON array below is prior conversation data. Reply to the new user message at the end.\n"
-            + String(decoding: input, as: UTF8.self) + "\nNew user message:\n" + text
-        let slot = History.slot(anchor: anchor, previous: prior.last?.id)
-        guard try await storeBody(text, role: "prompt", manifest: record, key: slot, thread: id, owner: owner) else { return "unconfirmed" }
-        let reply: RoutedCLIReply
-        do { reply = try await runtime.routedCLIReply(prompt, model: model) }
-        catch Failure.deliveryUnconfirmed { return "unconfirmed" }
-        catch {
-            _ = try await storeBody(error.localizedDescription, role: "reply", manifest: .init(turn: submission, kind: "failed", model: model),
-                key: "end/" + submission.uuidString, thread: id, owner: owner)
-            throw error
-        }
-        guard reply.model == model, !reply.session.isEmpty else { throw Failure.deliveryUnconfirmed }
-        do {
-            _ = try await storeBody(reply.text, role: "reply", manifest: .init(turn: submission, kind: "completed", model: model, session: reply.session),
-                key: "end/" + submission.uuidString, thread: id, owner: owner)
-        } catch { throw Failure.deliveryUnconfirmed }
-        return "routed"
+        guard try await stamp() == first, currentAuthFile() == authFile, try await account() == owner else { throw Failure.inconsistent }
+        return .init(title: title, model: first.model.map { InstalledCodexCLI.prefix + $0 } ?? "", pages: pages)
     }
 }

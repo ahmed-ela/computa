@@ -28,6 +28,7 @@ actor AgentCLIConnection {
     private let process: OwnedChildProcess
     private let input: FileHandle
     private let output: FileHandle
+    private let onClose: (@Sendable () -> Void)?
     private let handler: MessageHandler
     private var reader: Task<Void, Never>?
     private var sequence = 0
@@ -35,7 +36,8 @@ actor AgentCLIConnection {
     private var requests: [Int: CheckedContinuation<Data, Error>] = [:]
 
     init(executable: URL, arguments: [String], directory: URL, environment: [String: String],
-         codexProtocol: Bool = false, reportInvalidRequests: Bool = false, handler: @escaping MessageHandler) throws {
+         codexProtocol: Bool = false, reportInvalidRequests: Bool = false, onClose: (@Sendable () -> Void)? = nil, handler: @escaping MessageHandler) throws {
+        self.onClose = onClose
         self.codexProtocol = codexProtocol
         self.reportInvalidRequests = reportInvalidRequests
         let stdin = Pipe(), stdout = Pipe()
@@ -142,6 +144,7 @@ actor AgentCLIConnection {
     func close(reason: AgentCLIError = .cancelled) async -> [String] {
         if !stopped {
             stopped = true
+            onClose?()
             let waiting = requests
             requests.removeAll()
             for continuation in waiting.values { continuation.resume(throwing: reason) }
