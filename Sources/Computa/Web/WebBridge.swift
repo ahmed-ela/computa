@@ -428,9 +428,15 @@ final class WebBridge: NSObject, WKScriptMessageHandler, WKScriptMessageHandlerW
             WorkspaceAccountWindow.shared.open()
 
         case "importChromeProfile":
-            guard Set(body.keys) == ["action"], state.presentedSheet == .settings, !state.approvalGateBlocksInteraction,
-                  let window = webView?.window, let profile = state.browserSession.workspaceProfileID,
-                  let library = ChromeProfileLibrary(profile: profile) else { return }
+            guard Set(body.keys) == ["action"], state.presentedSheet == .settings, !state.approvalGateBlocksInteraction else { return }
+            guard let window = webView?.window else {
+                state.chromeProfileImportStatus = "Reopen Settings in a Kolmogor window to import from Chrome."
+                return
+            }
+            guard let profile = state.browserSession.workspaceProfileID, let library = ChromeProfileLibrary(profile: profile) else {
+                state.chromeProfileImportStatus = "Open Settings in a window with a persistent browser profile to import from Chrome."
+                return
+            }
             Task { @MainActor in
                 await ChromeProfileImport.run(in: window, state: state, root: state.chromeImportSourceRoot,
                                               library: library, vault: .forProfile(profile))

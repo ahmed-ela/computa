@@ -1,4 +1,5 @@
 import AppKit
+import SQLite3
 import SwiftUI
 import WebKit
 import XCTest
@@ -3463,7 +3464,19 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let marks: [String: Any] = ["roots": ["bookmark_bar": ["type":"folder","children": [
             ["type": "url","name": "Migration Example","url": address.absoluteString]
         ]]]]
-        try JSONSerialization.data(withJSONObject: marks).write(to: root.appendingPathComponent("Profile 2/Bookmarks"))
+        try JSONSerialization.data(withJSONObject: marks).write(to: root.appendingPathComponent("Profile 2/AccountBookmarks"))
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Default"), withIntermediateDirectories: true)
+        try Data(#"{"profile":{"last_used":"Profile 2"}}"#.utf8).write(to: root.appendingPathComponent("Local State"))
+        var chrome: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(root.appendingPathComponent("Profile 2/History").path, &chrome), SQLITE_OK)
+        defer { sqlite3_close(chrome) }
+        let lockHistory = """
+            CREATE TABLE urls(id INTEGER PRIMARY KEY, url TEXT, title TEXT, hidden INTEGER, last_visit_time INTEGER);
+            INSERT INTO urls VALUES(1, 'https://visited.example.invalid/', 'Committed visit', 0, 15);
+            BEGIN EXCLUSIVE;
+            INSERT INTO urls VALUES(2, 'https://draft.example.invalid/', 'Uncommitted visit', 0, 16);
+            """
+        XCTAssertEqual(sqlite3_exec(chrome, lockHistory, nil, nil, nil), SQLITE_OK)
         let profile = UUID()
         let library = try XCTUnwrap(ChromeProfileLibrary(profile: profile))
         defer { try? FileManager.default.removeItem(at: library.database.deletingLastPathComponent()) }
@@ -3501,9 +3514,29 @@ final class EmbeddedBrowserPaneStateTests: XCTestCase {
         let confirm = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
             windowNumber: importSheet.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
         importSheet.sendEvent(confirm)
-        for _ in 0..<100 where state.importingChromeProfile { try await Task.sleep(for: .milliseconds(30)) }
-        XCTAssertEqual(state.chromeProfileImportStatus, "Imported or updated 0 history entries and 1 bookmark.")
-        guard window.attachedSheet == nil else { window.endSheet(importSheet); return }
+        let retryButton = "Retry History"
+        var retry: NSButton?
+        for _ in 0..<200 {
+            if let content = window.attachedSheet?.contentView {
+                retry = nativeViews(in: content).compactMap { $0 as? NSButton }.first { $0.title == retryButton }
+                if retry != nil { break }
+            }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        let retryAction = try XCTUnwrap(retry)
+        XCTAssertTrue(state.chromeProfileImportStatus?.contains("History is still pending") == true)
+        XCTAssertEqual(try library.matches("Migration Example").first?.url, address)
+        XCTAssertTrue(try library.matches("Committed visit").isEmpty)
+        XCTAssertEqual(sqlite3_exec(chrome, "ROLLBACK", nil, nil, nil), SQLITE_OK)
+        // Retrying history must not attempt to read the already-imported bookmark file again.
+        try Data("invalid".utf8).write(to: root.appendingPathComponent("Profile 2/AccountBookmarks"))
+        retryAction.performClick(nil)
+        for _ in 0..<150 where state.importingChromeProfile { try await Task.sleep(for: .milliseconds(30)) }
+        XCTAssertFalse(state.importingChromeProfile)
+        XCTAssertEqual(state.chromeProfileImportStatus, "Imported or updated 1 history entry and 1 bookmark.")
+        XCTAssertEqual(try library.matches("Committed visit").first?.title, "Committed visit")
+        XCTAssertTrue(try library.matches("Uncommitted visit").isEmpty)
+        XCTAssertNil(window.attachedSheet)
         state.presentedSheet = nil
         await settleLayout(host)
         WorkspaceTabLauncher.request(in: window)

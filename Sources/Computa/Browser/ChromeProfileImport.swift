@@ -71,13 +71,24 @@ enum ChromeProfileImport {
         return result
     }
 
+    private static func offerHistoryRetry(in window: NSWindow, summary: String) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Chrome is using its history database"
+        alert.informativeText = summary
+        alert.addButton(withTitle: "Retry History")
+        alert.addButton(withTitle: "Done").keyEquivalent = "\u{1b}"
+        return await alert.beginSheetModal(for: window) == .alertFirstButtonReturn
+    }
+
     static func run(in window: NSWindow, state: AppState, root: URL = ChromeProfileLibrary.chromeRoot,
                     library: ChromeProfileLibrary, vault: BrowserSavedLogins,
                     chooseProfile: (NSWindow, [Profile]) async -> Selection? = choose,
-                    chooseCSV: (NSWindow) async -> URL? = BrowserLoginControls.chooseCSV) async {
+                    chooseCSV: (NSWindow) async -> URL? = BrowserLoginControls.chooseCSV,
+                    retryHistory: (NSWindow, String) async -> Bool = offerHistoryRetry) async {
         func eligible() -> Bool { state.presentedSheet == .settings && !state.approvalGateBlocksInteraction }
         guard eligible(), !state.importingChromeProfile else { return }
         state.importingChromeProfile = true
+        state.chromeProfileImportStatus = nil
         defer { state.importingChromeProfile = false }
         do {
             let profiles = try await Task.detached { try ChromeProfileLibrary.profiles(in: root) }.value
@@ -89,21 +100,38 @@ enum ChromeProfileImport {
                 guard let chosen = await chooseCSV(window), eligible() else { return }
                 file = chosen
             }
+            state.chromeProfileImportStatus = "Importing the selected Chrome data…"
             let selectedFile = file
-            let summary = try await Task.detached {
-                let selected = selection.categories
-                var parts: [String] = []
-                if selected.history || selected.bookmarks {
-                    let counts = try library.importPlaces(from: selection.profile, categories: selected)
-                    parts.append(counts.summary(for: selected))
-                }
+            let selected = selection.categories
+            let (initialCounts, passwords) = try await Task.detached {
+                let counts = try library.importPlaces(from: selection.profile, categories: selected)
+                var passwords: String?
                 if let file = selectedFile {
-                    do { parts.append(try vault.importCSV(at: file).summary) }
-                    catch { parts.append((error as? BrowserSavedLogins.Failure ?? .file).localizedDescription) }
+                    do { passwords = try vault.importCSV(at: file).summary }
+                    catch { passwords = (error as? BrowserSavedLogins.Failure ?? .file).localizedDescription }
                 }
-                return parts.joined(separator: " ")
+                return (counts, passwords)
             }.value
-            state.chromeProfileImportStatus = summary
+            var counts = initialCounts
+            while true {
+                let places = counts.summary(for: selected)
+                let summary = [places, passwords].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+                state.chromeProfileImportStatus = summary
+                guard counts.historyBusy, eligible(), await retryHistory(window, summary), eligible() else { return }
+                // Chrome can retain the lock after its last window closes. Each retry is user initiated.
+                do {
+                    let history = try await Task.detached {
+                        try library.importPlaces(from: selection.profile, categories: .init(history: true, bookmarks: false))
+                    }.value
+                    counts.history = history.history
+                    counts.historyBusy = history.historyBusy
+                } catch {
+                    let saved = counts.summary(for: .init(history: false, bookmarks: selected.bookmarks))
+                    let reason = (error as? ChromeProfileLibrary.Failure ?? .read).localizedDescription
+                    state.chromeProfileImportStatus = [saved, passwords, reason].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+                    return
+                }
+            }
         } catch {
             state.chromeProfileImportStatus = (error as? ChromeProfileLibrary.Failure ?? .read).localizedDescription
         }
